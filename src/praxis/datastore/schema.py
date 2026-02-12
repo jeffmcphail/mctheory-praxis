@@ -608,6 +608,142 @@ CREATE TABLE IF NOT EXISTS fact_price_daily (
 """
 
 # ═══════════════════════════════════════════════════════════════════
+#  dim_calendar — §2.4, §2.7
+#  Business day calendar per exchange. Used for ved_ expansion
+#  and gap detection.
+# ═══════════════════════════════════════════════════════════════════
+
+DIM_CALENDAR = """
+CREATE TABLE IF NOT EXISTS dim_calendar (
+    calendar_date DATE NOT NULL,
+    exchange_code VARCHAR NOT NULL DEFAULT 'NYSE',
+
+    year INTEGER,
+    quarter INTEGER,
+    month INTEGER,
+    day_of_week INTEGER,           -- 0=Monday, 6=Sunday
+    day_name VARCHAR,
+    is_business_day BOOLEAN,
+    is_holiday BOOLEAN DEFAULT FALSE,
+    holiday_name VARCHAR,
+
+    PRIMARY KEY (calendar_date, exchange_code)
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
+#  fact_data_quality — §4.3
+#  Quality metrics stored per load batch.
+# ═══════════════════════════════════════════════════════════════════
+
+FACT_DATA_QUALITY = """
+CREATE TABLE IF NOT EXISTS fact_data_quality (
+    batch_id VARCHAR PRIMARY KEY,
+    source VARCHAR NOT NULL,
+    load_timestamp TIMESTAMP NOT NULL,
+
+    records_received INTEGER,
+    records_accepted INTEGER,
+    records_rejected INTEGER,
+    records_flagged INTEGER,
+
+    quality_score DOUBLE,
+
+    validation_details STRUCT(
+        null_count INTEGER,
+        range_violations INTEGER,
+        outliers_detected INTEGER,
+        gaps_detected INTEGER
+    ),
+
+    reconciliation_details STRUCT(
+        sources_compared VARCHAR[],
+        price_divergences INTEGER,
+        volume_divergences INTEGER,
+        max_price_delta DOUBLE
+    )
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
+#  dim_classification_core — §15.3
+#  Platform's operational taxonomy. Minimal, functional.
+# ═══════════════════════════════════════════════════════════════════
+
+DIM_CLASSIFICATION_CORE = """
+CREATE TABLE IF NOT EXISTS dim_classification_core (
+    class_hist_id TIMESTAMP PRIMARY KEY,
+    class_base_id BIGINT NOT NULL,
+    class_bpk VARCHAR NOT NULL,
+    security_base_id BIGINT NOT NULL,
+
+    asset_class VARCHAR NOT NULL,
+    instrument_type VARCHAR NOT NULL,
+    settlement_type VARCHAR,
+    derivative_underlier_type VARCHAR,
+    is_otc BOOLEAN DEFAULT FALSE,
+
+    created_by VARCHAR
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
+#  dim_classification_external — §15.4
+#  Vendor taxonomies (GICS, ICB, ratings, etc.)
+# ═══════════════════════════════════════════════════════════════════
+
+DIM_CLASSIFICATION_EXTERNAL = """
+CREATE TABLE IF NOT EXISTS dim_classification_external (
+    ext_class_hist_id TIMESTAMP PRIMARY KEY,
+    ext_class_base_id BIGINT NOT NULL,
+    ext_class_bpk VARCHAR NOT NULL,
+    security_base_id BIGINT NOT NULL,
+
+    classification_system VARCHAR NOT NULL,
+    classification_version VARCHAR,
+
+    level_1 VARCHAR,
+    level_2 VARCHAR,
+    level_3 VARCHAR,
+    level_4 VARCHAR,
+    level_5 VARCHAR,
+
+    raw_code VARCHAR,
+    source VARCHAR,
+    confidence VARCHAR DEFAULT 'HIGH',
+
+    created_by VARCHAR
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
+#  dim_classification_mapping — §15.5
+#  Bridge: external vendor codes → core platform classifications
+# ═══════════════════════════════════════════════════════════════════
+
+DIM_CLASSIFICATION_MAPPING = """
+CREATE TABLE IF NOT EXISTS dim_classification_mapping (
+    mapping_hist_id TIMESTAMP PRIMARY KEY,
+    mapping_base_id BIGINT NOT NULL,
+    mapping_bpk VARCHAR NOT NULL,
+
+    classification_system VARCHAR NOT NULL,
+    external_level_1 VARCHAR,
+    external_level_2 VARCHAR,
+    external_level_3 VARCHAR,
+    external_raw_code VARCHAR,
+
+    core_asset_class VARCHAR NOT NULL,
+    core_instrument_type VARCHAR NOT NULL,
+
+    mapping_method VARCHAR,
+    confirmed BOOLEAN DEFAULT FALSE,
+    confirmed_by VARCHAR,
+    confirmed_timestamp TIMESTAMP
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
 #  Ordered lists for initialization
 # ═══════════════════════════════════════════════════════════════════
 
@@ -615,13 +751,18 @@ ALL_TABLES = [
     ("dim_security", DIM_SECURITY),
     ("dim_security_identifier_audit", DIM_SECURITY_IDENTIFIER_AUDIT),
     ("dim_security_exchange", DIM_SECURITY_EXCHANGE),
+    ("dim_calendar", DIM_CALENDAR),
+    ("dim_classification_core", DIM_CLASSIFICATION_CORE),
+    ("dim_classification_external", DIM_CLASSIFICATION_EXTERNAL),
+    ("dim_classification_mapping", DIM_CLASSIFICATION_MAPPING),
     ("conflict_queue", CONFLICT_QUEUE),
     ("fact_model_definition", FACT_MODEL_DEFINITION),
     ("fact_backtest_run", FACT_BACKTEST_RUN),
     ("fact_log", FACT_LOG),
+    ("fact_data_quality", FACT_DATA_QUALITY),
+    ("fact_price_daily", FACT_PRICE_DAILY),
     ("ldr_yfinance", LDR_YFINANCE),
     ("ldr_yfinance_hist", LDR_YFINANCE_HIST),
-    ("fact_price_daily", FACT_PRICE_DAILY),
 ]
 
 ALL_INDEXES = [
