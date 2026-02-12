@@ -93,7 +93,7 @@ class TestTableCreation:
     def test_initialize_returns_counts(self, db):
         # Already initialized in fixture; re-init is idempotent (IF NOT EXISTS)
         result = db.initialize()
-        assert result["tables"] == 4
+        assert result["tables"] == 7
         assert result["views"] == 5
 
     def test_mode_property(self, db, ephemeral_db):

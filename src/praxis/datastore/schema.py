@@ -62,6 +62,76 @@ CREATE TABLE IF NOT EXISTS dim_security (
 """
 
 # ═══════════════════════════════════════════════════════════════════
+#  dim_security_identifier_audit — §3.4
+#  Tracks which source provided which identifier, when.
+#  NOT used in operational queries — admin/audit only.
+# ═══════════════════════════════════════════════════════════════════
+
+DIM_SECURITY_IDENTIFIER_AUDIT = """
+CREATE TABLE IF NOT EXISTS dim_security_identifier_audit (
+    audit_hist_id TIMESTAMP PRIMARY KEY,
+    audit_base_id BIGINT NOT NULL,
+    audit_bpk VARCHAR NOT NULL,
+
+    security_base_id BIGINT NOT NULL,
+    secid_type VARCHAR NOT NULL,
+    secid_value VARCHAR NOT NULL,
+    source VARCHAR NOT NULL,
+    confidence VARCHAR DEFAULT 'HIGH'
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
+#  dim_security_exchange — §3.5
+#  Exchange-specific attributes (ticker, SEDOL, RIC vary by exchange)
+# ═══════════════════════════════════════════════════════════════════
+
+DIM_SECURITY_EXCHANGE = """
+CREATE TABLE IF NOT EXISTS dim_security_exchange (
+    sec_exch_hist_id TIMESTAMP PRIMARY KEY,
+    sec_exch_base_id BIGINT NOT NULL,
+    sec_exch_bpk VARCHAR NOT NULL,
+
+    security_base_id BIGINT NOT NULL,
+    exchange_code VARCHAR NOT NULL,
+
+    local_ticker VARCHAR,
+    local_sedol VARCHAR,
+    local_ric VARCHAR,
+    is_primary_exchange BOOLEAN DEFAULT FALSE,
+
+    lot_size INTEGER,
+    tick_size DOUBLE,
+    trading_hours VARCHAR,
+    settlement_cycle VARCHAR
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
+#  conflict_queue — §3.6
+#  Holds identifier conflicts for manual or auto resolution.
+# ═══════════════════════════════════════════════════════════════════
+
+CONFLICT_QUEUE = """
+CREATE TABLE IF NOT EXISTS conflict_queue (
+    conflict_id BIGINT PRIMARY KEY,
+    created_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    security_base_id BIGINT,
+    source VARCHAR NOT NULL,
+    batch_id VARCHAR NOT NULL,
+
+    conflict_type VARCHAR NOT NULL,
+    conflict_detail JSON,
+
+    resolution_status VARCHAR DEFAULT 'OPEN',
+    resolution_action VARCHAR,
+    resolved_by VARCHAR,
+    resolved_timestamp TIMESTAMP
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
 #  fact_model_definition — §6.1
 #  Full STRUCT schema (validated by Spike 2)
 #  Phase 1 uses only signal_params, entry_params, exit_params,
@@ -464,6 +534,9 @@ JOIN vew_model_definition md ON bt.model_def_base_id = md.model_def_base_id;
 
 ALL_TABLES = [
     ("dim_security", DIM_SECURITY),
+    ("dim_security_identifier_audit", DIM_SECURITY_IDENTIFIER_AUDIT),
+    ("dim_security_exchange", DIM_SECURITY_EXCHANGE),
+    ("conflict_queue", CONFLICT_QUEUE),
     ("fact_model_definition", FACT_MODEL_DEFINITION),
     ("fact_backtest_run", FACT_BACKTEST_RUN),
     ("fact_log", FACT_LOG),
