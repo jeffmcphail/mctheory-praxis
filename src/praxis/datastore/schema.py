@@ -744,6 +744,41 @@ CREATE TABLE IF NOT EXISTS dim_classification_mapping (
 """
 
 # ═══════════════════════════════════════════════════════════════════
+#  dim_model_state — §19.2
+#  Model lifecycle state machine. Temporal dimension.
+#  DRAFT → ACTIVE → PAUSED → RETIRED
+# ═══════════════════════════════════════════════════════════════════
+
+DIM_MODEL_STATE = """
+CREATE TABLE IF NOT EXISTS dim_model_state (
+    model_state_hist_id TIMESTAMP PRIMARY KEY,
+    model_state_base_id BIGINT NOT NULL,
+    model_state_bpk VARCHAR NOT NULL,
+
+    state VARCHAR NOT NULL,
+
+    operational_start DATE,
+    operational_end DATE,
+    priority INTEGER DEFAULT 50,
+
+    data_frequency VARCHAR,
+    data_lookback_periods INTEGER,
+    signal_schedule VARCHAR,
+    execution_mode VARCHAR,
+
+    estimated_runtime_seconds INTEGER,
+    memory_requirement_mb INTEGER,
+    gpu_required BOOLEAN DEFAULT FALSE,
+
+    depends_on_models VARCHAR[],
+    depends_on_data VARCHAR[],
+
+    changed_by VARCHAR,
+    change_reason VARCHAR
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
 #  Ordered lists for initialization
 # ═══════════════════════════════════════════════════════════════════
 
@@ -761,6 +796,7 @@ ALL_TABLES = [
     ("fact_log", FACT_LOG),
     ("fact_data_quality", FACT_DATA_QUALITY),
     ("fact_price_daily", FACT_PRICE_DAILY),
+    ("dim_model_state", DIM_MODEL_STATE),
     ("ldr_yfinance", LDR_YFINANCE),
     ("ldr_yfinance_hist", LDR_YFINANCE_HIST),
 ]
