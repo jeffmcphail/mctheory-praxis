@@ -21,6 +21,7 @@ from typing import Any, Optional
 import polars as pl
 
 from praxis.config import ModelConfig, ModelType
+from praxis.backtest import VectorizedEngine
 from praxis.logger.core import PraxisLogger
 from praxis.registry import FunctionRegistry
 from praxis.registry.defaults import register_defaults
@@ -133,13 +134,16 @@ class SimpleExecutor(Executor):
                 tags={"executor", "trade_cycle"},
             )
 
-            # ── 5. Backtest engine (Phase 1.7) ────────────────────
-            # Placeholder: metrics populated by backtest engine later
+            # ── 5. Run backtest engine ─────────────────────────────
+            engine = VectorizedEngine()
+            bt_output = engine.run(positions, prices["close"])
+
             return ExecutionResult(
                 config=config,
                 signals=signals,
                 positions=positions,
                 prices=prices,
+                metrics=bt_output.metrics.to_dict(),
                 success=True,
             )
 
