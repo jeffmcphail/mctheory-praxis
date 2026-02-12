@@ -1,0 +1,30 @@
+# ═══════════════════════════════════════════════════════════════════
+#  McTheory Praxis — Milestone 1 Validation
+#  sma_crossover.yaml
+#
+#  Run with synthetic data:
+#    python -m praxis.runner examples/sma_crossover.yaml --synthetic 252
+#
+#  Run with real data (requires yfinance):
+#    python -m praxis.runner examples/sma_crossover.yaml --ticker AAPL --start 2023-01-01
+#
+#  Run with CSV:
+#    python -m praxis.runner examples/sma_crossover.yaml --prices data.csv
+# ═══════════════════════════════════════════════════════════════════
+
+model:
+  name: sma_crossover
+  type: SingleAssetModel
+  version: v1.0
+
+signal:
+  method: sma_crossover
+  fast_period: 10
+  slow_period: 50
+
+sizing:
+  method: fixed_fraction
+  fraction: 1.0
+
+backtest:
+  engine: vectorized

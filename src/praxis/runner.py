@@ -23,6 +23,7 @@ from typing import Optional
 import polars as pl
 
 from praxis.config import ModelConfig, PlatformMode
+from praxis.data import fetch_prices, generate_synthetic_prices, PriceData
 from praxis.executor import ExecutionResult, get_executor
 from praxis.logger.core import PraxisLogger
 from praxis.registry import FunctionRegistry
@@ -121,10 +122,37 @@ class PraxisRunner:
 
         return result
 
+    def run_with_fetch(
+        self,
+        config: ModelConfig,
+        tickers: str | list[str],
+        start: str | None = None,
+        end: str | None = None,
+    ) -> ExecutionResult:
+        """
+        Run with automatic data fetching.
+
+        Args:
+            config: Validated ModelConfig.
+            tickers: Ticker(s) to fetch.
+            start: Start date (ISO string).
+            end: End date (ISO string).
+
+        Returns:
+            ExecutionResult with signals, positions, metrics.
+        """
+        prices = fetch_prices(tickers, start=start, end=end)
+        return self.run_config(config, prices)
+
 
 def run_cli(args: list[str] | None = None) -> int:
     """
     CLI entry point for `praxis run <config.yaml>`.
+
+    Usage:
+        praxis run config.yaml --prices data.csv
+        praxis run config.yaml --ticker AAPL --start 2023-01-01
+        praxis run config.yaml --synthetic 252
 
     Returns exit code (0 = success, 1 = error).
     """
@@ -132,7 +160,8 @@ def run_cli(args: list[str] | None = None) -> int:
         args = sys.argv[1:]
 
     if len(args) < 1:
-        print("Usage: praxis run <config.yaml> [--prices <prices.csv>]")
+        print("Usage: praxis run <config.yaml> [--prices <file.csv>] "
+              "[--ticker <SYM>] [--synthetic <bars>]")
         return 1
 
     yaml_path = Path(args[0])
@@ -140,30 +169,58 @@ def run_cli(args: list[str] | None = None) -> int:
         print(f"Error: Config file not found: {yaml_path}")
         return 1
 
-    # Price data source
-    prices_path = None
+    config = ModelConfig.from_yaml(yaml_path)
+
+    # Determine data source
+    prices = None
+
     if "--prices" in args:
         idx = args.index("--prices")
         if idx + 1 < len(args):
             prices_path = Path(args[idx + 1])
+            if prices_path.exists():
+                prices = pl.read_csv(str(prices_path))
+            else:
+                print(f"Error: Prices file not found: {prices_path}")
+                return 1
 
-    if prices_path and prices_path.exists():
-        prices = pl.read_csv(prices_path)
-    else:
-        print("Error: Price data required. Use --prices <file.csv>")
+    elif "--ticker" in args:
+        idx = args.index("--ticker")
+        if idx + 1 < len(args):
+            ticker = args[idx + 1]
+            start = None
+            end = None
+            if "--start" in args:
+                start = args[args.index("--start") + 1]
+            if "--end" in args:
+                end = args[args.index("--end") + 1]
+            prices = fetch_prices(ticker, start=start, end=end)
+
+    elif "--synthetic" in args:
+        idx = args.index("--synthetic")
+        n_bars = 252
+        if idx + 1 < len(args):
+            try:
+                n_bars = int(args[idx + 1])
+            except ValueError:
+                pass
+        prices = generate_synthetic_prices(n_bars=n_bars, seed=42)
+
+    if prices is None:
+        print("Error: Data source required. Use --prices, --ticker, or --synthetic")
         return 1
 
     runner = PraxisRunner()
-    result = runner.run_config(
-        ModelConfig.from_yaml(yaml_path),
-        prices,
-    )
+    result = runner.run_config(config, prices)
 
     if result.success:
         print(f"✓ Model '{result.config.model.name}' completed")
         if result.metrics:
             for k, v in result.metrics.items():
-                print(f"  {k}: {v}")
+                if isinstance(v, float):
+                    print(f"  {k}: {v:.4f}")
+                else:
+                    print(f"  {k}: {v}")
         return 0
     else:
         print(f"✗ Model '{result.config.model.name}' failed: {result.error}")
