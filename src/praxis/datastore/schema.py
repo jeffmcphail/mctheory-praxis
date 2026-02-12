@@ -529,6 +529,85 @@ JOIN vew_model_definition md ON bt.model_def_base_id = md.model_def_base_id;
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  ldr_yfinance — §2.6 Loader working table
+#  Wiped after each batch. Safety check: never wipe until all
+#  records have terminal process_status.
+# ═══════════════════════════════════════════════════════════════════
+
+LDR_YFINANCE = """
+CREATE TABLE IF NOT EXISTS ldr_yfinance (
+    load_id BIGINT PRIMARY KEY,
+    load_timestamp TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+
+    -- Source fields
+    symbol VARCHAR NOT NULL,
+    date DATE,
+    open DOUBLE,
+    high DOUBLE,
+    low DOUBLE,
+    close DOUBLE,
+    adj_close DOUBLE,
+    volume BIGINT,
+
+    -- Processing outcome
+    security_base_id BIGINT,
+    process_status VARCHAR,
+    reject_reason VARCHAR
+);
+"""
+
+LDR_YFINANCE_HIST = """
+CREATE TABLE IF NOT EXISTS ldr_yfinance_hist (
+    load_id BIGINT NOT NULL,
+    load_timestamp TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+
+    symbol VARCHAR NOT NULL,
+    date DATE,
+    open DOUBLE,
+    high DOUBLE,
+    low DOUBLE,
+    close DOUBLE,
+    adj_close DOUBLE,
+    volume BIGINT,
+
+    security_base_id BIGINT,
+    process_status VARCHAR,
+    reject_reason VARCHAR,
+
+    archived_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
+#  fact_price_daily — §2.11
+#  OHLCV daily prices, FK to dim_security.
+# ═══════════════════════════════════════════════════════════════════
+
+FACT_PRICE_DAILY = """
+CREATE TABLE IF NOT EXISTS fact_price_daily (
+    price_hist_id TIMESTAMP PRIMARY KEY,
+    price_base_id BIGINT NOT NULL,
+    price_bpk VARCHAR NOT NULL,
+
+    security_base_id BIGINT NOT NULL,
+    trade_date DATE NOT NULL,
+
+    open DOUBLE,
+    high DOUBLE,
+    low DOUBLE,
+    close DOUBLE,
+    adj_close DOUBLE,
+    volume BIGINT,
+
+    source VARCHAR,
+    batch_id VARCHAR,
+    created_by VARCHAR
+);
+"""
+
+# ═══════════════════════════════════════════════════════════════════
 #  Ordered lists for initialization
 # ═══════════════════════════════════════════════════════════════════
 
@@ -540,6 +619,9 @@ ALL_TABLES = [
     ("fact_model_definition", FACT_MODEL_DEFINITION),
     ("fact_backtest_run", FACT_BACKTEST_RUN),
     ("fact_log", FACT_LOG),
+    ("ldr_yfinance", LDR_YFINANCE),
+    ("ldr_yfinance_hist", LDR_YFINANCE_HIST),
+    ("fact_price_daily", FACT_PRICE_DAILY),
 ]
 
 ALL_INDEXES = [
