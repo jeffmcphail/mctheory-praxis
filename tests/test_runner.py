@@ -152,12 +152,12 @@ class TestExecutorDispatch:
         executor = get_executor(sma_config, registry)
         assert isinstance(executor, SimpleExecutor)
 
-    def test_unsupported_model_type_raises(self, registry):
+    def test_cpo_model_dispatches(self, registry):
         config = ModelConfig.from_dict({
             "model": {"name": "cpo_test", "type": "CPOModel"},
         })
-        with pytest.raises(ValueError, match="No executor.*CPOModel"):
-            get_executor(config, registry)
+        executor = get_executor(config, registry)
+        assert type(executor).__name__ == "CPOExecutor"
 
     def test_pair_model_not_yet_supported(self, registry):
         config = ModelConfig.from_dict({

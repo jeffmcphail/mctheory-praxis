@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import numpy as np
 import polars as pl
 
 from praxis.config import ModelConfig, ModelType
@@ -160,16 +161,128 @@ class SimpleExecutor(Executor):
             )
 
 
+class CPOExecutor(Executor):
+    """
+    §7.3: CPOModel executor (Phase 3.7).
+
+    Pipeline:
+    1. Generate training data: sweep params over historical windows
+    2. Fit CPO predictor (RandomForest)
+    3. Predict best params for current period
+    4. Execute single-leg with predicted params
+    5. Backtest and return metrics
+    """
+
+    def __init__(self, registry: FunctionRegistry | None = None):
+        self._registry = registry or FunctionRegistry.instance()
+        self._log = PraxisLogger.instance()
+
+    def execute(self, config: ModelConfig, prices: pl.DataFrame) -> ExecutionResult:
+        self._log.info(
+            f"CPOExecutor: running '{config.model.name}'",
+            tags={"executor", "trade_cycle", "compute.cpo"},
+        )
+
+        try:
+            from praxis.cpo import (
+                CPOPredictor, execute_single_leg, generate_training_data,
+            )
+
+            cpo_cfg = config.cpo
+            if cpo_cfg is None:
+                return ExecutionResult(
+                    config=config, success=False,
+                    error="CPOModel requires 'cpo' config section",
+                )
+
+            # Extract arrays
+            close_a = prices[config.cpo.features.get("close_a", "close")].to_numpy().astype(float)
+            open_a = prices[config.cpo.features.get("open_a", "open")].to_numpy().astype(float) if "open" in prices.columns else close_a.copy()
+            close_b_col = config.cpo.features.get("close_b", None)
+            if close_b_col and close_b_col in prices.columns:
+                close_b = prices[close_b_col].to_numpy().astype(float)
+            else:
+                close_b = np.zeros_like(close_a)
+
+            # Param grid from config
+            param_grid = {}
+            if cpo_cfg.parameter_grid:
+                for pg in cpo_cfg.parameter_grid:
+                    param_grid.update(pg)
+
+            # Generate training data over first portion
+            n = len(close_a)
+            train_end = int(n * 0.8)
+            dates = np.arange(100, train_end, 50)
+
+            training = generate_training_data(
+                close_a[:train_end], open_a[:train_end], close_b[:train_end],
+                dates, param_grid,
+            )
+
+            if training.count < 10:
+                return ExecutionResult(
+                    config=config, success=False,
+                    error=f"Insufficient training data: {training.count} rows",
+                )
+
+            # Fit predictor
+            df = training.to_polars()
+            predictor = CPOPredictor(
+                n_estimators=cpo_cfg.model.get("n_estimators", 100) if cpo_cfg.model else 100,
+                random_state=42,
+            )
+            metrics = predictor.fit(df)
+
+            # Predict best params
+            candidates = df.select(["weight", "entry_threshold", "lookback"]).unique()
+            prediction = predictor.predict_best_params(candidates)
+
+            # Execute on test portion
+            best = prediction.predicted_params
+            best["exit_threshold_fraction"] = -0.6
+            slr = execute_single_leg(
+                close_a[train_end:], open_a[train_end:], close_b[train_end:],
+                {k: (int(v) if k == "lookback" else v) for k, v in best.items()},
+            )
+
+            return ExecutionResult(
+                config=config,
+                signals=pl.Series("signal", slr.positions.astype(int)),
+                positions=pl.Series("positions", slr.positions),
+                prices=prices,
+                metrics={
+                    "sharpe_ratio": slr.sharpe_ratio,
+                    "daily_return": slr.daily_return,
+                    "annualized_return": slr.annualized_return,
+                    "volatility": slr.volatility,
+                    "num_trades": slr.num_trades,
+                    "predicted_sharpe": prediction.predicted_sharpe,
+                    "predicted_params": prediction.predicted_params,
+                    "training_rows": training.count,
+                    "mse_test": metrics.get("mse_test", 0),
+                },
+                success=True,
+            )
+
+        except Exception as e:
+            self._log.error(
+                f"CPOExecutor failed: {e}",
+                tags={"executor", "trade_cycle", "compute.cpo"},
+            )
+            return ExecutionResult(config=config, success=False, error=str(e))
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Executor Dispatch (§7.3 step 3)
 # ═══════════════════════════════════════════════════════════════════
 
 _EXECUTOR_MAP: dict[ModelType, type[Executor]] = {
     ModelType.SINGLE_ASSET: SimpleExecutor,
-    # Phase 2+:
+    ModelType.CPO: CPOExecutor,
+    # Phase 3+:
     # ModelType.PAIR: PairExecutor,
     # ModelType.COMPOSITE: CompositeExecutor,
-    # ModelType.CPO: CPOExecutor,
     # ModelType.ML: MLExecutor,
 }
 
