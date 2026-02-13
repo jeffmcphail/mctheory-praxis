@@ -315,8 +315,8 @@ def half_life(series: np.ndarray) -> HalfLifeResult:
     x_centered = x - x_mean
     beta = np.dot(x_centered, y) / np.dot(x_centered, x_centered)
 
-    if beta >= 0:
-        # Not mean-reverting
+    if beta >= 0 or beta <= -1:
+        # Not mean-reverting or divergent
         return HalfLifeResult(half_life=float("inf"), beta=float(beta))
 
     hl = -np.log(2) / np.log(1 + beta)
