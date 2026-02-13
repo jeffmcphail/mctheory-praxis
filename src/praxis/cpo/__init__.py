@@ -84,27 +84,16 @@ def execute_single_leg(
         zs = np.where(ema_std > 0, (spread - ema_mean) / ema_std, 0.0)
 
     # ── Position signals (matching original exactly) ──────────
+    # Original: positions initialized to 0, set by thresholds.
+    # df.ffill() is a no-op since positions are 0 (not NaN).
+    # Conditions applied in order — later ones override earlier.
     pos_long = np.zeros(n)
     pos_short = np.zeros(n)
 
     pos_short[zs >= entry_threshold] = -1
     pos_long[zs <= -entry_threshold] = 1
-    pos_short[zs <= exit_threshold] = 0
-    pos_long[zs >= -exit_threshold] = 0
-
-    # Forward-fill (pandas ffill equivalent)
-    # The original code uses DataFrame.ffill() which carries forward
-    # ALL columns including position columns
-    for i in range(1, n):
-        if pos_long[i] == 0 and zs[i] < -entry_threshold:
-            pos_long[i] = 1
-        elif pos_long[i] == 0 and pos_long[i - 1] == 1 and zs[i] < -exit_threshold:
-            pos_long[i] = 1
-
-        if pos_short[i] == 0 and zs[i] > entry_threshold:
-            pos_short[i] = -1
-        elif pos_short[i] == 0 and pos_short[i - 1] == -1 and zs[i] > exit_threshold:
-            pos_short[i] = -1
+    pos_short[zs <= exit_threshold] = 0  # exit short
+    pos_long[zs >= -exit_threshold] = 0  # exit long
 
     positions = pos_long + pos_short
 

@@ -43,6 +43,7 @@ class Schedule:
     action: str
     params: dict[str, Any] = field(default_factory=dict)
     enabled: bool = True
+    priority: int = 50
     last_run: datetime | None = None
     run_count: int = 0
 

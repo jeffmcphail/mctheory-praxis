@@ -182,18 +182,34 @@ def _ewm_mean(data: np.ndarray, span: int) -> np.ndarray:
 def _ewm_std(data: np.ndarray, span: int) -> np.ndarray:
     """
     Exponential weighted std matching pandas ewm(span=N, adjust=False).std().
+
+    Computes biased EWM variance then applies Bessel-like bias correction:
+        correction = 1 / (1 - V2)
+    where V2 = sum of squared effective weights, tracked recursively:
+        V2_{t+1} = (1-alpha)^2 * V2_t + alpha^2,  V2_0 = 1.0
     """
     alpha = 2.0 / (span + 1)
     n = len(data)
     mean = _ewm_mean(data, span)
     result = np.zeros(n)
 
-    # Recursive variance: var_t = (1-alpha) * (var_{t-1} + alpha * (x_t - mean_{t-1})^2)
-    var = 0.0
+    # Recursive biased variance + bias correction
+    var_biased = 0.0
+    sum_wt2 = 1.0  # V2_0 = 1.0 (single observation has weight 1)
+
     for i in range(1, n):
         diff = data[i] - mean[i - 1]
-        var = (1 - alpha) * (var + alpha * diff * diff)
-        result[i] = np.sqrt(var) if var > 0 else 0.0
+        var_biased = (1 - alpha) * (var_biased + alpha * diff * diff)
+
+        # Update sum of squared weights
+        sum_wt2 = (1 - alpha) ** 2 * sum_wt2 + alpha ** 2
+
+        # Bias correction: V1=1 always for adjust=False, so correction = 1/(1-V2)
+        denom = 1.0 - sum_wt2
+        if denom > 0 and var_biased > 0:
+            result[i] = np.sqrt(var_biased / denom)
+        else:
+            result[i] = 0.0
 
     return result
 
