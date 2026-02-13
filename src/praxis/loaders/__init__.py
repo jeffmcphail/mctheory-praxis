@@ -368,6 +368,7 @@ class YFinanceLoader:
             symbol, trade_date, open_, high, low, close, adj_close, volume, sec_base_id = row
             price_bpk = f"{sec_base_id}|{trade_date}"
             keys = EntityKeys.create(price_bpk)
+            time.sleep(0.000001)  # Ensure unique hist_id timestamps
 
             try:
                 self._conn.execute("""
