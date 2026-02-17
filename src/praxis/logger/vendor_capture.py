@@ -58,9 +58,9 @@ from praxis.logger.formatters import LogFormatter, CompactFormatter
 
 CAPTURE_TAG = "vendor_raw_capture"
 
-CALL_START = "╔══VENDOR_CALL══════════════════════════════════════════"
-PAYLOAD_DELIM = "╠══RAW_PAYLOAD══════════════════════════════════════════"
-CALL_END = "╚══END_CALL═════════════════════════════════════════════"
+CALL_START = "+==VENDOR_CALL======================================================"
+PAYLOAD_DELIM = "|==RAW_PAYLOAD======================================================"
+CALL_END = "+==END_CALL========================================================"
 
 DEFAULT_CAPTURE_DIR = "logs/vendor_captures"
 

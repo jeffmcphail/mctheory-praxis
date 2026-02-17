@@ -14,7 +14,7 @@ Key semantics:
     _hist_id: TIMESTAMP Record creation timestamp — IS the primary key AND creation time
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import xxhash
@@ -56,12 +56,16 @@ def generate_hist_id(timestamp: Optional[datetime] = None) -> datetime:
     primary key AND 'when was this record created.' There is NO separate
     created_timestamp column on any dimension table.
     
+    Uses a monotonic counter to guarantee uniqueness even when
+    multiple records are created within the same clock tick
+    (common on Windows where timer resolution is ~15.6ms).
+    
     Args:
         timestamp: Explicit timestamp (for testing/replay). 
                    If None, uses current UTC time with microsecond precision.
                    
     Returns:
-        UTC datetime with microsecond precision.
+        UTC datetime with microsecond precision, guaranteed unique.
     """
     if timestamp is not None:
         # Ensure UTC
@@ -69,7 +73,16 @@ def generate_hist_id(timestamp: Optional[datetime] = None) -> datetime:
             return timestamp.replace(tzinfo=timezone.utc)
         return timestamp.astimezone(timezone.utc)
     
-    return datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    
+    # Ensure monotonically increasing: if clock hasn't advanced since
+    # last call, bump by 1 microsecond from the previous value.
+    last = getattr(generate_hist_id, "_last", None)
+    if last is not None and now <= last:
+        now = last + timedelta(microseconds=1)
+    generate_hist_id._last = now
+    
+    return now
 
 
 def validate_bpk(bpk: str, entity_type: str = "") -> bool:

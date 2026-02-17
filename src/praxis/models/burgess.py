@@ -576,3 +576,610 @@ def build_burgess_workflow(
     ))
 
     return wf
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Composite Statistical Score
+# ═══════════════════════════════════════════════════════════════════
+#
+#  Normalizes all test statistics to a common [0, 1] scale via
+#  percentile rank against the null surface, then combines them
+#  with configurable weights.
+#
+#  The key insight: the empirical p-value from the MC surface IS
+#  the natural normalization. A p-value of 0.01 means "only 1% of
+#  null (data-mined) residuals were this extreme." Converting to
+#  a score: score = 1 - p_value, so p=0.01 → score=0.99.
+#
+#  This works regardless of the raw statistic's scale (ADF t-values
+#  are negative, Hurst is [0,1], Mahalanobis is positive, etc.)
+#  because we're comparing against each test's own null distribution.
+# ═══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class StatScore:
+    """Single test statistic with its raw value and normalized score."""
+    name: str
+    raw_value: float
+    p_value: float          # Empirical p-value from MC surface
+    score: float            # 1 - p_value → [0, 1], higher = more significant
+    tail: str = "left"      # "left" or "right" — which tail indicates significance
+
+    @property
+    def is_significant(self, alpha: float = 0.05) -> bool:
+        return self.p_value < alpha
+
+
+@dataclass
+class CompositeStatReport:
+    """
+    Full statistical assessment of a candidate basket.
+
+    Contains individual test scores, the weighted composite,
+    and optionally the raw VR profile artifact for LLM analysis.
+    """
+    individual_scores: dict[str, StatScore] = field(default_factory=dict)
+    composite_score: float = 0.0
+    weights_used: dict[str, float] = field(default_factory=dict)
+
+    # Optional: VR profile data for qualitative analysis
+    vr_profile: np.ndarray | None = None
+    vr_artifact: Any = None  # ProfileArtifact if available
+
+    @property
+    def n_significant(self) -> int:
+        """Number of tests significant at 5%."""
+        return sum(1 for s in self.individual_scores.values() if s.p_value < 0.05)
+
+    @property
+    def n_tests(self) -> int:
+        return len(self.individual_scores)
+
+    def summary(self) -> str:
+        """Human-readable summary for logging or LLM context."""
+        lines = [f"Composite Score: {self.composite_score:.4f} ({self.n_significant}/{self.n_tests} significant at 5%)"]
+        for name, sc in sorted(self.individual_scores.items(), key=lambda x: -x[1].score):
+            sig = "✓" if sc.p_value < 0.05 else "·"
+            lines.append(f"  {sig} {name:25s}: raw={sc.raw_value:10.4f}  p={sc.p_value:.4f}  score={sc.score:.4f}  weight={self.weights_used.get(name, 0):.3f}")
+        return "\n".join(lines)
+
+
+@dataclass
+class ScoreWeights:
+    """
+    Configurable weights for combining test statistics.
+
+    Defaults to equal weighting. In practice, optimize these
+    per (asset_class, timescale, universe_size, history_length)
+    via backtesting.
+
+    Weights are normalized to sum to 1.0 at score computation time,
+    so absolute values don't matter — only ratios.
+    """
+    adf_t: float = 1.0
+    hurst: float = 1.0
+    half_life: float = 1.0
+    johansen_trace: float = 1.0
+    vr_eigen1_proj: float = 0.5      # Level shift — less informative
+    vr_eigen2_proj: float = 2.0      # Curvature — the star performer
+    vr_eigen3_proj: float = 0.5      # Higher-order — noisy
+    vr_mahalanobis: float = 1.5      # Joint multivariate deviation
+
+    def as_dict(self) -> dict[str, float]:
+        return {
+            "adf_t": self.adf_t,
+            "hurst": self.hurst,
+            "half_life": self.half_life,
+            "johansen_trace": self.johansen_trace,
+            "vr_eigen1_proj": self.vr_eigen1_proj,
+            "vr_eigen2_proj": self.vr_eigen2_proj,
+            "vr_eigen3_proj": self.vr_eigen3_proj,
+            "vr_mahalanobis": self.vr_mahalanobis,
+        }
+
+    def normalized(self) -> dict[str, float]:
+        """Weights normalized to sum to 1."""
+        d = self.as_dict()
+        total = sum(d.values())
+        return {k: v / total for k, v in d.items()} if total > 0 else d
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Percentile Rank Computation
+# ═══════════════════════════════════════════════════════════════════
+
+# Test metadata: which tail indicates significance
+_TEST_TAIL = {
+    "adf_t": "left",           # More negative = more stationary
+    "hurst": "left",           # Lower = more mean-reverting
+    "half_life": "left",       # Shorter = faster reversion
+    "johansen_trace": "right", # Higher = more cointegrated
+    "vr_eigen1_proj": "left",  # More negative = stronger level shift
+    "vr_eigen2_proj": "left",  # More negative = stronger curvature (MR signature)
+    "vr_eigen3_proj": "left",  # More negative = stronger higher-order mode
+    "vr_mahalanobis": "right", # Higher = more anomalous vs null
+}
+
+
+def _p_value_from_surface(
+    raw_value: float,
+    critical_values: dict[int, float],
+    tail: str = "left",
+) -> float:
+    """
+    Compute empirical p-value by interpolating between surface percentiles.
+
+    The surface stores critical values at [1, 5, 10, 90, 95, 99] percentiles.
+    We interpolate to estimate where the raw value falls in the null CDF.
+
+    For left-tail tests (ADF, Hurst): p-value = percentile rank (lower = more extreme)
+    For right-tail tests (Johansen, Mahalanobis): p-value = 1 - percentile rank
+    """
+    if not critical_values:
+        return 0.5  # No surface data — uninformative
+
+    # Build sorted (percentile, cv_value) pairs
+    sorted_pcts = sorted(critical_values.keys())
+    sorted_cvs = [critical_values[p] for p in sorted_pcts]
+    pcts_frac = [p / 100.0 for p in sorted_pcts]  # Convert to [0, 1]
+
+    if tail == "left":
+        # For left-tail: raw value ≤ cv at percentile p means percentile rank ≈ p
+        # Lower percentile = more extreme = smaller p-value
+        if raw_value <= sorted_cvs[0]:
+            # More extreme than the 1st percentile
+            p_value = pcts_frac[0] * 0.5  # Extrapolate: ~0.005
+        elif raw_value >= sorted_cvs[-1]:
+            # Less extreme than the 99th percentile — not significant
+            p_value = pcts_frac[-1] + (1 - pcts_frac[-1]) * 0.5
+        else:
+            # Interpolate
+            p_value = float(np.interp(raw_value, sorted_cvs, pcts_frac))
+
+    elif tail == "right":
+        # For right-tail: raw value ≥ cv at percentile p means p-value ≈ 1-p
+        # Higher percentile = more extreme = smaller p-value
+        if raw_value >= sorted_cvs[-1]:
+            # More extreme than 99th percentile
+            p_value = (1 - pcts_frac[-1]) * 0.5  # ~0.005
+        elif raw_value <= sorted_cvs[0]:
+            # Less extreme than 1st percentile — not significant
+            p_value = 1 - pcts_frac[0] * 0.5
+        else:
+            percentile = float(np.interp(raw_value, sorted_cvs, pcts_frac))
+            p_value = 1.0 - percentile
+    else:
+        p_value = 0.5
+
+    return max(min(p_value, 1.0), 0.0)
+
+
+def compute_composite_score(
+    residuals: np.ndarray,
+    composite_surface,  # CompositeSurface instance
+    surface_req,        # MultiSurfaceRequirement
+    n_assets: int,
+    n_obs: int,
+    n_vars: int,
+    weights: ScoreWeights | None = None,
+) -> CompositeStatReport:
+    """
+    Compute the full normalized composite score for a candidate basket.
+
+    1. Extract all raw test statistics from residuals
+    2. Look up surface critical values for each test
+    3. Compute empirical p-value via interpolation
+    4. Convert to score = 1 - p_value
+    5. Weighted combination
+
+    Args:
+        residuals: 1D residual series from stepwise regression.
+        composite_surface: CompositeSurface with computed surfaces.
+        surface_req: MultiSurfaceRequirement defining the grid.
+        n_assets: Universe size (for surface lookup).
+        n_obs: Number of observations.
+        n_vars: Number of regression variables.
+        weights: ScoreWeights for combination. None = equal weights.
+
+    Returns:
+        CompositeStatReport with individual and composite scores.
+    """
+    from praxis.stats.surface import (
+        SurfaceRegistry,
+        _PROFILE_REGISTRY,
+        _register_multi_builtins,
+    )
+    _register_multi_builtins()
+
+    w = weights or ScoreWeights()
+    w_norm = w.normalized()
+    query_params = dict(n_assets=n_assets, n_obs=n_obs, n_vars=n_vars)
+
+    report = CompositeStatReport()
+    report.weights_used = w_norm
+
+    # ── Scalar tests ─────────────────────────────────────────
+    for ext_name in surface_req.scalar_extractors:
+        try:
+            extractor = SurfaceRegistry.get_extractor(ext_name)
+            raw_value = extractor.extract(residuals)
+        except Exception:
+            continue
+
+        try:
+            cvs = composite_surface.query_scalar(surface_req, ext_name, **query_params)
+        except Exception:
+            cvs = {}
+
+        tail = _TEST_TAIL.get(ext_name, "left")
+        p_val = _p_value_from_surface(raw_value, cvs, tail)
+        score = 1.0 - p_val
+
+        report.individual_scores[ext_name] = StatScore(
+            name=ext_name,
+            raw_value=raw_value,
+            p_value=p_val,
+            score=score,
+            tail=tail,
+        )
+
+    # ── Profile-derived tests ────────────────────────────────
+    for coll_name in surface_req.profile_collectors:
+        coll = _PROFILE_REGISTRY.get(coll_name)
+        if coll is None:
+            continue
+
+        merged_params = {**query_params, **surface_req.profile_params}
+        profile = coll.collect(residuals, merged_params)
+        if profile is None:
+            continue
+
+        report.vr_profile = profile
+
+        artifact = composite_surface.query_artifact(surface_req, coll_name, **query_params)
+        if artifact is None:
+            continue
+
+        report.vr_artifact = artifact
+
+        # Compute derived statistics from profile
+        candidate_stats = artifact.all_projections(profile)
+
+        for stat_name, raw_value in candidate_stats.items():
+            full_name = f"vr_{stat_name}"
+            try:
+                cvs = composite_surface.query_scalar(surface_req, full_name, **query_params)
+            except Exception:
+                cvs = {}
+
+            tail = _TEST_TAIL.get(full_name, "left")
+            p_val = _p_value_from_surface(raw_value, cvs, tail)
+            score = 1.0 - p_val
+
+            report.individual_scores[full_name] = StatScore(
+                name=full_name,
+                raw_value=raw_value,
+                p_value=p_val,
+                score=score,
+                tail=tail,
+            )
+
+    # ── Weighted composite ───────────────────────────────────
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for name, sc in report.individual_scores.items():
+        wt = w_norm.get(name, 0.0)
+        if wt > 0:
+            weighted_sum += wt * sc.score
+            total_weight += wt
+
+    report.composite_score = weighted_sum / total_weight if total_weight > 0 else 0.0
+
+    return report
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Enhanced CandidateBasket
+# ═══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class EnhancedCandidateBasket(CandidateBasket):
+    """
+    CandidateBasket with composite scoring and LLM analysis fields.
+
+    Extends the base with:
+    - Full CompositeStatReport (all tests, normalized scores)
+    - LLM qualitative analysis results
+    - Override flags from qualitative review
+    """
+    stat_report: CompositeStatReport | None = None
+    composite_score: float = 0.0
+
+    # LLM qualitative analysis
+    llm_recommendation: str = ""          # "include", "exclude", "flag_for_review"
+    llm_confidence: float = 0.0           # [0, 1]
+    llm_reasoning: str = ""
+    llm_suggested_horizon: str = ""       # e.g., "3-5 days", "2-4 weeks"
+    llm_risk_flags: list[str] = field(default_factory=list)
+    llm_override: bool = False            # True if LLM recommends changing rank
+
+    @property
+    def final_score(self) -> float:
+        """Score used for final ranking after LLM review."""
+        if self.llm_override and self.llm_recommendation == "exclude":
+            return -1.0  # Demoted
+        if self.llm_override and self.llm_recommendation == "include":
+            return self.composite_score + 0.1  # Boosted slightly
+        return self.composite_score
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Enhanced Pipeline with Composite Scoring
+# ═══════════════════════════════════════════════════════════════════
+
+
+def score_and_rank_candidates(
+    candidates: list[CandidateBasket],
+    price_matrix: np.ndarray,
+    composite_surface,
+    surface_req,
+    weights: ScoreWeights | None = None,
+    top_k: int = 20,
+    min_composite: float = 0.0,
+    min_significant_tests: int = 0,
+) -> list[EnhancedCandidateBasket]:
+    """
+    Replacement for filter_and_rank() that uses composite scoring.
+
+    Instead of filtering by individual thresholds (significance, max_hurst,
+    half_life bounds) and ranking by a single statistic, this:
+
+    1. Computes ALL test statistics per candidate
+    2. Normalizes via surface lookup → [0, 1] per test
+    3. Combines with configurable weights → composite score
+    4. Ranks by composite score
+    5. Optionally filters by min_composite or min_significant_tests
+
+    Args:
+        candidates: Raw candidates from generate_candidates().
+        price_matrix: Original price data (for universe context).
+        composite_surface: CompositeSurface with precomputed surfaces.
+        surface_req: MultiSurfaceRequirement.
+        weights: ScoreWeights (None = default weights).
+        top_k: Maximum baskets to return.
+        min_composite: Minimum composite score to include.
+        min_significant_tests: Minimum number of individually significant tests.
+
+    Returns:
+        Ranked list of EnhancedCandidateBasket, best first.
+    """
+    n_assets = price_matrix.shape[1]
+    n_obs = price_matrix.shape[0]
+    enhanced = []
+
+    for basket in candidates:
+        if len(basket.residuals) < 30:
+            continue
+
+        # Compute full composite score
+        report = compute_composite_score(
+            residuals=basket.residuals,
+            composite_surface=composite_surface,
+            surface_req=surface_req,
+            n_assets=n_assets,
+            n_obs=n_obs,
+            n_vars=len(basket.partner_indices),
+            weights=weights,
+        )
+
+        # Create enhanced basket
+        eb = EnhancedCandidateBasket(
+            target_index=basket.target_index,
+            partner_indices=basket.partner_indices,
+            adf_t_statistic=basket.adf_t_statistic,
+            adf_p_value=basket.adf_p_value,
+            adjusted_p_value=basket.adjusted_p_value,
+            hurst=basket.hurst,
+            half_life_periods=basket.half_life_periods,
+            r_squared=basket.r_squared,
+            weights=basket.weights,
+            residuals=basket.residuals,
+            is_stationary=basket.is_stationary,
+            stat_report=report,
+            composite_score=report.composite_score,
+        )
+
+        # Filter
+        if report.composite_score < min_composite:
+            continue
+        if report.n_significant < min_significant_tests:
+            continue
+
+        enhanced.append(eb)
+
+    # Rank by composite score (descending)
+    enhanced.sort(key=lambda b: -b.composite_score)
+
+    for i, b in enumerate(enhanced):
+        b.rank = i + 1
+
+    return enhanced[:top_k]
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  LLM Qualitative Analysis
+# ═══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class QualitativeAnalysisRequest:
+    """
+    Structured request for the Research Praxis Agent to review
+    quantitative results with qualitative judgment.
+    """
+    # Quantitative context
+    baskets: list[EnhancedCandidateBasket] = field(default_factory=list)
+    asset_names: list[str] | None = None
+    asset_class: str = "equity"
+    timescale: str = "daily"
+    universe_size: int = 0
+    history_length: int = 0
+
+    # What we want the LLM to evaluate
+    top_k_quantitative: int = 10
+    near_miss_count: int = 5    # Baskets ranked just below top_k
+
+    # Optional context
+    market_regime: str = ""     # "bull", "bear", "sideways", "volatile"
+    recent_events: str = ""     # Free text about recent news
+    trading_constraints: str = ""  # e.g., "long-only", "max 5 day hold"
+
+    def build_prompt(self) -> str:
+        """
+        Build the structured prompt for the Research Praxis Agent.
+
+        Provides all quantitative data plus context, asks for
+        qualitative assessment with structured output.
+        """
+        sections = []
+
+        sections.append("# Quantitative Trading Model Review Request\n")
+        sections.append(
+            "You are a senior quantitative trader reviewing candidate "
+            "mean-reversion baskets identified by the Burgess statistical "
+            "arbitrage model. Your job is to apply qualitative judgment "
+            "that the quantitative scoring cannot capture.\n"
+        )
+
+        # Context
+        sections.append("## Market Context")
+        sections.append(f"- Asset class: {self.asset_class}")
+        sections.append(f"- Timescale: {self.timescale}")
+        sections.append(f"- Universe size: {self.universe_size} assets")
+        sections.append(f"- History length: {self.history_length} observations")
+        if self.market_regime:
+            sections.append(f"- Current regime: {self.market_regime}")
+        if self.recent_events:
+            sections.append(f"- Recent events: {self.recent_events}")
+        if self.trading_constraints:
+            sections.append(f"- Constraints: {self.trading_constraints}")
+        sections.append("")
+
+        # Top quantitative picks
+        sections.append(f"## Top {self.top_k_quantitative} Quantitative Picks\n")
+        for i, b in enumerate(self.baskets[:self.top_k_quantitative]):
+            name = self._basket_name(b)
+            sections.append(f"### Basket #{b.rank}: {name}")
+            sections.append(f"Composite score: {b.composite_score:.4f}")
+            if b.stat_report:
+                sections.append(b.stat_report.summary())
+
+            # VR profile shape description
+            if b.stat_report and b.stat_report.vr_profile is not None:
+                vr = b.stat_report.vr_profile
+                sections.append(f"VR profile: starts {vr[0]:.3f} at lag 2, "
+                                f"{'sags to' if vr[-1] < vr[0] else 'rises to'} "
+                                f"{vr[-1]:.3f} at max lag. "
+                                f"Min VR={vr.min():.3f} at lag {np.argmin(vr)+2}.")
+            sections.append("")
+
+        # Near misses
+        near_start = self.top_k_quantitative
+        near_end = near_start + self.near_miss_count
+        near_misses = self.baskets[near_start:near_end]
+        if near_misses:
+            sections.append(f"\n## Near Misses (ranked #{near_start+1}-{near_end})\n")
+            for b in near_misses:
+                name = self._basket_name(b)
+                sections.append(f"### Basket #{b.rank}: {name}")
+                sections.append(f"Composite score: {b.composite_score:.4f}")
+                if b.stat_report:
+                    sections.append(b.stat_report.summary())
+                if b.stat_report and b.stat_report.vr_profile is not None:
+                    vr = b.stat_report.vr_profile
+                    sections.append(f"VR profile min={vr.min():.3f} at lag {np.argmin(vr)+2}")
+                sections.append("")
+
+        # Instructions
+        sections.append("\n## Your Analysis\n")
+        sections.append(
+            "For each basket in the top picks AND the near misses, provide:\n\n"
+            "1. **recommendation**: 'include' | 'exclude' | 'flag_for_review'\n"
+            "2. **confidence**: 0.0-1.0 in your recommendation\n"
+            "3. **reasoning**: Brief explanation (2-3 sentences)\n"
+            "4. **suggested_horizon**: Optimal holding period based on VR profile shape\n"
+            "5. **risk_flags**: Any concerns (earnings, regime change, liquidity, etc.)\n"
+            "6. **override**: true if you recommend changing this basket's rank\n\n"
+            "Pay special attention to:\n"
+            "- VR profiles that show extreme mean-reversion at a specific timescale "
+            "(even if overall composite is mediocre)\n"
+            "- Baskets where individual tests strongly disagree (some very significant, "
+            "others not at all)\n"
+            "- Assets with known upcoming catalysts (earnings, splits, regulatory)\n"
+            "- Near misses that might be better than top picks under specific conditions\n"
+            "- Any basket where the half-life suggests a different trading horizon than "
+            "the default\n\n"
+            "Respond in JSON format:\n"
+            "```json\n"
+            "[\n"
+            '  {"basket_rank": 1, "recommendation": "include", "confidence": 0.85, '
+            '"reasoning": "...", "suggested_horizon": "3-5 days", '
+            '"risk_flags": ["earnings in 2 days"], "override": false},\n'
+            "  ...\n"
+            "]\n"
+            "```"
+        )
+
+        return "\n".join(sections)
+
+    def _basket_name(self, basket: EnhancedCandidateBasket) -> str:
+        """Generate a human-readable basket name."""
+        if self.asset_names:
+            indices = basket.all_indices
+            names = [self.asset_names[i] if i < len(self.asset_names)
+                     else f"Asset_{i}" for i in indices]
+            return " + ".join(names)
+        return f"Target_{basket.target_index} + Partners_{basket.partner_indices}"
+
+
+def apply_llm_analysis(
+    baskets: list[EnhancedCandidateBasket],
+    llm_response: list[dict[str, Any]],
+) -> list[EnhancedCandidateBasket]:
+    """
+    Apply LLM qualitative analysis results to enhanced baskets.
+
+    Args:
+        baskets: Ranked EnhancedCandidateBaskets.
+        llm_response: Parsed JSON from LLM (list of dicts with
+                      basket_rank, recommendation, confidence, etc.)
+
+    Returns:
+        Same baskets with LLM fields populated, re-sorted by final_score.
+    """
+    # Index by rank for matching
+    by_rank = {b.rank: b for b in baskets}
+
+    for entry in llm_response:
+        rank = entry.get("basket_rank")
+        if rank not in by_rank:
+            continue
+
+        b = by_rank[rank]
+        b.llm_recommendation = entry.get("recommendation", "")
+        b.llm_confidence = entry.get("confidence", 0.0)
+        b.llm_reasoning = entry.get("reasoning", "")
+        b.llm_suggested_horizon = entry.get("suggested_horizon", "")
+        b.llm_risk_flags = entry.get("risk_flags", [])
+        b.llm_override = entry.get("override", False)
+
+    # Re-sort by final_score (which accounts for overrides)
+    baskets.sort(key=lambda b: -b.final_score)
+
+    # Re-rank
+    for i, b in enumerate(baskets):
+        b.rank = i + 1
+
+    return baskets

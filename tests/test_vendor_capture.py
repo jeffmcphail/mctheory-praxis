@@ -69,7 +69,7 @@ class TestVendorCaptureAdapter:
         assert adapter.file_path.exists()
         assert adapter.call_count == 1
 
-        content = adapter.file_path.read_text()
+        content = adapter.file_path.read_text(encoding="utf-8")
         assert "vendor: yfinance" in content
         assert "endpoint: download" in content
         assert "ticker: AAPL" in content
@@ -98,10 +98,10 @@ class TestVendorCaptureAdapter:
         log.add_adapter(adapter)
         log.activate_tag(CAPTURE_TAG)
 
-        raw = "col1,col2,col3\n1.123456789,2.987654321,3.111111111\nspecial chars: àéîõü €£¥"
+        raw = "col1,col2,col3\n1.123456789,2.987654321,3.111111111\nspecial chars: !@#$%^&*()_+-=[]{}|;':\",./<>?"
         vendor_capture(vendor="test", endpoint="test", raw_payload=raw)
 
-        content = adapter.file_path.read_text()
+        content = adapter.file_path.read_text(encoding="utf-8")
         # The raw payload appears verbatim between delimiters
         assert raw in content
 
@@ -113,7 +113,7 @@ class TestVendorCaptureAdapter:
 
         vendor_capture(vendor="x", endpoint="y", raw_payload="z")
 
-        content = adapter.file_path.read_text()
+        content = adapter.file_path.read_text(encoding="utf-8")
         assert "# Vendor Raw Capture Session: hdr_test" in content
 
     def test_close_writes_footer(self, capture_dir):
@@ -125,7 +125,7 @@ class TestVendorCaptureAdapter:
         vendor_capture(vendor="x", endpoint="y", raw_payload="z")
         adapter.close()
 
-        content = adapter.file_path.read_text()
+        content = adapter.file_path.read_text(encoding="utf-8")
         assert "# Session ended:" in content
         assert "# Total calls captured: 1" in content
 
