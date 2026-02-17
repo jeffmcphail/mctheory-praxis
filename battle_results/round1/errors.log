@@ -1,0 +1,57 @@
+=== B1_sma_crossover ===
+Traceback (most recent call last):
+  File "C:\Data\Development\Python\McTheoryApps\praxis\scripts\battle_test_round1.py", line 80, in run_test
+    result = fn()
+             ^^^^
+  File "C:\Data\Development\Python\McTheoryApps\praxis\scripts\battle_test_round1.py", line 213, in test_B1_sma_crossover_backtest
+    config = ModelConfig(
+             ^^^^^^^^^^^^
+  File "C:\Data\Development\Python\McTheoryApps\praxis\.venv\Lib\site-packages\pydantic\main.py", line 250, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig
+model
+  Field required [type=missing, input_value={'name': 'battle_test_sma..., 'commission_bps': 10}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+
+=== B2_ema_crossover ===
+Traceback (most recent call last):
+  File "C:\Data\Development\Python\McTheoryApps\praxis\scripts\battle_test_round1.py", line 80, in run_test
+    result = fn()
+             ^^^^
+  File "C:\Data\Development\Python\McTheoryApps\praxis\scripts\battle_test_round1.py", line 255, in test_B2_ema_crossover_backtest
+    config = ModelConfig(
+             ^^^^^^^^^^^^
+  File "C:\Data\Development\Python\McTheoryApps\praxis\.venv\Lib\site-packages\pydantic\main.py", line 250, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig
+model
+  Field required [type=missing, input_value={'name': 'battle_test_ema...0, 'commission_bps': 5}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+
+=== D1_stat_tests_gld_gdx ===
+Traceback (most recent call last):
+  File "C:\Data\Development\Python\McTheoryApps\praxis\scripts\battle_test_round1.py", line 80, in run_test
+    result = fn()
+             ^^^^
+  File "C:\Data\Development\Python\McTheoryApps\praxis\scripts\battle_test_round1.py", line 456, in test_D1_stat_tests_gld_gdx
+    from praxis.models.stats import adf_test, hurst_exponent, half_life
+ModuleNotFoundError: No module named 'praxis.models.stats'
+
+=== E1_event_vs_vectorized ===
+Traceback (most recent call last):
+  File "C:\Data\Development\Python\McTheoryApps\praxis\scripts\battle_test_round1.py", line 80, in run_test
+    result = fn()
+             ^^^^
+  File "C:\Data\Development\Python\McTheoryApps\praxis\scripts\battle_test_round1.py", line 510, in test_E1_event_driven_sma
+    config = ModelConfig(
+             ^^^^^^^^^^^^
+  File "C:\Data\Development\Python\McTheoryApps\praxis\.venv\Lib\site-packages\pydantic\main.py", line 250, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig
+model
+  Field required [type=missing, input_value={'name': 'event_vs_vector...0, 'commission_bps': 0}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+

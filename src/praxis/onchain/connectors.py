@@ -27,6 +27,7 @@ import numpy as np
 
 from praxis.templates import DataSourceTemplate
 from praxis.logger.core import PraxisLogger
+from praxis.logger.vendor_capture import vendor_capture
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -88,6 +89,13 @@ class UniswapV2Source(DataSourceTemplate):
             quote = self._cache.get(pair)
             if quote:
                 result[pair] = quote
+        if result:
+            vendor_capture(
+                vendor="uniswap_v2", endpoint="getReserves",
+                ticker=",".join(tickers),
+                params={"pairs": len(tickers)},
+                raw_payload="\n".join(f"{p}|{q.price}|{q.liquidity}|{q.fee_bps}" for p, q in result.items()),
+            )
         return result
 
     def get_quote(self, pair: str) -> DEXQuote | None:
@@ -112,7 +120,15 @@ class UniswapV3Source(DataSourceTemplate):
             )
 
     def fetch(self, tickers: list[str], start: str, end: str) -> Any:
-        return {p: self._cache[p] for p in tickers if p in self._cache}
+        result = {p: self._cache[p] for p in tickers if p in self._cache}
+        if result:
+            vendor_capture(
+                vendor="uniswap_v3", endpoint="slot0",
+                ticker=",".join(tickers),
+                params={"pairs": len(result)},
+                raw_payload="\n".join(f"{p}|{q.price}|{q.liquidity}|{q.fee_bps}" for p, q in result.items()),
+            )
+        return result
 
 
 class SushiSwapSource(DataSourceTemplate):
@@ -133,7 +149,14 @@ class SushiSwapSource(DataSourceTemplate):
             )
 
     def fetch(self, tickers: list[str], start: str, end: str) -> Any:
-        return {p: self._cache[p] for p in tickers if p in self._cache}
+        result = {p: self._cache[p] for p in tickers if p in self._cache}
+        if result:
+            vendor_capture(
+                vendor="sushiswap", endpoint="getReserves",
+                ticker=",".join(tickers),
+                raw_payload="\n".join(f"{p}|{q.price}|{q.liquidity}" for p, q in result.items()),
+            )
+        return result
 
 
 class CurveSource(DataSourceTemplate):
@@ -154,7 +177,14 @@ class CurveSource(DataSourceTemplate):
             )
 
     def fetch(self, tickers: list[str], start: str, end: str) -> Any:
-        return {p: self._cache[p] for p in tickers if p in self._cache}
+        result = {p: self._cache[p] for p in tickers if p in self._cache}
+        if result:
+            vendor_capture(
+                vendor="curve", endpoint="get_dy",
+                ticker=",".join(tickers),
+                raw_payload="\n".join(f"{p}|{q.price}|{q.liquidity}" for p, q in result.items()),
+            )
+        return result
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -211,7 +241,14 @@ class BinanceSource(DataSourceTemplate):
             )
 
     def fetch(self, tickers: list[str], start: str, end: str) -> Any:
-        return {p: self._cache[p] for p in tickers if p in self._cache}
+        result = {p: self._cache[p] for p in tickers if p in self._cache}
+        if result:
+            vendor_capture(
+                vendor="binance", endpoint="bookTicker",
+                ticker=",".join(tickers),
+                raw_payload="\n".join(f"{p}|{q.bid}|{q.ask}|{q.mid}" for p, q in result.items()),
+            )
+        return result
 
 
 class KrakenSource(DataSourceTemplate):
@@ -231,7 +268,14 @@ class KrakenSource(DataSourceTemplate):
             )
 
     def fetch(self, tickers: list[str], start: str, end: str) -> Any:
-        return {p: self._cache[p] for p in tickers if p in self._cache}
+        result = {p: self._cache[p] for p in tickers if p in self._cache}
+        if result:
+            vendor_capture(
+                vendor="kraken", endpoint="Ticker",
+                ticker=",".join(tickers),
+                raw_payload="\n".join(f"{p}|{q.bid}|{q.ask}|{q.mid}" for p, q in result.items()),
+            )
+        return result
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -1,0 +1,252 @@
+{
+  "meta": {
+    "script": "battle_test_round1.py",
+    "timestamp": "2026-02-15T13:36:41.014630+00:00",
+    "python_version": "3.12.3 (tags/v3.12.3:f6650f9, Apr  9 2024, 14:05:25) [MSC v.1938 64 bit (AMD64)]",
+    "platform": "win32",
+    "numpy_version": "2.4.2",
+    "pandas_version": "3.0.0",
+    "polars_version": "1.38.1"
+  },
+  "tests": {
+    "A1_yfinance_equities": {
+      "status": "PASS",
+      "elapsed_seconds": 5.61,
+      "result": {
+        "calls_captured": 4,
+        "capture_file": "C:\\Data\\Development\\Python\\McTheoryApps\\praxis\\battle_results\\round1\\capture_round1.txt",
+        "total_rows": 1000,
+        "columns": [
+          "date",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "ticker"
+        ],
+        "tickers": {
+          "AAPL": {
+            "rows": 250,
+            "first_date": "2023-01-03 00:00:00",
+            "last_date": "2023-12-29 00:00:00",
+            "first_close": 123.096024,
+            "last_close": 190.550446,
+            "mean_close": 170.351416,
+            "sum_volume": 14805886900
+          },
+          "MSFT": {
+            "rows": 250,
+            "first_date": "2023-01-03 00:00:00",
+            "last_date": "2023-12-29 00:00:00",
+            "first_close": 233.985657,
+            "last_close": 370.515686,
+            "mean_close": 308.139015,
+            "sum_volume": 6919274400
+          },
+          "GLD": {
+            "rows": 250,
+            "first_date": "2023-01-03 00:00:00",
+            "last_date": "2023-12-29 00:00:00",
+            "first_close": 171.059998,
+            "last_close": 191.169998,
+            "mean_close": 180.44988,
+            "sum_volume": 1825837500
+          },
+          "GDX": {
+            "rows": 250,
+            "first_date": "2023-01-03 00:00:00",
+            "last_date": "2023-12-29 00:00:00",
+            "first_close": 28.63427,
+            "last_close": 30.429169,
+            "mean_close": 29.352452,
+            "sum_volume": 5511858400
+          }
+        }
+      }
+    },
+    "A2_crypto_proxies": {
+      "status": "PASS",
+      "elapsed_seconds": 0.375,
+      "result": {
+        "calls_captured": 2,
+        "total_rows": 364,
+        "tickers": {
+          "BTC-USD": {
+            "rows": 182,
+            "first_close": 44167.332031,
+            "last_close": 62678.292969,
+            "mean_close": 59628.433422
+          },
+          "ETH-USD": {
+            "rows": 182,
+            "first_close": 2352.327881,
+            "last_close": 3432.88916,
+            "mean_close": 3146.53026
+          }
+        }
+      }
+    },
+    "B1_sma_crossover": {
+      "status": "PASS",
+      "elapsed_seconds": 0.328,
+      "result": {
+        "total_return": 0.000326,
+        "sharpe_ratio": 0.019884,
+        "max_drawdown": -0.029588,
+        "total_trades": 19,
+        "win_rate": 0.368421,
+        "annualized_return": 0.000164,
+        "data_rows": 501,
+        "first_date": "2022-01-03 00:00:00",
+        "last_date": "2023-12-29 00:00:00"
+      }
+    },
+    "B2_ema_crossover": {
+      "status": "PASS",
+      "elapsed_seconds": 0.281,
+      "result": {
+        "total_return": 0.024724,
+        "sharpe_ratio": 0.231076,
+        "max_drawdown": -0.066863,
+        "total_trades": 16,
+        "annualized_return": 0.012386
+      }
+    },
+    "C1_zscore_gld_gdx": {
+      "status": "PASS",
+      "elapsed_seconds": 0.078,
+      "result": {
+        "pair": "GLD/GDX",
+        "data_points": 250,
+        "zscore_valid_points": 191,
+        "zscore_mean": 0.294544,
+        "zscore_std": 1.187406,
+        "zscore_min": -2.245197,
+        "zscore_max": 2.632598,
+        "zscore_first_5": [
+          -0.527707,
+          -0.643526,
+          -0.650684,
+          -0.969661,
+          -1.268993
+        ],
+        "zscore_last_5": [
+          -1.806745,
+          -1.608543,
+          -1.699068,
+          -1.059671,
+          -0.919056
+        ],
+        "ratio_mean": 6.169281,
+        "ratio_std": 0.334692,
+        "gld_first_close": 171.059998,
+        "gld_last_close": 191.169998,
+        "gdx_first_close": 28.63427,
+        "gdx_last_close": 30.429169
+      }
+    },
+    "C2_indicators_aapl": {
+      "status": "PASS",
+      "elapsed_seconds": 0.047,
+      "result": {
+        "ticker": "AAPL",
+        "data_points": 250,
+        "indicators": {
+          "sma_20": {
+            "valid_points": 231,
+            "mean": 171.103049,
+            "last": 192.310687
+          },
+          "ema_20": {
+            "valid_points": 250,
+            "mean": 167.761667,
+            "last": 191.247322
+          },
+          "bollinger": {
+            "valid_points": 231,
+            "upper_last": 196.777184,
+            "lower_last": 187.84419,
+            "mid_last": 192.310687
+          },
+          "rsi_14": {
+            "valid_points": 236,
+            "mean": 58.821253,
+            "last": 40.185045
+          },
+          "atr_14": {
+            "valid_points": 237,
+            "mean": 3.133766,
+            "last": 2.549308
+          },
+          "mfi_14": {
+            "valid_points": 236,
+            "mean": 55.590379,
+            "last": 34.709222
+          },
+          "force_index_13": {
+            "valid_points": 250,
+            "mean": 18164406.24,
+            "last": -8930058.82
+          }
+        }
+      }
+    },
+    "D1_stat_tests_gld_gdx": {
+      "status": "PASS",
+      "elapsed_seconds": 7.765,
+      "result": {
+        "pair": "GLD/GDX",
+        "hedge_ratio": 1.765948,
+        "spread_mean": 128.61497,
+        "spread_std": 4.069421,
+        "adf_t_statistic": -1.875392,
+        "adf_pvalue": 0.343725,
+        "adf_is_stationary": false,
+        "hurst_exponent": 0.566659,
+        "hurst_interpretation": "trending",
+        "half_life": 26.683774,
+        "half_life_is_mean_reverting": true
+      }
+    },
+    "E1_event_vs_vectorized": {
+      "status": "PASS",
+      "elapsed_seconds": 0.047,
+      "result": {
+        "vectorized": {
+          "total_return": 0.011367,
+          "total_trades": 9,
+          "sharpe_ratio": 0.153175
+        },
+        "event_driven": {
+          "total_return": -2.8e-05,
+          "total_trades": 9,
+          "sharpe_ratio": -0.09076
+        },
+        "delta_return": 0.01139489
+      }
+    },
+    "F1_btc_eth_cointegration": {
+      "status": "PASS",
+      "elapsed_seconds": 0.078,
+      "result": {
+        "pair": "BTC/ETH",
+        "data_points": 182,
+        "is_cointegrated": false,
+        "adf_pvalue": 0.5,
+        "correlation": 0.929309,
+        "hedge_ratio": 18.448824,
+        "half_life": null,
+        "signal_zscore": -0.381086,
+        "signal_should_trade": false,
+        "signal_direction": "flat"
+      }
+    }
+  },
+  "summary": {
+    "total": 9,
+    "passed": 9,
+    "failed": 0,
+    "pass_rate": "100%"
+  }
+}

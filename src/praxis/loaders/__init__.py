@@ -170,6 +170,8 @@ class YFinanceLoader:
         end: str | None,
     ) -> dict[str, Any]:
         """Fetch OHLCV from yfinance. Returns {symbol: pandas_df}."""
+        from praxis.logger.vendor_capture import vendor_capture
+
         if yf is None:
             raise ImportError("yfinance required. Install: pip install yfinance")
 
@@ -189,6 +191,19 @@ class YFinanceLoader:
                 df = yf.download(symbol, **kwargs)
 
                 if df is not None and not df.empty:
+                    # ── Vendor raw capture (dormant unless tag active) ──
+                    vendor_capture(
+                        vendor="yfinance",
+                        endpoint="download",
+                        ticker=symbol,
+                        params={
+                            "start": start or "default",
+                            "end": end or "default",
+                            "auto_adjust": "false",
+                        },
+                        raw_payload=df.to_csv(float_format="%.10g"),
+                    )
+
                     # Flatten MultiIndex columns
                     if hasattr(df.columns, 'levels'):
                         df.columns = [

@@ -1,0 +1,444 @@
+{
+  "meta": {
+    "script": "battle_test_round2.py",
+    "timestamp": "2026-02-15T13:59:10.461022+00:00",
+    "python_version": "3.12.3 (tags/v3.12.3:f6650f9, Apr  9 2024, 14:05:25) [MSC v.1938 64 bit (AMD64)]",
+    "platform": "win32",
+    "numpy_version": "2.4.2",
+    "pandas_version": "3.0.0",
+    "polars_version": "1.38.1"
+  },
+  "tests": {
+    "A1_single_leg_gld_gdx": {
+      "status": "PASS",
+      "elapsed_seconds": 0.015,
+      "result": {
+        "n_bars": 250,
+        "sharpe_ratio": -4.083829,
+        "daily_return": -0.01191562,
+        "annualized_return": -0.951236,
+        "volatility": 1.151635,
+        "num_trades": 20,
+        "positions_unique": [
+          -1,
+          0,
+          1
+        ],
+        "positions_long_pct": 0.024,
+        "positions_short_pct": 0.34,
+        "pnl_sum": -0.01191562,
+        "pnl_mean": -4.766e-05
+      }
+    },
+    "A2_single_leg_sweep": {
+      "status": "PASS",
+      "elapsed_seconds": 0.016,
+      "result": {
+        "n_bars": 250,
+        "sweep": {
+          "w2.0_e0.5": {
+            "sharpe": 0.863398,
+            "trades": 25,
+            "return": 1.01252
+          },
+          "w2.0_e1.0": {
+            "sharpe": -8.909748,
+            "trades": 22,
+            "return": -0.998512
+          },
+          "w2.0_e2.0": {
+            "sharpe": 0.133908,
+            "trades": 8,
+            "return": 0.060638
+          },
+          "w3.0_e0.5": {
+            "sharpe": 16.593867,
+            "trades": 31,
+            "return": 4427496.191244
+          },
+          "w3.0_e1.0": {
+            "sharpe": -4.083829,
+            "trades": 20,
+            "return": -0.951236
+          },
+          "w3.0_e2.0": {
+            "sharpe": -12.408883,
+            "trades": 4,
+            "return": -0.966994
+          },
+          "w5.0_e0.5": {
+            "sharpe": 9.068699,
+            "trades": 23,
+            "return": 8267.94614
+          },
+          "w5.0_e1.0": {
+            "sharpe": 4.524976,
+            "trades": 24,
+            "return": 17.973333
+          },
+          "w5.0_e2.0": {
+            "sharpe": 26.356342,
+            "trades": 1,
+            "return": 12.413846
+          }
+        }
+      }
+    },
+    "B1_training_data": {
+      "status": "PASS",
+      "elapsed_seconds": 0.031,
+      "result": {
+        "total_rows": 54,
+        "errors": 0,
+        "n_dates": 3,
+        "grid_size": 18,
+        "expected_max": 54,
+        "columns": [
+          "date",
+          "weight",
+          "entry_threshold",
+          "lookback",
+          "sharpe_ratio",
+          "daily_return",
+          "annualized_return",
+          "volatility",
+          "num_trades"
+        ],
+        "sharpe_mean": -3.151672,
+        "sharpe_std": 42.357887,
+        "sharpe_min": -101.080806,
+        "sharpe_max": 95.370668,
+        "num_trades_mean": 5.35
+      }
+    },
+    "C1_cpo_predictor": {
+      "status": "PASS",
+      "elapsed_seconds": 2.359,
+      "result": {
+        "training_rows": 375,
+        "mse_train": 2917.86043742,
+        "mse_test": 2692.91248842,
+        "r2_train": 0.11685,
+        "predicted_weight": 5.0,
+        "predicted_entry": 0.5,
+        "predicted_lookback": 30.0,
+        "predicted_sharpe": 52.988355,
+        "model_score": 0.0
+      }
+    },
+    "D1_burgess_candidates": {
+      "status": "PASS",
+      "elapsed_seconds": 1.125,
+      "result": {
+        "n_assets": 12,
+        "n_obs": 250,
+        "tickers": [
+          "AAPL",
+          "MSFT",
+          "GLD",
+          "GDX",
+          "SPY",
+          "QQQ",
+          "TLT",
+          "SLV",
+          "XLE",
+          "XLF",
+          "IWM",
+          "EEM"
+        ],
+        "n_candidates": 12,
+        "top_5": [
+          {
+            "indices": [
+              0,
+              5,
+              8,
+              7
+            ],
+            "adf_t": -4.368345,
+            "pvalue": 0.000338,
+            "half_life": 4.8519,
+            "hurst": 0.321799
+          },
+          {
+            "indices": [
+              1,
+              5,
+              10,
+              8
+            ],
+            "adf_t": -3.973204,
+            "pvalue": 0.001558,
+            "half_life": 5.5968,
+            "hurst": 0.42375
+          },
+          {
+            "indices": [
+              2,
+              7,
+              1,
+              8
+            ],
+            "adf_t": -3.192698,
+            "pvalue": 0.020411,
+            "half_life": 9.1702,
+            "hurst": 0.500143
+          },
+          {
+            "indices": [
+              3,
+              7,
+              6,
+              10
+            ],
+            "adf_t": -4.834752,
+            "pvalue": 4.7e-05,
+            "half_life": 3.976,
+            "hurst": 0.343877
+          },
+          {
+            "indices": [
+              4,
+              5,
+              9,
+              7
+            ],
+            "adf_t": -3.517295,
+            "pvalue": 0.007554,
+            "half_life": 7.0268,
+            "hurst": 0.468958
+          }
+        ]
+      }
+    },
+    "D2_burgess_full_pipeline": {
+      "status": "PASS",
+      "elapsed_seconds": 2.86,
+      "result": {
+        "n_assets": 12,
+        "n_obs": 250,
+        "n_scanned": 12,
+        "n_selected": 0,
+        "has_critical_values": true,
+        "n_portfolio_results": 0,
+        "elapsed_seconds": 2.86,
+        "selected_top3": [],
+        "portfolio_top3": []
+      }
+    },
+    "E1_min_variance": {
+      "status": "PASS",
+      "elapsed_seconds": 0.0,
+      "result": {
+        "n_assets": 12,
+        "tickers": [
+          "AAPL",
+          "MSFT",
+          "GLD",
+          "GDX",
+          "SPY",
+          "QQQ",
+          "TLT",
+          "SLV",
+          "XLE",
+          "XLF",
+          "IWM",
+          "EEM"
+        ],
+        "weights": [
+          -0.041032,
+          0.015483,
+          0.660123,
+          -0.233651,
+          1.285755,
+          -0.562519,
+          0.057934,
+          -0.065943,
+          -0.010615,
+          -0.147187,
+          -0.106146,
+          0.147798
+        ],
+        "weights_sum": 1.0,
+        "volatility": 0.004194,
+        "expected_return": null
+      }
+    },
+    "E2_max_sharpe": {
+      "status": "PASS",
+      "elapsed_seconds": 0.0,
+      "result": {
+        "n_assets": 12,
+        "weights": [
+          0.207643,
+          -0.206076,
+          1.490075,
+          -0.155174,
+          -2.309269,
+          2.543997,
+          -0.284722,
+          -0.336297,
+          0.262327,
+          0.329972,
+          0.084531,
+          -0.627005
+        ],
+        "weights_sum": 1.0,
+        "volatility": 0.012652,
+        "expected_return": 0.002997,
+        "sharpe_ratio": 0.236884
+      }
+    },
+    "F1_ridge_regression": {
+      "status": "PASS",
+      "elapsed_seconds": 0.0,
+      "result": {
+        "target": "SPY",
+        "features": [
+          "AAPL",
+          "MSFT",
+          "GLD",
+          "GDX",
+          "QQQ",
+          "TLT",
+          "SLV",
+          "XLE",
+          "XLF",
+          "IWM",
+          "EEM"
+        ],
+        "beta_values": {
+          "AAPL": 0.016157,
+          "MSFT": 0.017016,
+          "GLD": -0.000276,
+          "GDX": 0.007123,
+          "QQQ": 0.018504,
+          "TLT": 0.002548,
+          "SLV": 0.003451,
+          "XLE": 0.009892,
+          "XLF": 0.014859,
+          "IWM": 0.018013,
+          "EEM": 0.01153
+        },
+        "intercept_beta": 0.0008301,
+        "r_squared": 0.222068,
+        "adj_r_squared": 0.185962,
+        "residual_std": 0.00725335
+      }
+    },
+    "F2_successive_regression": {
+      "status": "PASS",
+      "elapsed_seconds": 0.047,
+      "result": {
+        "n_assets": 12,
+        "n_targets_tested": 4,
+        "n_vars": 3,
+        "results": [
+          {
+            "target": "AAPL",
+            "selected_indices": [
+              5,
+              8,
+              7
+            ],
+            "selected_tickers": [
+              "QQQ",
+              "XLE",
+              "SLV"
+            ],
+            "is_stationary": true,
+            "r_squared": 0.956232,
+            "adf_t": -4.368345,
+            "adf_pvalue": 0.000338
+          },
+          {
+            "target": "MSFT",
+            "selected_indices": [
+              5,
+              10,
+              8
+            ],
+            "selected_tickers": [
+              "QQQ",
+              "IWM",
+              "XLE"
+            ],
+            "is_stationary": true,
+            "r_squared": 0.971508,
+            "adf_t": -3.973204,
+            "adf_pvalue": 0.001558
+          },
+          {
+            "target": "GLD",
+            "selected_indices": [
+              7,
+              1,
+              8
+            ],
+            "selected_tickers": [
+              "SLV",
+              "MSFT",
+              "XLE"
+            ],
+            "is_stationary": true,
+            "r_squared": 0.730748,
+            "adf_t": -3.192698,
+            "adf_pvalue": 0.020411
+          },
+          {
+            "target": "GDX",
+            "selected_indices": [
+              7,
+              6,
+              10
+            ],
+            "selected_tickers": [
+              "SLV",
+              "TLT",
+              "IWM"
+            ],
+            "is_stationary": true,
+            "r_squared": 0.877654,
+            "adf_t": -4.834752,
+            "adf_pvalue": 4.7e-05
+          }
+        ]
+      }
+    },
+    "G1_sma_backtest_captured": {
+      "status": "PASS",
+      "elapsed_seconds": 0.015,
+      "result": {
+        "total_return": 0.002586,
+        "sharpe_ratio": 0.153178,
+        "max_drawdown": -0.029588,
+        "total_trades": 9,
+        "win_rate": 0.444444,
+        "data_rows": 250
+      }
+    },
+    "G2_event_vs_vectorized": {
+      "status": "PASS",
+      "elapsed_seconds": 0.016,
+      "result": {
+        "vectorized": {
+          "total_return": 0.011367,
+          "total_trades": 9,
+          "sharpe": 0.153178
+        },
+        "event_driven": {
+          "total_return": -2.8e-05,
+          "total_trades": 9,
+          "sharpe": -0.090755
+        },
+        "delta_return": 0.01139542
+      }
+    }
+  },
+  "summary": {
+    "total": 12,
+    "passed": 12,
+    "failed": 0,
+    "pass_rate": "100%"
+  }
+}
