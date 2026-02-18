@@ -68,6 +68,30 @@ import numpy as np
 from praxis.logger.core import PraxisLogger
 
 
+def _fmt_rate(rate: float) -> str:
+    """Format a rate value for progress display, avoiding '0.0/s'."""
+    if rate >= 1.0:
+        return f"{rate:.1f}/s"
+    elif rate >= 0.01:
+        return f"{rate:.2f}/s"
+    elif rate > 0:
+        # Show as seconds per point instead
+        return f"{1/rate:.0f}s/pt"
+    return "?/s"
+
+
+def _fmt_eta(seconds: float) -> str:
+    """Format ETA as human-readable duration."""
+    if seconds < 120:
+        return f"{seconds:.0f}s"
+    elif seconds < 7200:
+        return f"{seconds/60:.0f}m"
+    else:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        return f"{h}h{m:02d}m"
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Protocols — The Flaggable Interfaces
 # ═══════════════════════════════════════════════════════════════════
@@ -823,7 +847,7 @@ class CriticalValueSurface:
                     eta = (total - completed) / rate if rate > 0 else 0
                     self._log.info(
                         f"Surface '{req.surface_id}': {completed}/{total} "
-                        f"({rate:.1f}/s, ETA {eta:.0f}s)",
+                        f"({_fmt_rate(rate)}, ETA {_fmt_eta(eta)})",
                         tags={"surface"},
                     )
         else:
@@ -862,7 +886,7 @@ class CriticalValueSurface:
                             eta = (total - completed) / rate if rate > 0 else 0
                             self._log.info(
                                 f"Surface '{req.surface_id}': {completed}/{total} "
-                                f"({rate:.1f}/s, ETA {eta:.0f}s)",
+                                f"({_fmt_rate(rate)}, ETA {_fmt_eta(eta)})",
                                 tags={"surface"},
                             )
 
@@ -2007,7 +2031,7 @@ class CompositeSurface:
                     eta = (total - completed) / rate if rate > 0 else 0
                     self._log.info(
                         f"CompositeSurface: {completed}/{total} "
-                        f"({rate:.1f}/s, ETA {eta:.0f}s)",
+                        f"({_fmt_rate(rate)}, ETA {_fmt_eta(eta)})",
                         tags={"surface"},
                     )
         else:
@@ -2043,7 +2067,7 @@ class CompositeSurface:
                             eta = (total - completed) / rate if rate > 0 else 0
                             self._log.info(
                                 f"CompositeSurface: {completed}/{total} "
-                                f"({rate:.1f}/s, ETA {eta:.0f}s)",
+                                f"({_fmt_rate(rate)}, ETA {_fmt_eta(eta)})",
                                 tags={"surface"},
                             )
                     except Exception as e:

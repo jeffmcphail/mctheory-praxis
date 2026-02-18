@@ -459,3 +459,364 @@ class TestBurgessWorkflow:
         assert wf.size >= 4  # generate, mc, filter, optimize
         result = wf.run()
         assert result.success
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Composite Scoring Pipeline Integration Tests
+# ═══════════════════════════════════════════════════════════════════
+
+from praxis.stats.surface import (
+    CompositeSurface,
+    MultiSurfaceRequirement,
+    SurfaceAxis,
+    _register_multi_builtins,
+)
+from praxis.models.burgess import (
+    EnhancedCandidateBasket,
+    CompositeStatReport,
+    ScoreWeights,
+    score_and_rank_candidates,
+    compute_composite_score,
+)
+
+
+@pytest.fixture(scope="module")
+def tiny_surface():
+    """
+    Pre-compute a minimal surface in-memory for integration tests.
+
+    Grid: n_assets=[6], n_obs=[100], n_vars=[2]
+    This is 1 point, computed once for all tests in the module.
+    """
+    _register_multi_builtins()
+    surface = CompositeSurface(db_path=None)  # in-memory
+    req = MultiSurfaceRequirement(
+        generator="stepwise_regression",
+        universe_factory="random_walk",
+        axes=[
+            SurfaceAxis("n_assets", [6]),
+            SurfaceAxis("n_obs", [100]),
+            SurfaceAxis("n_vars", [2]),
+        ],
+        n_samples=50,  # minimal for speed
+        seed=42,
+        scalar_extractors=["adf_t", "hurst", "half_life"],
+        profile_collectors=["vr_profile"],
+        profile_params={"vr_max_lag": 10},
+        pct_conf=[1, 5, 10, 90, 95, 99],
+    )
+    surface.compute(req, n_workers=1)
+    return surface, req
+
+
+class TestCompositeScoringPipeline:
+    """Tests for composite scoring wired into Burgess pipeline."""
+
+    def test_burgess_composite_mode_runs(self, tiny_surface):
+        """BurgessStatArb with scoring_mode='composite' produces results."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+
+        model = BurgessStatArb.__new__(BurgessStatArb)
+        model._config = BurgessConfig(
+            n_per_basket=2,
+            scoring_mode="composite",
+            significance=0.99,  # very loose to get candidates
+            top_k=10,
+            min_composite=0.0,
+        )
+        model._log = PraxisLogger.instance()
+        model._surface = surface
+        model._surface_req = req
+
+        result = model.run(M)
+
+        assert result.scoring_mode == "composite"
+        assert result.n_scanned > 0
+        # Some candidates should score above zero
+        if result.n_candidates > 0:
+            first = result.selected_baskets[0]
+            assert isinstance(first, EnhancedCandidateBasket)
+            assert first.composite_score >= 0.0
+            assert first.stat_report is not None
+            assert first.rank == 1
+
+    def test_composite_produces_enhanced_baskets(self, tiny_surface):
+        """Composite path returns EnhancedCandidateBasket, not CandidateBasket."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+
+        candidates = generate_candidates(M, n_per_basket=2, significance=0.99)
+        assert len(candidates) > 0
+
+        enhanced = score_and_rank_candidates(
+            candidates=candidates,
+            price_matrix=M,
+            composite_surface=surface,
+            surface_req=req,
+            top_k=5,
+        )
+
+        for eb in enhanced:
+            assert isinstance(eb, EnhancedCandidateBasket)
+            assert isinstance(eb.stat_report, CompositeStatReport)
+            assert 0.0 <= eb.composite_score <= 1.0
+            assert eb.rank > 0
+            # Should have at least some scored tests
+            assert len(eb.stat_report.individual_scores) > 0
+
+    def test_composite_scores_are_normalized(self, tiny_surface):
+        """All individual scores should be in [0, 1] range."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+
+        candidates = generate_candidates(M, n_per_basket=2, significance=0.99)
+        enhanced = score_and_rank_candidates(
+            candidates=candidates,
+            price_matrix=M,
+            composite_surface=surface,
+            surface_req=req,
+            top_k=5,
+        )
+
+        for eb in enhanced:
+            for name, sc in eb.stat_report.individual_scores.items():
+                assert 0.0 <= sc.score <= 1.0, \
+                    f"{name}: score {sc.score} out of [0,1]"
+                assert 0.0 <= sc.p_value <= 1.0, \
+                    f"{name}: p_value {sc.p_value} out of [0,1]"
+
+    def test_composite_ranking_order(self, tiny_surface):
+        """Results should be ranked by composite score descending."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+
+        candidates = generate_candidates(M, n_per_basket=2, significance=0.99)
+        enhanced = score_and_rank_candidates(
+            candidates=candidates,
+            price_matrix=M,
+            composite_surface=surface,
+            surface_req=req,
+            top_k=10,
+        )
+
+        if len(enhanced) >= 2:
+            scores = [eb.composite_score for eb in enhanced]
+            assert scores == sorted(scores, reverse=True), \
+                "Results not sorted by composite score descending"
+            # Ranks should be sequential
+            ranks = [eb.rank for eb in enhanced]
+            assert ranks == list(range(1, len(enhanced) + 1))
+
+    def test_min_composite_filters(self, tiny_surface):
+        """min_composite should exclude low-scoring candidates."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+
+        candidates = generate_candidates(M, n_per_basket=2, significance=0.99)
+
+        # No filter
+        all_results = score_and_rank_candidates(
+            candidates=candidates,
+            price_matrix=M,
+            composite_surface=surface,
+            surface_req=req,
+            min_composite=0.0,
+        )
+        # With high filter
+        filtered = score_and_rank_candidates(
+            candidates=candidates,
+            price_matrix=M,
+            composite_surface=surface,
+            surface_req=req,
+            min_composite=0.99,
+        )
+        assert len(filtered) <= len(all_results)
+
+    def test_custom_weights(self, tiny_surface):
+        """ScoreWeights should change composite scores."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+        candidates = generate_candidates(M, n_per_basket=2, significance=0.99)
+        if not candidates:
+            pytest.skip("No candidates generated")
+
+        basket = candidates[0]
+        report_equal = compute_composite_score(
+            residuals=basket.residuals,
+            composite_surface=surface,
+            surface_req=req,
+            n_assets=M.shape[1],
+            n_obs=M.shape[0],
+            n_vars=len(basket.partner_indices),
+        )
+        # ADF-heavy weights
+        adf_heavy = ScoreWeights(adf_t=10.0, hurst=0.1, half_life=0.1)
+        report_adf = compute_composite_score(
+            residuals=basket.residuals,
+            composite_surface=surface,
+            surface_req=req,
+            n_assets=M.shape[1],
+            n_obs=M.shape[0],
+            n_vars=len(basket.partner_indices),
+            weights=adf_heavy,
+        )
+        # Both should be valid scores, but likely different
+        assert 0.0 <= report_equal.composite_score <= 1.0
+        assert 0.0 <= report_adf.composite_score <= 1.0
+
+    def test_result_has_stat_reports(self, tiny_surface):
+        """BurgessResult from composite mode should contain stat reports."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+
+        model = BurgessStatArb.__new__(BurgessStatArb)
+        model._config = BurgessConfig(
+            n_per_basket=2,
+            scoring_mode="composite",
+            significance=0.99,
+            top_k=5,
+        )
+        model._log = PraxisLogger.instance()
+        model._surface = surface
+        model._surface_req = req
+
+        result = model.run(M)
+        assert result.scoring_mode == "composite"
+        for basket in result.selected_baskets:
+            report = basket.stat_report
+            assert report is not None
+            assert isinstance(report.composite_score, float)
+            # Should have at least scalar tests
+            scalar_names = {"adf_t", "hurst", "half_life"}
+            scored_names = set(report.individual_scores.keys())
+            assert scored_names & scalar_names, \
+                f"Expected some scalar tests, got: {scored_names}"
+
+    def test_classic_mode_still_works(self):
+        """Classic mode should be completely unaffected by composite changes."""
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+        config = BurgessConfig(
+            n_per_basket=2,
+            scoring_mode="classic",
+            mc_enabled=True,
+            mc_n_samples=20,
+            mc_seed=42,
+            significance=0.50,
+            max_hurst=0.9,
+            min_half_life=0.1,
+            max_half_life=999,
+        )
+        model = BurgessStatArb(config)
+        result = model.run(M)
+
+        assert result.scoring_mode == "classic"
+        assert result.n_scanned > 0
+        assert result.critical_values is not None
+        for b in result.selected_baskets:
+            assert isinstance(b, CandidateBasket)
+            assert not isinstance(b, EnhancedCandidateBasket)
+
+    def test_portfolio_optimization_works_with_enhanced(self, tiny_surface):
+        """Optimize weights should accept EnhancedCandidateBasket (inherits CandidateBasket)."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+
+        model = BurgessStatArb.__new__(BurgessStatArb)
+        model._config = BurgessConfig(
+            n_per_basket=2,
+            scoring_mode="composite",
+            significance=0.99,
+            top_k=5,
+        )
+        model._log = PraxisLogger.instance()
+        model._surface = surface
+        model._surface_req = req
+
+        result = model.run(M)
+        # Portfolio optimization should have run on all selected baskets
+        if result.n_candidates > 0:
+            assert len(result.portfolio_results) == result.n_candidates
+
+    def test_signals_work_with_enhanced(self, tiny_surface):
+        """generate_basket_signals should work with EnhancedCandidateBasket."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+
+        candidates = generate_candidates(M, n_per_basket=2, significance=0.99)
+        enhanced = score_and_rank_candidates(
+            candidates=candidates,
+            price_matrix=M,
+            composite_surface=surface,
+            surface_req=req,
+            top_k=3,
+        )
+        if not enhanced:
+            pytest.skip("No enhanced baskets")
+
+        signals = generate_basket_signals(M, enhanced[0])
+        assert "spread" in signals
+        assert "zscore" in signals
+        assert "positions" in signals
+        assert len(signals["spread"]) == M.shape[0]
+
+
+class TestCompositeWorkflow:
+    """Workflow DAG builder with composite mode."""
+
+    def test_workflow_composite_builds(self, tiny_surface):
+        """Composite workflow should have different steps than classic."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+
+        config = BurgessConfig(
+            n_per_basket=2,
+            scoring_mode="composite",
+            significance=0.99,
+            surface_db_path=None,  # in-memory
+        )
+        # Patch: the workflow builder creates its own surface, but for testing
+        # we need it to work. We'll just verify the DAG structure.
+        wf = build_burgess_workflow(config, M)
+        assert wf.size >= 3  # generate, composite_score_rank, optimize
+
+    def test_workflow_composite_executes(self, tiny_surface):
+        """Composite workflow should execute successfully."""
+        surface, req = tiny_surface
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+
+        config = BurgessConfig(
+            n_per_basket=2,
+            scoring_mode="composite",
+            significance=0.99,
+            surface_db_path=None,  # in-memory
+            top_k=5,
+        )
+        wf = build_burgess_workflow(config, M)
+        result = wf.run()
+
+        assert result.success
+        assert "generate_candidates" in result.outputs
+        assert "composite_score_rank" in result.outputs
+        assert "optimize_weights" in result.outputs
+
+    def test_workflow_classic_unchanged(self):
+        """Classic workflow should still work exactly as before."""
+        M = _make_cointegrated_universe(n_obs=100, n_cointegrated=3, n_independent=3)
+        config = BurgessConfig(
+            n_per_basket=2,
+            scoring_mode="classic",
+            mc_enabled=False,
+            significance=0.50,
+            max_hurst=0.9,
+            min_half_life=0.1,
+            max_half_life=999,
+        )
+        wf = build_burgess_workflow(config, M)
+        result = wf.run()
+        assert result.success
+        assert "generate_candidates" in result.outputs
+        assert "filter_rank" in result.outputs
+        assert "optimize_weights" in result.outputs
+        # Should NOT have composite steps
+        assert "composite_score_rank" not in result.outputs

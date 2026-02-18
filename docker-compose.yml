@@ -1,0 +1,70 @@
+# =====================================================================
+#  McTheory Praxis — Docker Compose
+# =====================================================================
+#
+#  Services:
+#    surface-build  — Compute critical value surfaces
+#    test           — Run test suite
+#    shell          — Interactive development shell
+#
+#  Usage:
+#    # Build Phase 2 surfaces (mount local data dir for persistence)
+#    docker compose run --rm surface-build --phase 2
+#
+#    # Run all phases
+#    docker compose run --rm surface-build --phase all
+#
+#    # Run tests
+#    docker compose run --rm test
+#
+#    # Interactive shell
+#    docker compose run --rm -it shell
+#
+#    # Merge remote surface DB
+#    docker compose run --rm -v /path/to/remote:/remote merge /remote/surfaces.duckdb
+# =====================================================================
+
+services:
+  # ── Surface Builder ──────────────────────────────────────────
+  # CPU-intensive: uses all available cores
+  surface-build:
+    build: .
+    image: praxis:latest
+    command: ["surface-build", "--phase", "1"]
+    volumes:
+      - ./data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 2G
+
+  # ── Test Runner ──────────────────────────────────────────────
+  test:
+    build: .
+    image: praxis:latest
+    command: ["test", "-v", "--tb=short"]
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+
+  # ── Interactive Shell ────────────────────────────────────────
+  shell:
+    build: .
+    image: praxis:latest
+    command: ["shell"]
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+
+  # ── Surface Merger ───────────────────────────────────────────
+  # Mount remote DB file and merge into local
+  merge:
+    build: .
+    image: praxis:latest
+    entrypoint: ["python", "scripts/merge_surfaces.py"]
+    volumes:
+      - ./data:/app/data

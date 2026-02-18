@@ -1,0 +1,43 @@
+# Surface builder Job
+# Runs build_surface.py to completion, restarts on failure
+# Phase configured via overlay patch
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: praxis-surface
+  namespace: praxis
+  labels:
+    app: praxis
+    component: surface
+spec:
+  # Don't auto-delete finished pods (inspect logs)
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: praxis
+        component: surface
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: surface-builder
+          # Default: pull from ghcr.io. Override in local overlay for dev builds.
+          image: ghcr.io/mctheory/praxis:latest
+          imagePullPolicy: IfNotPresent
+          command: ["surface-build"]
+          args: ["--phase", "all", "--vr-max-lag", "50"]
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+            limits:
+              cpu: "8"
+              memory: 8Gi
+          volumeMounts:
+            - name: surface-data
+              mountPath: /app/data
+      volumes:
+        - name: surface-data
+          persistentVolumeClaim:
+            claimName: surface-data

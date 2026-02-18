@@ -102,14 +102,22 @@ class BurgessConfig:
     max_half_life: float = 252.0     # 1 year
     max_hurst: float = 0.5
 
-    # Monte Carlo
+    # Monte Carlo (classic mode only)
     mc_enabled: bool = True
     mc_n_samples: int = 1000
     mc_seed: int | None = 42
 
-    # Selection
+    # Selection (classic mode)
     top_k: int = 20
     rank_by: str = "adjusted_pvalue"  # or "adf_t", "hurst", "half_life"
+
+    # ── Composite scoring (surface mode) ─────────────────────
+    scoring_mode: str = "classic"    # "classic" or "composite"
+    surface_db_path: str = "data/surfaces.duckdb"
+    score_weights: ScoreWeights | None = None
+    min_composite: float = 0.0       # minimum composite score to include
+    min_significant_tests: int = 0   # minimum number of significant tests
+    vr_max_lag: int = 50
 
     # Weight optimization
     optimization_method: str = "min_variance"
@@ -131,11 +139,16 @@ class BurgessResult:
     n_candidates: int = 0
     candidates: list[CandidateBasket] = field(default_factory=list)
 
-    # Selected
-    selected_baskets: list[CandidateBasket] = field(default_factory=list)
+    # Selected (classic mode: CandidateBasket, composite: EnhancedCandidateBasket)
+    selected_baskets: list = field(default_factory=list)
 
-    # MC correction
+    # MC correction (classic mode)
     critical_values: CriticalValues | None = None
+
+    # Composite scoring (composite mode)
+    scoring_mode: str = "classic"
+    composite_surface: Any = None     # CompositeSurface instance (not serialized)
+    score_weights_used: dict = field(default_factory=dict)
 
     # Portfolio weights
     portfolio_results: list[PortfolioResult] = field(default_factory=list)
@@ -408,16 +421,59 @@ class BurgessStatArb:
     """
     Full Burgess Statistical Arbitrage pipeline.
 
-    Chains: candidates → MC correction → filter/rank → optimize → signals.
+    Two scoring modes:
+      "classic"   — MC correction + filter_and_rank (slow, no precompute needed)
+      "composite" — Surface lookup + composite scoring (fast, requires surfaces.duckdb)
+
+    Classic:   candidates → MC correction → filter/rank → optimize → signals.
+    Composite: candidates → surface scoring → rank → optimize → signals.
     """
 
     def __init__(self, config: BurgessConfig | None = None):
         self._config = config or BurgessConfig()
         self._log = PraxisLogger.instance()
+        self._surface = None
+        self._surface_req = None
 
     @property
     def config(self) -> BurgessConfig:
         return self._config
+
+    def _ensure_surface(self):
+        """Lazy-load CompositeSurface and build requirement on first use."""
+        if self._surface is not None:
+            return
+
+        from praxis.stats.surface import (
+            CompositeSurface,
+            MultiSurfaceRequirement,
+            SurfaceAxis,
+            _register_multi_builtins,
+        )
+        _register_multi_builtins()
+
+        self._surface = CompositeSurface(db_path=self._config.surface_db_path)
+
+        # Build a requirement that matches the production surface grid.
+        # The actual grid values don't matter for queries — they're only
+        # needed for compute(). For query_scalar() and query_artifact(),
+        # the surface_group_id is what matters, and that's derived from
+        # generator + universe_factory + scalar_extractors + profile_collectors.
+        self._surface_req = MultiSurfaceRequirement(
+            generator="stepwise_regression",
+            universe_factory="random_walk",
+            axes=[
+                SurfaceAxis("n_assets", [10]),  # placeholder — only group_id matters
+                SurfaceAxis("n_obs", [200]),
+                SurfaceAxis("n_vars", [3]),
+            ],
+            n_samples=500,
+            seed=42,
+            scalar_extractors=["adf_t", "hurst", "half_life"],
+            profile_collectors=["vr_profile"],
+            profile_params={"vr_max_lag": self._config.vr_max_lag},
+            pct_conf=[1, 5, 10, 90, 95, 99],
+        )
 
     def run(self, price_matrix: np.ndarray) -> BurgessResult:
         """
@@ -433,11 +489,12 @@ class BurgessStatArb:
         t0 = time.monotonic()
         cfg = self._config
         result = BurgessResult()
+        result.scoring_mode = cfg.scoring_mode
 
         # Step 1: Generate candidates
         self._log.info(
             f"Burgess: scanning {price_matrix.shape[1]} assets, "
-            f"n_per_basket={cfg.n_per_basket}",
+            f"n_per_basket={cfg.n_per_basket}, mode={cfg.scoring_mode}",
             tags={"burgess"},
         )
         candidates = generate_candidates(
@@ -449,29 +506,49 @@ class BurgessStatArb:
         result.n_scanned = len(candidates)
         result.candidates = candidates
 
-        # Step 2: Monte Carlo correction
-        if cfg.mc_enabled:
-            n_assets = price_matrix.shape[1]
-            n_obs = price_matrix.shape[0]
-            mc = generate_adf_critical_values(
-                n_assets=n_assets,
-                n_obs=n_obs,
-                n_vars=cfg.n_per_basket,
-                n_samples=cfg.mc_n_samples,
-                seed=cfg.mc_seed,
+        if cfg.scoring_mode == "composite":
+            # ── Composite scoring path ────────────────────────
+            self._ensure_surface()
+
+            selected = score_and_rank_candidates(
+                candidates=candidates,
+                price_matrix=price_matrix,
+                composite_surface=self._surface,
+                surface_req=self._surface_req,
+                weights=cfg.score_weights,
+                top_k=cfg.top_k,
+                min_composite=cfg.min_composite,
+                min_significant_tests=cfg.min_significant_tests,
             )
-            result.critical_values = mc.critical_values
-            candidates = apply_mc_correction(candidates, mc.critical_values)
+            result.selected_baskets = selected
+            result.n_candidates = len(selected)
+            result.composite_surface = self._surface
+            if cfg.score_weights:
+                result.score_weights_used = cfg.score_weights.normalized()
 
-        # Step 3: Filter and rank
-        selected = filter_and_rank(candidates, cfg)
-        result.selected_baskets = selected
-        result.n_candidates = len(selected)
+        else:
+            # ── Classic path ──────────────────────────────────
+            if cfg.mc_enabled:
+                n_assets = price_matrix.shape[1]
+                n_obs = price_matrix.shape[0]
+                mc = generate_adf_critical_values(
+                    n_assets=n_assets,
+                    n_obs=n_obs,
+                    n_vars=cfg.n_per_basket,
+                    n_samples=cfg.mc_n_samples,
+                    seed=cfg.mc_seed,
+                )
+                result.critical_values = mc.critical_values
+                candidates = apply_mc_correction(candidates, mc.critical_values)
 
-        # Step 4: Optimize weights
-        if selected:
+            selected = filter_and_rank(candidates, cfg)
+            result.selected_baskets = selected
+            result.n_candidates = len(selected)
+
+        # Step 3: Optimize weights (works for both modes)
+        if result.selected_baskets:
             result.portfolio_results = optimize_basket_weights(
-                price_matrix, selected,
+                price_matrix, result.selected_baskets,
                 method=cfg.optimization_method,
                 long_only=cfg.long_only,
                 max_weight=cfg.max_weight,
@@ -480,8 +557,9 @@ class BurgessStatArb:
 
         result.elapsed_seconds = time.monotonic() - t0
 
+        mode_label = "composite" if cfg.scoring_mode == "composite" else "classic"
         self._log.info(
-            f"Burgess: {result.n_scanned} scanned → "
+            f"Burgess [{mode_label}]: {result.n_scanned} scanned → "
             f"{result.n_candidates} selected in {result.elapsed_seconds:.1f}s",
             tags={"burgess"},
         )
@@ -500,8 +578,11 @@ def build_burgess_workflow(
     """
     Build a §10 workflow DAG for the Burgess pipeline.
 
-    Steps:
+    Classic mode:
       generate_candidates → mc_correction → filter_rank → optimize → signals
+
+    Composite mode:
+      generate_candidates → composite_score_rank → optimize → signals
 
     This is the declarative version suitable for the workflow executor.
     """
@@ -516,64 +597,137 @@ def build_burgess_workflow(
         significance=cfg.significance,
     ))
 
-    reg.register("mc_correction", lambda candidates=None, **kw: (
-        apply_mc_correction(
-            candidates,
-            generate_adf_critical_values(
-                n_assets=price_matrix.shape[1],
-                n_obs=price_matrix.shape[0],
-                n_vars=cfg.n_per_basket,
-                n_samples=cfg.mc_n_samples,
-                seed=cfg.mc_seed,
-            ).critical_values,
-        ) if candidates else []
-    ))
-
-    reg.register("filter_rank", lambda candidates=None, **kw: (
-        filter_and_rank(candidates or [], cfg)
-    ))
-
-    reg.register("optimize_weights", lambda baskets=None, **kw: (
-        optimize_basket_weights(
-            price_matrix, baskets or [],
-            method=cfg.optimization_method,
-            long_only=cfg.long_only,
-            max_weight=cfg.max_weight,
+    if cfg.scoring_mode == "composite":
+        # ── Composite scoring path ────────────────────────────
+        from praxis.stats.surface import (
+            CompositeSurface,
+            MultiSurfaceRequirement,
+            SurfaceAxis,
+            _register_multi_builtins,
         )
-    ))
+        _register_multi_builtins()
 
-    # Build DAG
-    wf = WorkflowExecutor(registry=reg)
+        surface = CompositeSurface(db_path=cfg.surface_db_path)
+        surface_req = MultiSurfaceRequirement(
+            generator="stepwise_regression",
+            universe_factory="random_walk",
+            axes=[
+                SurfaceAxis("n_assets", [10]),
+                SurfaceAxis("n_obs", [200]),
+                SurfaceAxis("n_vars", [3]),
+            ],
+            n_samples=500,
+            seed=42,
+            scalar_extractors=["adf_t", "hurst", "half_life"],
+            profile_collectors=["vr_profile"],
+            profile_params={"vr_max_lag": cfg.vr_max_lag},
+            pct_conf=[1, 5, 10, 90, 95, 99],
+        )
 
-    wf.add_step(WorkflowStep(
-        id="generate_candidates",
-        function="generate_candidates",
-    ))
+        reg.register("composite_score_rank", lambda candidates=None, **kw: (
+            score_and_rank_candidates(
+                candidates=candidates or [],
+                price_matrix=price_matrix,
+                composite_surface=surface,
+                surface_req=surface_req,
+                weights=cfg.score_weights,
+                top_k=cfg.top_k,
+                min_composite=cfg.min_composite,
+                min_significant_tests=cfg.min_significant_tests,
+            )
+        ))
 
-    if cfg.mc_enabled:
+        reg.register("optimize_weights", lambda baskets=None, **kw: (
+            optimize_basket_weights(
+                price_matrix, baskets or [],
+                method=cfg.optimization_method,
+                long_only=cfg.long_only,
+                max_weight=cfg.max_weight,
+            )
+        ))
+
+        # Build DAG
+        wf = WorkflowExecutor(registry=reg)
+
         wf.add_step(WorkflowStep(
-            id="mc_correction",
-            function="mc_correction",
+            id="generate_candidates",
+            function="generate_candidates",
+        ))
+
+        wf.add_step(WorkflowStep(
+            id="composite_score_rank",
+            function="composite_score_rank",
             params={"candidates": "generate_candidates.output"},
             depends_on=["generate_candidates"],
         ))
-        rank_dep = "mc_correction"
+
+        wf.add_step(WorkflowStep(
+            id="optimize_weights",
+            function="optimize_weights",
+            params={"baskets": "composite_score_rank.output"},
+            depends_on=["composite_score_rank"],
+        ))
+
     else:
-        rank_dep = "generate_candidates"
+        # ── Classic path ──────────────────────────────────────
+        reg.register("mc_correction", lambda candidates=None, **kw: (
+            apply_mc_correction(
+                candidates,
+                generate_adf_critical_values(
+                    n_assets=price_matrix.shape[1],
+                    n_obs=price_matrix.shape[0],
+                    n_vars=cfg.n_per_basket,
+                    n_samples=cfg.mc_n_samples,
+                    seed=cfg.mc_seed,
+                ).critical_values,
+            ) if candidates else []
+        ))
 
-    wf.add_step(WorkflowStep(
-        id="filter_rank",
-        function="filter_rank",
-        params={"candidates": f"{rank_dep}.output"},
-        depends_on=[rank_dep],
-    ))
+        reg.register("filter_rank", lambda candidates=None, **kw: (
+            filter_and_rank(candidates or [], cfg)
+        ))
 
-    wf.add_step(WorkflowStep(
-        id="optimize_weights",
-        function="optimize_weights",
-        params={"baskets": "filter_rank.output"},
-        depends_on=["filter_rank"],
-    ))
+        reg.register("optimize_weights", lambda baskets=None, **kw: (
+            optimize_basket_weights(
+                price_matrix, baskets or [],
+                method=cfg.optimization_method,
+                long_only=cfg.long_only,
+                max_weight=cfg.max_weight,
+            )
+        ))
+
+        # Build DAG
+        wf = WorkflowExecutor(registry=reg)
+
+        wf.add_step(WorkflowStep(
+            id="generate_candidates",
+            function="generate_candidates",
+        ))
+
+        if cfg.mc_enabled:
+            wf.add_step(WorkflowStep(
+                id="mc_correction",
+                function="mc_correction",
+                params={"candidates": "generate_candidates.output"},
+                depends_on=["generate_candidates"],
+            ))
+            rank_dep = "mc_correction"
+        else:
+            rank_dep = "generate_candidates"
+
+        wf.add_step(WorkflowStep(
+            id="filter_rank",
+            function="filter_rank",
+            params={"candidates": f"{rank_dep}.output"},
+            depends_on=[rank_dep],
+        ))
+
+        wf.add_step(WorkflowStep(
+            id="optimize_weights",
+            function="optimize_weights",
+            params={"baskets": "filter_rank.output"},
+            depends_on=["filter_rank"],
+        ))
 
     return wf
 

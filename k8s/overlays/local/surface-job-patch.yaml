@@ -1,0 +1,29 @@
+# Local K8s overlay: run surface compute on laptop/server
+#
+# Two image modes:
+#   A) Local build: make build → imagePullPolicy: Never (default below)
+#   B) Registry pull: make pull → change imagePullPolicy to IfNotPresent
+#      and image to ghcr.io/mctheory/praxis:latest
+#
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: praxis-surface
+spec:
+  template:
+    spec:
+      containers:
+        - name: surface-builder
+          # Mode A: local build (make build first)
+          image: praxis:latest
+          imagePullPolicy: Never
+          # Run all phases (skips already-computed points automatically)
+          args: ["--phase", "all", "--vr-max-lag", "50"]
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+            limits:
+              # Adjust to target machine. i7-8565U: 4C/8T, 32GB
+              cpu: "7"
+              memory: 16Gi

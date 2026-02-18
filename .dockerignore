@@ -1,0 +1,45 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+dist
+build
+
+# Virtual env
+.venv
+venv
+env
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Data (mounted as volume, not baked into image)
+data/
+*.duckdb
+*.duckdb.wal
+
+# Environment (never include secrets)
+.env
+
+# Test artifacts
+.pytest_cache
+.coverage
+htmlcov
+.ruff_cache
+
+# Docs / spikes (not needed in container)
+claude/
+docs/
+spikes/
+examples/
+LICENSE
+README.md

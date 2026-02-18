@@ -1,0 +1,18 @@
+# Persistent storage for surfaces.duckdb
+# Survives pod restarts so interrupted builds can resume
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: surface-data
+  namespace: praxis
+  labels:
+    app: praxis
+    component: surface
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # Phase 1: ~87 MB, Full grid: ~300 MB estimated
+      # Extra room for working space
+      storage: 1Gi

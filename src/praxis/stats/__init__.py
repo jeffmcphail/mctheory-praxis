@@ -279,7 +279,9 @@ def hurst_exponent(series: np.ndarray) -> HurstResult:
             rs_chunk.append(R / S)
 
         if rs_chunk:
-            rs_values.append((lag, np.mean(rs_chunk)))
+            mean_rs = np.mean(rs_chunk)
+            if mean_rs > 0:  # Skip lags where R/S collapsed to zero
+                rs_values.append((lag, mean_rs))
 
     if len(rs_values) < 3:
         return HurstResult(hurst_exponent=0.5)
