@@ -111,15 +111,32 @@ class AllocationEngine(TimeSeriesEngine):
             except: return np.ones(n)/n
         elif m == "risk_parity":
             budget = params.risk_budget if params.risk_budget is not None else np.ones(n)/n
-            w = np.ones(n)/n
-            for _ in range(100):
-                sp = np.sqrt(w@cov@w)
-                if sp < 1e-12: break
-                rc = w*(cov@w)/sp; trc = budget*sp
-                wn = w*trc/np.maximum(rc,1e-12); wn = wn/wn.sum()
-                if np.max(np.abs(wn-w)) < 1e-8: w=wn; break
-                w = wn
-            return w
+            # Spinu (2013) convex formulation:
+            #   minimize  0.5 * w^T Σ w - Σ_i b_i * log(w_i)
+            # Newton's method on the unconstrained (w>0) problem.
+            # Normalize only at the end — preserves risk budget ratios.
+            w = np.ones(n)  # unnormalized starting point
+            for _ in range(200):
+                grad = cov @ w - budget / w
+                hess = cov + np.diag(budget / (w * w))
+                try:
+                    step = np.linalg.solve(hess, -grad)
+                except np.linalg.LinAlgError:
+                    break
+                # Line search to keep w > 0
+                alpha = 1.0
+                for _ls in range(50):
+                    if np.all(w + alpha * step > 1e-14):
+                        break
+                    alpha *= 0.5
+                else:
+                    break  # line search exhausted
+                w = w + alpha * step
+                if np.max(np.abs(grad)) < 1e-14:
+                    break
+            w = np.maximum(w, 0)
+            s = w.sum()
+            return w / s if s > 0 else np.ones(n) / n
         elif m == "target_vol":
             try: inv=np.linalg.inv(cov); o=np.ones(n); bw=inv@o/(o@inv@o)
             except: bw=np.ones(n)/n
