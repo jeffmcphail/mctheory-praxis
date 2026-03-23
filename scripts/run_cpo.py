@@ -55,7 +55,7 @@ def build_strategy(args):
         )
     elif args.strategy == "crypto_ta":
         from engines.crypto_ta_strategy import CryptoTAStrategy
-        assets = args.crypto_assets.split(",") if args.crypto_assets else None
+        assets = args.assets.split(",") if args.assets else None
         return CryptoTAStrategy(
             assets=assets,
             cache_dir=args.cache_dir,
@@ -63,8 +63,22 @@ def build_strategy(args):
             training_start=args.training_start,
             training_end=args.training_end,
         )
+    elif args.strategy in ("futures_ta", "fx_ta", "universal_ta"):
+        from engines.universal_ta_strategy import UniversalTAStrategy
+        # Map strategy name to asset class
+        ac_map = {"futures_ta": "futures", "fx_ta": "fx", "universal_ta": args.asset_class}
+        ac = ac_map[args.strategy]
+        assets = args.assets.split(",") if args.assets else None
+        return UniversalTAStrategy(
+            asset_class=ac,
+            assets=assets,
+            cache_dir=args.cache_dir,
+            training_start=args.training_start,
+            training_end=args.training_end,
+        )
     else:
-        raise ValueError(f"Unknown strategy: {args.strategy}. Available: pairs, crypto_ta")
+        raise ValueError(f"Unknown strategy: {args.strategy}. "
+                         f"Available: pairs, crypto_ta, futures_ta, fx_ta, universal_ta")
 
 
 def cmd_phase2(args):
@@ -192,9 +206,13 @@ def cmd_full(args):
 
 def main():
     parser = argparse.ArgumentParser(description="CPO Pipeline — Generic Runner")
-    parser.add_argument("--strategy", required=True, choices=["pairs", "crypto_ta"],
+    parser.add_argument("--strategy", required=True,
+                        choices=["pairs", "crypto_ta", "futures_ta", "fx_ta", "universal_ta"],
                         help="Trading strategy to use")
-    parser.add_argument("--output-dir", type=Path, default=Path("output/burgess"))
+    parser.add_argument("--asset-class", default="crypto",
+                        choices=["crypto", "futures", "fx"],
+                        help="Asset class (universal_ta strategy only)")
+    parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--cache-dir", default="data/minute_cache")
     parser.add_argument("--top-n", type=int, default=50)
     parser.add_argument("--tc-bps", type=float, default=2.0)
@@ -217,8 +235,8 @@ def main():
     # Strategy-specific args
     parser.add_argument("--pairs-json", type=str, default=None,
                         help="Path to Burgess pairs JSON (pairs strategy)")
-    parser.add_argument("--crypto-assets", type=str, default=None,
-                        help="Comma-separated crypto assets (crypto_ta strategy, default: BTC,ETH,SOL,...)")
+    parser.add_argument("--assets", type=str, default=None,
+                        help="Comma-separated asset names to trade (default: all in asset class)")
 
     subparsers = parser.add_subparsers(dest="phase", required=True)
 
@@ -247,8 +265,19 @@ def main():
     if args.strategy == "pairs" and not args.pairs_json:
         parser.error("--pairs-json required for pairs strategy")
     if args.strategy == "crypto_ta":
-        if args.output_dir == Path("output/burgess"):
-            args.output_dir = Path("output/crypto_ta")  # sensible default
+        if args.output_dir is None:
+            args.output_dir = Path("output/crypto_ta")
+    elif args.strategy == "futures_ta":
+        if args.output_dir is None:
+            args.output_dir = Path("output/futures_ta")
+    elif args.strategy == "fx_ta":
+        if args.output_dir is None:
+            args.output_dir = Path("output/fx_ta")
+    elif args.strategy == "universal_ta":
+        if args.output_dir is None:
+            args.output_dir = Path(f"output/{args.asset_class}_ta")
+    elif args.output_dir is None:
+        args.output_dir = Path("output/burgess")
 
     if args.phase == "phase2":
         cmd_phase2(args)

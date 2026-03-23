@@ -199,3 +199,74 @@ A systematic knowledge base mapping the landscape of trading strategies across a
 | Code location | engines/cpo_core.py, engines/*_strategy.py |
 | Data sources | Polygon.io (equities), CCXT/Binance (crypto) |
 | Total experiments | 2 complete, 6 pending |
+
+---
+
+### 3. TA_STANDARD × FUTURES (ES, NQ, YM, RTY, CL, GC, SI, NG)
+
+| Attribute | Value |
+|-----------|-------|
+| **Date** | 2026-03-23 |
+| **Framework** | CPO universal TA strategy, yfinance hourly bars |
+| **Signal** | 8 TA types (same as crypto) |
+| **Assets** | ES, NQ, YM, RTY (index), CL, GC, SI, NG (commodity) |
+| **TC** | 1.0 bps/leg × 2 legs = 2 bps round-trip |
+
+**Test A — Train 2025, OOS 2026 Q1:**
+- Pre-filter KEEP: VWAP_REV, STOCH, ATR_BREAK, BOLL, RSI
+- OOS: +7.16%, Sharpe +1.70, 24/40 positive — **appeared positive**
+
+**Test B — Validation: Train H1 2025, OOS H2 2025:**
+- Pre-filter KEEP: ATR_BREAK, MACD, EMA_CROSS (completely different!)
+- OOS: -2.45%, Sharpe -1.38, 8/24 positive — **failed validation**
+
+**Conclusion:** Futures TA result was regime-dependent, not structural.
+
+---
+
+### 4. TA_STANDARD × FX_G10 (EUR/USD, GBP/USD, USD/JPY, AUD/USD, etc.)
+
+| Attribute | Value |
+|-----------|-------|
+| **Date** | 2026-03-23 |
+| **Framework** | CPO universal TA strategy, yfinance hourly bars |
+| **Signal** | 8 TA types (same as crypto/futures) |
+| **Assets** | EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD, EURGBP |
+| **TC** | 0.5 bps/leg × 2 legs = 1 bps round-trip (tightest of all classes) |
+
+**Test — Train 2025, OOS 2026 Q1:**
+- Pre-filter KEEP: EMA_CROSS, ATR_BREAK, STOCH, MACD
+- OOS: -0.31%, Sharpe -0.59, 14/32 positive — flat/negative
+
+**Conclusion:** Even with the lowest TC of any asset class, standard TA shows no edge on FX.
+
+---
+
+## UNIVERSAL PRINCIPLE (confirmed across 4 asset classes, 6 experiments)
+
+> **Standard TA signals have no persistent edge on any asset class.**
+>
+> Model type rankings invert on 6-12 month timescales. Config optimization
+> provides genuine +5-10% win rate lift, but cannot rescue a model universe
+> with zero average alpha. Any positive result from a single OOS window is
+> regime-dependent, not structural.
+>
+> **Implication for future research:** Skip any paper proposing "TA indicator
+> with optimized parameters" on any asset class. Focus instead on:
+> - Structural/mechanical signals (funding rate, order flow, liquidation cascades)
+> - Documented risk premia (momentum factor, carry, value)
+> - Information edges (on-chain metrics, alternative data, NLP sentiment)
+
+## Updated landscape matrix
+
+| Signal \ Asset | Crypto | Equities | Futures | FX |
+|---------------|--------|----------|---------|-----|
+| TA_STANDARD | ❌ No edge | ❌ No edge (TC) | ❌ No edge (validated) | ❌ No edge |
+| MEAN_REVERSION | — | ❌ No edge (TC) | — | — |
+| MOMENTUM | **TODO** | — | **TODO** | — |
+| MICROSTRUCTURE | **TODO** | — | — | — |
+| FUNDAMENTAL | — | — | — | **TODO** (carry) |
+| ALTERNATIVE | **TODO** | — | — | — |
+
+Total experiments: 6 complete (4 negative, 1 false positive caught, 1 TC-killed)
+Total experiments remaining: 4+ in promising regions
