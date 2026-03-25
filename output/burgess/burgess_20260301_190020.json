@@ -1,0 +1,99 @@
+{
+  "timestamp": "2026-03-01T19:00:20.823514",
+  "n_assets": 458,
+  "n_obs": 1149,
+  "n_train": 804,
+  "n_test": 345,
+  "n_significant": 2,
+  "n_oos_passed": 2,
+  "n_backtested": 2,
+  "phase_times": {
+    "scan": 38.209947899973486,
+    "surface_filter": 399.23401549999835,
+    "oos_validation": 0.08243940002284944,
+    "backtest": 0.4746622999664396,
+    "metrics": 0.0014873999753035605
+  },
+  "significant_baskets": [
+    {
+      "rank": 1,
+      "target": "GOOG",
+      "basket": [
+        "GOOGL",
+        "MAA",
+        "DUK"
+      ],
+      "composite_score": 0.599768126031302,
+      "adf_t": -7.168582650579921,
+      "adf_p": 2.843465463409255e-10,
+      "hurst": 0.8918825159254209,
+      "half_life": 2.688133289633862,
+      "surface_tests_passed": 5,
+      "surface_tests_total": 6
+    },
+    {
+      "rank": 2,
+      "target": "GOOGL",
+      "basket": [
+        "GOOG",
+        "UDR",
+        "DUK"
+      ],
+      "composite_score": 0.5842308828749196,
+      "adf_t": -7.1423884569771126,
+      "adf_p": 3.298420382006078e-10,
+      "hurst": 0.9003031468611976,
+      "half_life": 2.7576352193585576,
+      "surface_tests_passed": 5,
+      "surface_tests_total": 6
+    }
+  ],
+  "performance": [
+    {
+      "target": "GOOGL",
+      "basket": [
+        "GOOG",
+        "UDR",
+        "DUK"
+      ],
+      "sharpe": -0.7302164495850384,
+      "sortino": -0.4320730245349445,
+      "calmar": -0.19038029836225898,
+      "annual_return": -1.1593967746812025e-05,
+      "annual_vol": 1.5877439837736542e-05,
+      "max_drawdown": -6.089898926805346e-05,
+      "max_dd_duration": 585,
+      "win_rate": 0.9245283018867925,
+      "avg_win": 0.9127757649477868,
+      "avg_loss": -2.640422366928379,
+      "profit_factor": 4.792685103527755,
+      "n_trades": 53,
+      "avg_hold_days": 10.339622641509434,
+      "total_costs": 0.1339748554697453,
+      "turnover": 23.24804177545692
+    },
+    {
+      "target": "GOOG",
+      "basket": [
+        "GOOGL",
+        "MAA",
+        "DUK"
+      ],
+      "sharpe": -0.8537260931823177,
+      "sortino": -0.5249384526725246,
+      "calmar": -0.20433120320062245,
+      "annual_return": -1.3956375592083544e-05,
+      "annual_vol": 1.634760340996522e-05,
+      "max_drawdown": -6.830271330796445e-05,
+      "max_dd_duration": 562,
+      "win_rate": 0.9491525423728814,
+      "avg_win": 0.9296144269500496,
+      "avg_loss": -5.35232633220966,
+      "profit_factor": 5.3847216568825464,
+      "n_trades": 59,
+      "avg_hold_days": 10.084745762711865,
+      "total_costs": 0.14649925883755324,
+      "turnover": 25.879895561357703
+    }
+  ]
+}

@@ -242,6 +242,25 @@ def train_conditional_model(features_df: pd.DataFrame,
     )
     rf.fit(X, y)
 
+    # Guard: if RF only saw one class, predict_proba returns 1 column
+    if len(rf.classes_) < 2:
+        # All samples same class — RF is useless, skip this model
+        logger.warning(f"  Skipping {model_id}: only one class in training "
+                       f"(base_rate={base_rate:.3f}, n={len(y)}). "
+                       f"Try a longer evaluation window (--mcb-eval-days).")
+        return {
+            "model": None,
+            "model_id": model_id,
+            "base_rate": base_rate,
+            "auc": 0.5,
+            "n_samples": len(y),
+            "n_pos": n_pos,
+            "mean_win": 0.01,
+            "mean_loss": -0.01,
+            "feature_importance": {},
+            "error": f"single_class_base_rate={base_rate:.4f}",
+        }
+
     proba_train = rf.predict_proba(X)[:, 1]
     try:
         auc = roc_auc_score(y, proba_train)

@@ -1,0 +1,277 @@
+{
+  "timestamp": "2026-03-02T21:38:18.199850",
+  "n_assets": 5,
+  "n_obs": 1258,
+  "n_train": 880,
+  "n_test": 378,
+  "n_ranked": 5,
+  "n_oos_passed": 4,
+  "n_backtested": 4,
+  "phase_times": {
+    "scan": 0.26249440002720803,
+    "surface_rank": 3.79651690000901,
+    "oos_validation": 0.12104599998565391,
+    "backtest": 0.5379960000282153,
+    "metrics": 0.001748099981341511
+  },
+  "score_weights": {
+    "adf_t": 0.25,
+    "vr_eigen2_proj": 0.25,
+    "hurst": 0.1,
+    "half_life": 0.1,
+    "vr_eigen1_proj": 0.1,
+    "vr_eigen3_proj": 0.1,
+    "vr_mahalanobis": 0.1
+  },
+  "ranked_baskets": [
+    {
+      "rank": 1,
+      "target": "PSKY",
+      "basket": [
+        "XYZ",
+        "BF-B",
+        "BRK-B"
+      ],
+      "composite_score": 0.689121213464442,
+      "score_components": {
+        "adf_t": -0.02472472091508598,
+        "vr_eigen2_proj": 0.6301631330902979,
+        "hurst": -0.03190361997480785,
+        "half_life": -0.14242581970407803,
+        "vr_eigen1_proj": 0.07021035741292124,
+        "vr_eigen3_proj": 0.09643850527174393,
+        "vr_mahalanobis": 0.0913633782834507
+      },
+      "adf_t": -3.8942895621143765,
+      "adf_p": 0.002077277037337027,
+      "hurst": 0.9781532539644415,
+      "half_life": 42.1090679474385
+    },
+    {
+      "rank": 2,
+      "target": "MRSH",
+      "basket": [
+        "BRK-B",
+        "PSKY",
+        "XYZ"
+      ],
+      "composite_score": -0.09873497941068315,
+      "score_components": {
+        "adf_t": -0.0638725355157104,
+        "vr_eigen2_proj": -0.04553629681813903,
+        "hurst": -0.034917088478602684,
+        "half_life": -0.14704363294228748,
+        "vr_eigen1_proj": 0.035175259397054626,
+        "vr_eigen3_proj": 0.08715772555414378,
+        "vr_mahalanobis": 0.07030158939285805
+      },
+      "adf_t": -3.217548969901701,
+      "adf_p": 0.01899108450716934,
+      "hurst": 1.0,
+      "half_life": 42.90453861126169
+    },
+    {
+      "rank": 3,
+      "target": "BRK-B",
+      "basket": [
+        "MRSH",
+        "PSKY",
+        "XYZ"
+      ],
+      "composite_score": -0.1278263456886387,
+      "score_components": {
+        "adf_t": -0.07016764079768498,
+        "vr_eigen2_proj": -0.11170663657254597,
+        "hurst": -0.02879205415826453,
+        "half_life": -0.13719806589121805,
+        "vr_eigen1_proj": 0.046687880286676454,
+        "vr_eigen3_proj": 0.10162901622542451,
+        "vr_mahalanobis": 0.07172115521897382
+      },
+      "adf_t": -3.1087267196681805,
+      "adf_p": 0.025914076647104965,
+      "hurst": 1.0,
+      "half_life": 41.208528949271184
+    },
+    {
+      "rank": 4,
+      "target": "BF-B",
+      "basket": [
+        "XYZ",
+        "MRSH",
+        "PSKY"
+      ],
+      "composite_score": -0.3785202246522589,
+      "score_components": {
+        "adf_t": -0.07623979607980134,
+        "vr_eigen2_proj": -0.1983323668651856,
+        "hurst": -0.02066592359866734,
+        "half_life": -0.07588841861539203,
+        "vr_eigen1_proj": -0.03759681608645759,
+        "vr_eigen3_proj": -0.04172985758547756,
+        "vr_mahalanobis": 0.07193295417872253
+      },
+      "adf_t": -3.0037585623508827,
+      "adf_p": 0.03454488556900808,
+      "hurst": 0.9949768679740711,
+      "half_life": 30.647351001037084
+    },
+    {
+      "rank": 5,
+      "target": "XYZ",
+      "basket": [
+        "BF-B",
+        "PSKY",
+        "MRSH"
+      ],
+      "composite_score": -0.43866957236043397,
+      "score_components": {
+        "adf_t": -0.12100884023915123,
+        "vr_eigen2_proj": -0.08005377697529448,
+        "hurst": -0.011329491266339503,
+        "half_life": -0.1946409367455628,
+        "vr_eigen1_proj": -0.07695284110800338,
+        "vr_eigen3_proj": -0.04083384759634316,
+        "vr_mahalanobis": 0.0861501615702605
+      },
+      "adf_t": -2.2298448773527264,
+      "adf_p": 0.1955923169188406,
+      "hurst": 0.9815047240339829,
+      "half_life": 51.10374634388214
+    }
+  ],
+  "performance": [
+    {
+      "target": "MRSH",
+      "basket": [
+        "BRK-B",
+        "PSKY",
+        "XYZ"
+      ],
+      "sharpe": -0.03294296357739339,
+      "sortino": -0.029079769684149544,
+      "calmar": -0.010734277063607715,
+      "annual_return": -0.0038412197540046277,
+      "annual_vol": 0.11660213098255091,
+      "max_drawdown": -0.357846153145,
+      "max_dd_duration": 426,
+      "win_rate": 0.7272727272727273,
+      "avg_win": 0.030708924985096985,
+      "avg_loss": -0.01954370832717304,
+      "profit_factor": 4.8073242676498,
+      "n_trades": 33,
+      "avg_hold_days": 12.303030303030303,
+      "total_costs": 16.530886070251462,
+      "turnover": 13.220985691573928,
+      "composite_score": -0.09873497941068315,
+      "score_components": {
+        "adf_t": -0.0638725355157104,
+        "vr_eigen2_proj": -0.04553629681813903,
+        "hurst": -0.034917088478602684,
+        "half_life": -0.14704363294228748,
+        "vr_eigen1_proj": 0.035175259397054626,
+        "vr_eigen3_proj": 0.08715772555414378,
+        "vr_mahalanobis": 0.07030158939285805
+      }
+    },
+    {
+      "target": "BF-B",
+      "basket": [
+        "XYZ",
+        "MRSH",
+        "PSKY"
+      ],
+      "sharpe": -0.37139835790274917,
+      "sortino": -0.3136644889801306,
+      "calmar": -0.09290424402876524,
+      "annual_return": -0.040778576564952526,
+      "annual_vol": 0.10979740673928993,
+      "max_drawdown": -0.4389312564916471,
+      "max_dd_duration": 671,
+      "win_rate": 0.8387096774193549,
+      "avg_win": 0.05318535890949739,
+      "avg_loss": -0.028816143312632325,
+      "profit_factor": 9.724457469043372,
+      "n_trades": 31,
+      "avg_hold_days": 17.161290322580644,
+      "total_costs": 5.862071102142334,
+      "turnover": 12.419713831478537,
+      "composite_score": -0.3785202246522589,
+      "score_components": {
+        "adf_t": -0.07623979607980134,
+        "vr_eigen2_proj": -0.1983323668651856,
+        "hurst": -0.02066592359866734,
+        "half_life": -0.07588841861539203,
+        "vr_eigen1_proj": -0.03759681608645759,
+        "vr_eigen3_proj": -0.04172985758547756,
+        "vr_mahalanobis": 0.07193295417872253
+      }
+    },
+    {
+      "target": "BRK-B",
+      "basket": [
+        "MRSH",
+        "PSKY",
+        "XYZ"
+      ],
+      "sharpe": -1.0329872209580417,
+      "sortino": -0.935842591667127,
+      "calmar": -0.1833283779246932,
+      "annual_return": -0.11059715855915928,
+      "annual_vol": 0.10706536955663999,
+      "max_drawdown": -0.6032735346875205,
+      "max_dd_duration": 748,
+      "win_rate": 0.4411764705882353,
+      "avg_win": 0.03786622006658703,
+      "avg_loss": -0.035323549705707794,
+      "profit_factor": 0.8523174808954654,
+      "n_trades": 34,
+      "avg_hold_days": 13.794117647058824,
+      "total_costs": 31.441560379028324,
+      "turnover": 13.621621621621621,
+      "composite_score": -0.1278263456886387,
+      "score_components": {
+        "adf_t": -0.07016764079768498,
+        "vr_eigen2_proj": -0.11170663657254597,
+        "hurst": -0.02879205415826453,
+        "half_life": -0.13719806589121805,
+        "vr_eigen1_proj": 0.046687880286676454,
+        "vr_eigen3_proj": 0.10162901622542451,
+        "vr_mahalanobis": 0.07172115521897382
+      }
+    },
+    {
+      "target": "PSKY",
+      "basket": [
+        "XYZ",
+        "BF-B",
+        "BRK-B"
+      ],
+      "sharpe": -1.038545222827277,
+      "sortino": -0.6651803889523508,
+      "calmar": -0.19442350719716708,
+      "annual_return": -0.35133631914361374,
+      "annual_vol": 0.33829660126610145,
+      "max_drawdown": -1.807067078505685,
+      "max_dd_duration": 753,
+      "win_rate": 0.72,
+      "avg_win": 0.1032978091789249,
+      "avg_loss": -0.10789901990617821,
+      "profit_factor": 1.7946448398080284,
+      "n_trades": 25,
+      "avg_hold_days": 18.0,
+      "total_costs": 2.227418721199036,
+      "turnover": 10.015898251192368,
+      "composite_score": 0.689121213464442,
+      "score_components": {
+        "adf_t": -0.02472472091508598,
+        "vr_eigen2_proj": 0.6301631330902979,
+        "hurst": -0.03190361997480785,
+        "half_life": -0.14242581970407803,
+        "vr_eigen1_proj": 0.07021035741292124,
+        "vr_eigen3_proj": 0.09643850527174393,
+        "vr_mahalanobis": 0.0913633782834507
+      }
+    }
+  ]
+}

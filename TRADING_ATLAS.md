@@ -270,3 +270,70 @@ A systematic knowledge base mapping the landscape of trading strategies across a
 
 Total experiments: 6 complete (4 negative, 1 false positive caught, 1 TC-killed)
 Total experiments remaining: 4+ in promising regions
+
+---
+
+### 7. TA_COMPOSITE × CRYPTO — Market Cipher B (MCb) Strategies
+
+| Attribute | Value |
+|-----------|-------|
+| **Date** | 2026-03-24 |
+| **Framework** | MCb Backtest Studio (GUI) + CPO integration attempt |
+| **Signal** | Multi-oscillator composite: WaveTrend (WT1/WT2), RSI+MFI, Stochastic RSI |
+| **Strategies** | Anchor & Trigger, Zero Line Rejection, Bullish Divergence, MFI Momentum |
+| **Assets** | BTC, ETH, SOL (tested), BNB/XRP/ADA/AVAX/DOGE (pending) |
+| **Data** | CCXT/Binance, 15m and 4h |
+| **TC** | 10 bps round-trip (0.1%/leg, Binance spot maker) |
+
+#### GUI Backtest Results (static params, 2024 OOS)
+
+| Strategy | Interval | Return | Sharpe | Win Rate | Max DD | Trades |
+|----------|----------|--------|--------|----------|--------|--------|
+| Anchor & Trigger | 15m | **+11.78%** | **2.12** | 62.8% | -4.64% | 94 |
+| Anchor & Trigger | 4h | +5.03% | ~1.5 | ~65% | ~-2% | ~10 |
+| Bullish Divergence | 15m | +4.60% | 2.20 | 61.5% | -5.98% | 26 |
+| Zero Line Rejection | 4h | 0.00% | — | — | — | 0 (signals too rare) |
+| MFI Momentum | 4h | -12.74% | -2.06 | 28.6% | -16.44% | 98 |
+
+**Note on Anchor & Trigger (15m):** Near-perfect wedge equity curve. Best curve shape observed in all experiments. 2024 BTC was a bull run (40K→100K) — long-only strategies benefit from this tailwind. Cross-year validation (2022 bear, 2023 choppy) is the critical next test.
+
+#### CPO Integration Attempt — FAILED (architectural mismatch, not strategy failure)
+
+| Attribute | Value |
+|-----------|-------|
+| **Training** | 2024, BTC+ETH+SOL, anchor_trigger, 3-day eval windows |
+| **Phase 2** | 26,208 rows, base_rate 1–1.5% |
+| **Phase 3** | AUC 0.997–0.999 (degenerate — RF learned "always predict 0") |
+| **Phase 4** | -0.32% cum, Sharpe -0.47, inverted calibration |
+
+**Root cause:** CPO requires daily signal frequency (base_rate 15–40%). Anchor & Trigger fires every 2–3 weeks per asset — only 1–2% of 3-day windows contain a trade. With 98.5% class-0 samples, the RF achieves perfect AUC by predicting 0 every day. The AUC of 0.999 is the diagnostic, not a good sign.
+
+**Key findings:**
+- MCb composite oscillator captures momentum regimes that simple TA misses — signal quality is higher because it waits for multi-indicator confluence
+- Anchor & Trigger on 15m shows promising results after realistic TC — worth validating across years and assets
+- MFI Momentum (high frequency, trades every MFI cross) performed worst — confirms MCb edge comes from *waiting*, not from trading every signal
+- CPO "Chan procedure" is incompatible with monthly-frequency signals — needs base_rate > 10% to train a meaningful RF
+
+**Atlas principle established:**
+> MCb-style composite oscillators are architecturally incompatible with CPO parameter optimization due to low signal frequency (base_rate < 2%). The correct optimization approach is regime-level conditioning (binary on/off switch: "is today a good day to run this strategy?") rather than parameter selection. Build a daily regime classifier using yesterday's MCb features (WT2 position, MFI direction, vol regime) as a separate module — not as a CPO strategy.
+
+**Next steps:**
+1. Cross-year validation: Anchor & Trigger (15m BTC) on 2022 (bear) and 2023 (choppy)
+2. Multi-asset: does the edge transfer to ETH/SOL or is it BTC-specific?
+3. Regime classifier: daily binary model — "favorable regime for Anchor & Trigger?" — using MCb features as on/off gate
+
+---
+
+## Updated landscape matrix (v2)
+
+| Signal \\ Asset | Crypto | Equities | Futures | FX |
+|---------------|--------|----------|---------|-----|
+| TA_STANDARD | ❌ No edge | ❌ No edge (TC) | ❌ No edge (validated) | ❌ No edge |
+| TA_COMPOSITE (MCb) | ⚠️ GUI edge (2024 bull), cross-year TBD | — | — | — |
+| MEAN_REVERSION | — | ❌ No edge (TC) | — | — |
+| MOMENTUM | **TODO** | — | **TODO** | — |
+| MICROSTRUCTURE | **TODO** | — | — | — |
+| FUNDAMENTAL | — | — | — | **TODO** (carry) |
+| ALTERNATIVE | **TODO** | — | — | — |
+
+Total experiments: 7 complete (5 negative/incompatible, 1 false positive caught, 1 TC-killed, 1 promising pending validation)

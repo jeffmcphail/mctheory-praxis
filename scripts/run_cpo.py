@@ -63,6 +63,33 @@ def build_strategy(args):
             training_start=args.training_start,
             training_end=args.training_end,
         )
+    elif args.strategy == "mcb_ta":
+        from engines.mcb_cpo_strategy import MCBCPOStrategy
+        assets     = args.assets.split(",") if args.assets else None
+        strategies = args.mcb_strategies.split(",") if args.mcb_strategies else None
+        timeframes = args.mcb_timeframes.split(",") if args.mcb_timeframes else None
+        return MCBCPOStrategy(
+            assets=assets,
+            timeframes=timeframes,
+            strategy_ids=strategies,
+            cache_dir=args.cache_dir,
+            tc_bps=args.tc_bps,
+            training_start=args.training_start,
+            training_end=args.training_end,
+        )
+    elif args.strategy == "momentum":
+        from engines.momentum_strategy import MomentumCPOStrategy
+        assets    = args.assets.split(",") if args.assets else None
+        mom_types = args.mom_types.split(",") if args.mom_types else None
+        return MomentumCPOStrategy(
+            assets=assets,
+            mom_types=mom_types,
+            cache_dir=args.cache_dir,
+            tc_bps=args.tc_bps,
+            training_start=args.training_start,
+            training_end=args.training_end,
+            long_only=not args.allow_short,
+        )
     elif args.strategy in ("futures_ta", "fx_ta", "universal_ta"):
         from engines.universal_ta_strategy import UniversalTAStrategy
         # Map strategy name to asset class
@@ -207,7 +234,8 @@ def cmd_full(args):
 def main():
     parser = argparse.ArgumentParser(description="CPO Pipeline — Generic Runner")
     parser.add_argument("--strategy", required=True,
-                        choices=["pairs", "crypto_ta", "futures_ta", "fx_ta", "universal_ta"],
+                        choices=["pairs", "crypto_ta", "futures_ta", "fx_ta",
+                                 "universal_ta", "mcb_ta", "momentum"],
                         help="Trading strategy to use")
     parser.add_argument("--asset-class", default="crypto",
                         choices=["crypto", "futures", "fx"],
@@ -237,6 +265,16 @@ def main():
                         help="Path to Burgess pairs JSON (pairs strategy)")
     parser.add_argument("--assets", type=str, default=None,
                         help="Comma-separated asset names to trade (default: all in asset class)")
+    parser.add_argument("--mcb-strategies", type=str, default=None,
+                        help="Comma-separated MCb strategy IDs (mcb_ta only). "
+                             "Options: anchor_trigger,zero_line_rejection,bullish_divergence,mfi_momentum")
+    parser.add_argument("--mcb-timeframes", type=str, default=None,
+                        help="Comma-separated timeframes for mcb_ta (e.g. 1h,4h)")
+    parser.add_argument("--mom-types", type=str, default=None,
+                        help="Comma-separated momentum types (momentum strategy only). "
+                             "Options: TSMOM_1H,TSMOM_4H,TSMOM_DAILY,VOLSCALE,DUAL,REVERSAL")
+    parser.add_argument("--allow-short", action="store_true", default=False,
+                        help="Allow short positions (momentum strategy, requires perps)")
 
     subparsers = parser.add_subparsers(dest="phase", required=True)
 
@@ -264,7 +302,13 @@ def main():
 
     if args.strategy == "pairs" and not args.pairs_json:
         parser.error("--pairs-json required for pairs strategy")
-    if args.strategy == "crypto_ta":
+    elif args.strategy == "momentum":
+        if args.output_dir is None:
+            args.output_dir = Path("output/momentum")
+    elif args.strategy == "mcb_ta":
+        if args.output_dir is None:
+            args.output_dir = Path("output/mcb_ta")
+    elif args.strategy == "crypto_ta":
         if args.output_dir is None:
             args.output_dir = Path("output/crypto_ta")
     elif args.strategy == "futures_ta":
