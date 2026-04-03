@@ -13,6 +13,10 @@ import numpy as np
 import pandas as pd
 
 from engines.cpo_core import ModelSpec, ConfigSpec
+from engines.triple_barrier import (
+    BarrierConfig, standard_barrier_grid,
+    simulate_trade, run_day_with_barriers,
+)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -40,12 +44,17 @@ class TAConfig(ConfigSpec):
     period: int = 14
     threshold_lo: float = 30.0
     threshold_hi: float = 70.0
-    hold_hours: int = 24
+    hold_hours: int = 24        # kept for backward compat; used as t_bars fallback
     fast_period: int = 0
     slow_period: int = 0
     signal_period: int = 0
     multiplier: float = 0.0
     vol_multiplier: float = 0.0
+    # Triple barrier exit params (new)
+    sl_pct: float = 0.020       # hard stop loss
+    tp_pct: float = 0.040       # take-profit trigger (2:1 ratio default)
+    trail_pct: float = 0.000    # trailing stop width (0 = standard triple barrier)
+    t_bars: int = 48            # vertical barrier
 
     _NORMS = {
         "period": 50.0, "threshold_lo": 100.0, "threshold_hi": 100.0,
@@ -54,6 +63,10 @@ class TAConfig(ConfigSpec):
     }
 
     def to_feature_vector(self) -> list[float]:
+        barrier = BarrierConfig(
+            sl_pct=self.sl_pct, tp_pct=self.tp_pct,
+            trail_pct=self.trail_pct, t_bars=self.t_bars,
+        )
         return [
             self.period / self._NORMS["period"],
             self.threshold_lo / self._NORMS["threshold_lo"],
@@ -64,7 +77,7 @@ class TAConfig(ConfigSpec):
             self.signal_period / self._NORMS["signal_period"],
             self.multiplier / self._NORMS["multiplier"],
             self.vol_multiplier / self._NORMS["vol_multiplier"],
-        ]
+        ] + barrier.to_feature_vector()
 
     @staticmethod
     def param_names() -> list[str]:
@@ -72,7 +85,13 @@ class TAConfig(ConfigSpec):
             "period", "threshold_lo", "threshold_hi", "hold_hours",
             "fast_period", "slow_period", "signal_period",
             "multiplier", "vol_multiplier",
-        ]
+        ] + BarrierConfig.param_names()
+
+    def barrier(self) -> BarrierConfig:
+        return BarrierConfig(
+            sl_pct=self.sl_pct, tp_pct=self.tp_pct,
+            trail_pct=self.trail_pct, t_bars=self.t_bars,
+        )
 
 
 # Daily lagged features (universal across asset classes)
@@ -91,107 +110,101 @@ TA_FEATURES = [
 # ═════════════════════════════════════════════════════════════════════════════
 
 def generate_ta_param_grid() -> dict[str, list[TAConfig]]:
-    """Generate parameter grids per TA model type. Returns {ta_type: [TAConfig]}."""
+    """
+    Generate parameter grids per TA model type.
+
+    Each signal config is crossed with the standard barrier grid (72 exit combos),
+    giving the RF full signal × exit parameter space to learn from.
+    Targeting 2:1 to 3:1 TP/SL ratios per Lopez de Prado recommendations.
+
+    Returns {ta_type: [TAConfig]}
+    """
+    barriers = standard_barrier_grid()   # 72 exit configs (sl × tp_ratio × trail × t_bars)
     grids = {}
     cid = 0
 
-    # 1. RSI Mean Reversion
-    configs = []
-    for period in [7, 14, 21]:
-        for oversold in [20, 25, 30]:
-            for overbought in [70, 75, 80]:
-                for hold in [4, 12, 24]:
-                    configs.append(TAConfig(
-                        config_id=cid, ta_type="RSI",
-                        period=period, threshold_lo=oversold,
-                        threshold_hi=overbought, hold_hours=hold))
-                    cid += 1
-    grids["RSI"] = configs
-
-    # 2. MACD Crossover
-    configs = []
-    for fast in [8, 12, 16]:
-        for slow in [21, 26, 34]:
-            if fast >= slow: continue
-            for signal in [7, 9, 12]:
-                for hold in [4, 12, 24]:
-                    configs.append(TAConfig(
-                        config_id=cid, ta_type="MACD",
-                        fast_period=fast, slow_period=slow,
-                        signal_period=signal, hold_hours=hold))
-                    cid += 1
-    grids["MACD"] = configs
-
-    # 3. Bollinger Band Reversion
-    configs = []
-    for period in [14, 20, 30]:
-        for num_std in [1.5, 2.0, 2.5]:
-            for hold in [4, 12, 24]:
-                configs.append(TAConfig(
-                    config_id=cid, ta_type="BOLL",
-                    period=period, multiplier=num_std, hold_hours=hold))
+    def cross(signal_configs: list[dict], ta_type: str) -> list[TAConfig]:
+        nonlocal cid
+        result = []
+        for sig in signal_configs:
+            for b in barriers:
+                result.append(TAConfig(
+                    config_id=cid, ta_type=ta_type,
+                    sl_pct=b.sl_pct, tp_pct=b.tp_pct,
+                    trail_pct=b.trail_pct, t_bars=b.t_bars,
+                    **sig,
+                ))
                 cid += 1
-    grids["BOLL"] = configs
+        return result
 
-    # 4. EMA Crossover
-    configs = []
-    for fast in [5, 10, 20]:
-        for slow in [20, 50, 100]:
-            if fast >= slow: continue
-            for hold in [4, 12, 24, 48]:
-                configs.append(TAConfig(
-                    config_id=cid, ta_type="EMA_CROSS",
-                    fast_period=fast, slow_period=slow, hold_hours=hold))
-                cid += 1
-    grids["EMA_CROSS"] = configs
+    # 1. RSI Mean Reversion  (27 signal combos × 72 barriers = 1944)
+    signals = [
+        {"period": p, "threshold_lo": lo, "threshold_hi": hi}
+        for p in [7, 14, 21]
+        for lo in [20, 25, 30]
+        for hi in [70, 75, 80]
+    ]
+    grids["RSI"] = cross(signals, "RSI")
 
-    # 5. Stochastic Oscillator
-    configs = []
-    for k_period in [9, 14, 21]:
-        for oversold in [20, 25]:
-            for overbought in [75, 80]:
-                for hold in [4, 12, 24]:
-                    configs.append(TAConfig(
-                        config_id=cid, ta_type="STOCH",
-                        period=k_period, signal_period=3,
-                        threshold_lo=oversold, threshold_hi=overbought,
-                        hold_hours=hold))
-                    cid += 1
-    grids["STOCH"] = configs
+    # 2. MACD Crossover  (18 × 72 = 1296)
+    signals = [
+        {"fast_period": f, "slow_period": s, "signal_period": sig}
+        for f in [8, 12, 16]
+        for s in [21, 26, 34]
+        for sig in [7, 9, 12]
+        if f < s
+    ]
+    grids["MACD"] = cross(signals, "MACD")
 
-    # 6. ATR Breakout
-    configs = []
-    for period in [10, 14, 20]:
-        for mult in [1.5, 2.0, 3.0]:
-            for hold in [4, 12, 24]:
-                configs.append(TAConfig(
-                    config_id=cid, ta_type="ATR_BREAK",
-                    period=period, multiplier=mult, hold_hours=hold))
-                cid += 1
-    grids["ATR_BREAK"] = configs
+    # 3. Bollinger Band Reversion  (9 × 72 = 648)
+    signals = [
+        {"period": p, "multiplier": m}
+        for p in [14, 20, 30]
+        for m in [1.5, 2.0, 2.5]
+    ]
+    grids["BOLL"] = cross(signals, "BOLL")
 
-    # 7. Volume Breakout
-    configs = []
-    for period in [10, 20, 30]:
-        for vol_mult in [1.5, 2.0, 2.5]:
-            for hold in [4, 12, 24]:
-                configs.append(TAConfig(
-                    config_id=cid, ta_type="VOL_BREAK",
-                    period=period, vol_multiplier=vol_mult, hold_hours=hold))
-                cid += 1
-    grids["VOL_BREAK"] = configs
+    # 4. EMA Crossover  (14 × 72 = 1008)
+    signals = [
+        {"fast_period": f, "slow_period": s}
+        for f in [5, 10, 20]
+        for s in [20, 50, 100]
+        if f < s
+    ]
+    grids["EMA_CROSS"] = cross(signals, "EMA_CROSS")
 
-    # 8. VWAP Reversion
-    configs = []
-    for period in [12, 24, 48]:
-        for threshold in [0.5, 1.0, 1.5]:
-            for hold in [4, 12, 24]:
-                configs.append(TAConfig(
-                    config_id=cid, ta_type="VWAP_REV",
-                    period=period, threshold_lo=threshold,
-                    threshold_hi=threshold, hold_hours=hold))
-                cid += 1
-    grids["VWAP_REV"] = configs
+    # 5. Stochastic Oscillator  (12 × 72 = 864)
+    signals = [
+        {"period": k, "signal_period": 3, "threshold_lo": lo, "threshold_hi": hi}
+        for k in [9, 14, 21]
+        for lo in [20, 25]
+        for hi in [75, 80]
+    ]
+    grids["STOCH"] = cross(signals, "STOCH")
+
+    # 6. ATR Breakout  (9 × 72 = 648)
+    signals = [
+        {"period": p, "multiplier": m}
+        for p in [10, 14, 20]
+        for m in [1.5, 2.0, 3.0]
+    ]
+    grids["ATR_BREAK"] = cross(signals, "ATR_BREAK")
+
+    # 7. Volume Breakout  (9 × 72 = 648)
+    signals = [
+        {"period": p, "vol_multiplier": m}
+        for p in [10, 20, 30]
+        for m in [1.5, 2.0, 2.5]
+    ]
+    grids["VOL_BREAK"] = cross(signals, "VOL_BREAK")
+
+    # 8. VWAP Reversion  (9 × 72 = 648)
+    signals = [
+        {"period": p, "threshold_lo": t, "threshold_hi": t}
+        for p in [12, 24, 48]
+        for t in [0.5, 1.0, 1.5]
+    ]
+    grids["VWAP_REV"] = cross(signals, "VWAP_REV")
 
     return grids
 
@@ -343,15 +356,20 @@ def compute_signals(ta_type: str, close: np.ndarray, high: np.ndarray,
 def run_ta_single_day(bars_day: pd.DataFrame, config: TAConfig,
                       bars_history: pd.DataFrame | None = None,
                       tc_bps: float = 2.0) -> dict:
-    """Run one TA config on one day of hourly bars. Asset-class agnostic."""
+    """
+    Run one TA config on one day of hourly bars using the triple barrier framework.
+
+    Entry: signal from compute_signals (+1 = long, -1 = short, 0 = flat)
+    Exit: triple barrier (SL / TP or TP-then-trailing / vertical time barrier)
+    """
     if bars_history is not None and not bars_history.empty:
         full = pd.concat([bars_history, bars_day])
     else:
         full = bars_day
 
-    close = full["close"].values
-    high = full["high"].values
-    low = full["low"].values
+    close  = full["close"].values
+    high   = full["high"].values
+    low    = full["low"].values
     volume = full["volume"].values
 
     if len(close) < 30:
@@ -359,54 +377,46 @@ def run_ta_single_day(bars_day: pd.DataFrame, config: TAConfig,
 
     signals = compute_signals(config.ta_type, close, high, low, volume, config)
 
-    n_hist = len(full) - len(bars_day)
+    n_hist        = len(full) - len(bars_day)
     signals_today = signals[n_hist:]
-    close_today = close[n_hist:]
+    close_today   = close[n_hist:]
 
     if len(signals_today) < 2:
         return {"daily_return": 0.0, "gross_return": 0.0, "n_trades": 0}
 
-    tc_rate = 2 * tc_bps / 10000.0
-    position = 0
-    entry_price = 0.0
-    entry_idx = 0
-    pnl = 0.0
-    gross_pnl = 0.0
-    trades = 0
+    tc_pct  = tc_bps / 10000.0
+    barrier = config.barrier()
+
+    equity    = 1.0
+    gross_tot = 0.0
+    n_trades  = 0
+    pos_end   = -1   # bar index where current position ends
 
     for i in range(len(signals_today)):
-        sig = signals_today[i]
-        price = close_today[i]
-        if np.isnan(sig) or np.isnan(price):
+        # Skip bars while we are in a position
+        if i <= pos_end:
             continue
 
-        if position != 0 and (i - entry_idx) >= config.hold_hours:
-            gross = (price / entry_price - 1) * position
-            pnl += gross - tc_rate
-            gross_pnl += gross
-            trades += 1
-            position = 0
+        sig = signals_today[i]
+        if sig == 0 or np.isnan(sig):
+            continue
 
-        if position == 0:
-            if sig > 0:
-                position = 1; entry_price = price; entry_idx = i
-            elif sig < 0:
-                position = -1; entry_price = price; entry_idx = i
-        elif position == 1 and sig < 0:
-            gross = price / entry_price - 1
-            pnl += gross - tc_rate; gross_pnl += gross; trades += 1
-            position = -1; entry_price = price; entry_idx = i
-        elif position == -1 and sig > 0:
-            gross = 1 - price / entry_price
-            pnl += gross - tc_rate; gross_pnl += gross; trades += 1
-            position = 1; entry_price = price; entry_idx = i
+        direction = int(np.sign(sig))
 
-    if position != 0:
-        price = close_today[-1]
-        gross = (price / entry_price - 1) if position == 1 else (1 - price / entry_price)
-        pnl += gross - tc_rate; gross_pnl += gross; trades += 1
+        # Prices from entry bar onward (within today's bars)
+        prices_from_entry = close_today[i:]
+        result = simulate_trade(prices_from_entry, direction, barrier, tc_pct)
 
-    return {"daily_return": pnl, "gross_return": gross_pnl, "n_trades": trades}
+        equity    *= (1 + result["net_return"])
+        gross_tot += result["gross_return"]
+        n_trades  += 1
+        pos_end    = i + result["exit_idx"]
+
+    return {
+        "daily_return": float(equity - 1.0),
+        "gross_return": float(gross_tot),
+        "n_trades":     n_trades,
+    }
 
 
 # ═════════════════════════════════════════════════════════════════════════════

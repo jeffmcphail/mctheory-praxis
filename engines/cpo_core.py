@@ -242,25 +242,6 @@ def train_conditional_model(features_df: pd.DataFrame,
     )
     rf.fit(X, y)
 
-    # Guard: if RF only saw one class, predict_proba returns 1 column
-    if len(rf.classes_) < 2:
-        # All samples same class — RF is useless, skip this model
-        logger.warning(f"  Skipping {model_id}: only one class in training "
-                       f"(base_rate={base_rate:.3f}, n={len(y)}). "
-                       f"Try a longer evaluation window (--mcb-eval-days).")
-        return {
-            "model": None,
-            "model_id": model_id,
-            "base_rate": base_rate,
-            "auc": 0.5,
-            "n_samples": len(y),
-            "n_pos": n_pos,
-            "mean_win": 0.01,
-            "mean_loss": -0.01,
-            "feature_importance": {},
-            "error": f"single_class_base_rate={base_rate:.4f}",
-        }
-
     proba_train = rf.predict_proba(X)[:, 1]
     try:
         auc = roc_auc_score(y, proba_train)
@@ -567,14 +548,20 @@ def compute_allocation(model_predictions: list[dict],
 # PHASE ORCHESTRATION — Generic pipeline that works with any strategy
 # ═════════════════════════════════════════════════════════════════════════════
 
-def run_phase2(strategy: TradingStrategy, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def run_phase2(strategy: TradingStrategy, output_dir: Path,
+               features_suffix: str = "") -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Phase 2: Run all configs on all models for training period.
     Strategy provides execution; this handles orchestration and caching.
+
+    features_suffix: appended to features cache filename to allow
+        multiple feature sets (e.g. "funding", "funding+regime", "regime")
+        to coexist without overwriting each other. Returns cache is shared.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     returns_path = output_dir / "phase2_returns.parquet"
-    features_path = output_dir / "phase2_features.parquet"
+    sfx = f"_{features_suffix}" if features_suffix else ""
+    features_path = output_dir / f"phase2_features{sfx}.parquet"
 
     models = strategy.get_models()
     param_grid = strategy.get_param_grid()
@@ -597,6 +584,11 @@ def run_phase2(strategy: TradingStrategy, output_dir: Path) -> tuple[pd.DataFram
             if not model_returns.empty:
                 all_returns.append(model_returns)
                 print(f"    {len(model_returns)} strategy-days")
+        if not all_returns:
+            raise RuntimeError(
+                "Phase 2: all models returned empty results. "
+                "Check data availability (DVOL, spot bars, etc)."
+            )
         returns_df = pd.concat(all_returns, ignore_index=True)
         returns_df.to_parquet(returns_path)
         print(f"\n  Saved: {returns_path} ({len(returns_df)} rows)")

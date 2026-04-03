@@ -38,6 +38,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from engines.triple_barrier import (
+    BarrierConfig, standard_barrier_grid, simulate_trade,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Universe ──────────────────────────────────────────────────────────────────
@@ -84,31 +88,37 @@ class MomConfig:
     config_id: str
     mom_type: str
     lookback_hours: int     # hours to look back for the momentum signal
-    holding_hours: int      # hours to hold the position
     entry_threshold: float  # min |return| over lookback to enter (filters noise)
-    long_only: bool = True  # True = long-only (spot), False = long/short (perps)
+    long_only: bool = True
+    # Triple barrier exit params
+    sl_pct:    float = 0.020
+    tp_pct:    float = 0.060   # default 3:1 for momentum
+    trail_pct: float = 0.005   # momentum default: trailing stop after TP
+    t_bars:    int   = 48
 
     @staticmethod
     def param_names() -> list[str]:
         return [
-            "lookback_norm",    # lookback_hours / 168  (normalized to [0,1] for 1w max)
-            "holding_norm",     # holding_hours / 48
-            "threshold_norm",   # entry_threshold / 0.05
-            "long_only",        # 0/1
-            "type_tsmom1h",     # one-hot
+            "lookback_norm",
+            "threshold_norm",
+            "long_only",
+            "type_tsmom1h",
             "type_tsmom4h",
             "type_daily",
             "type_volscale",
             "type_dual",
             "type_reversal",
-        ]
+        ] + BarrierConfig.param_names()
 
     def to_feature_vector(self) -> list[float]:
         enc = {t: 0.0 for t in MOMENTUM_TYPES}
         enc[self.mom_type] = 1.0
+        barrier = BarrierConfig(
+            sl_pct=self.sl_pct, tp_pct=self.tp_pct,
+            trail_pct=self.trail_pct, t_bars=self.t_bars,
+        )
         return [
             min(self.lookback_hours / 168.0, 1.0),
-            min(self.holding_hours  / 48.0,  1.0),
             min(self.entry_threshold / 0.05, 1.0),
             float(self.long_only),
             enc["TSMOM_1H"],
@@ -117,76 +127,89 @@ class MomConfig:
             enc["VOLSCALE"],
             enc["DUAL"],
             enc["REVERSAL"],
-        ]
+        ] + barrier.to_feature_vector()
+
+    def barrier(self) -> BarrierConfig:
+        return BarrierConfig(
+            sl_pct=self.sl_pct, tp_pct=self.tp_pct,
+            trail_pct=self.trail_pct, t_bars=self.t_bars,
+        )
 
 
 # ── Parameter grid ────────────────────────────────────────────────────────────
 
 def generate_momentum_param_grid() -> dict[str, list[MomConfig]]:
+    """
+    Generate momentum parameter grid crossed with barrier configs.
+
+    Each signal config (lookback × threshold) is crossed with
+    the standard barrier grid (72 exit combos).
+    """
+    barriers = standard_barrier_grid()
     grids: dict[str, list[MomConfig]] = {}
+    cid_counter = [0]
 
-    # Short-term momentum (1h bars, hold 1-4h)
-    configs = []
-    for i, (lb, hold, thresh) in enumerate(itertools.product(
-        [1, 2, 4, 6],           # lookback hours
-        [1, 2, 4],              # holding hours
-        [0.003, 0.007, 0.015],  # entry threshold (0.3%, 0.7%, 1.5%)
-    )):
-        configs.append(MomConfig(f"tsmom1h_{i:03d}", "TSMOM_1H", lb, hold, thresh))
-    grids["TSMOM_1H"] = configs   # 36 configs
+    def next_id() -> str:
+        cid_counter[0] += 1
+        return f"mom_{cid_counter[0]:05d}"
 
-    # Medium-term momentum (4h lookback, hold 4-24h)
-    configs = []
-    for i, (lb, hold, thresh) in enumerate(itertools.product(
-        [4, 8, 12, 24],
-        [4, 8, 12, 24],
-        [0.005, 0.01, 0.02],
-    )):
-        configs.append(MomConfig(f"tsmom4h_{i:03d}", "TSMOM_4H", lb, hold, thresh))
-    grids["TSMOM_4H"] = configs   # 48 configs
+    def cross(signal_params: list[dict], mom_type: str) -> list[MomConfig]:
+        result = []
+        for sig in signal_params:
+            for b in barriers:
+                result.append(MomConfig(
+                    config_id=next_id(),
+                    mom_type=mom_type,
+                    sl_pct=b.sl_pct, tp_pct=b.tp_pct,
+                    trail_pct=b.trail_pct, t_bars=b.t_bars,
+                    **sig,
+                ))
+        return result
 
-    # Daily momentum (24h lookback, hold 1-3 days)
-    configs = []
-    for i, (lb, hold, thresh) in enumerate(itertools.product(
-        [24, 48, 72, 168],
-        [12, 24, 48],
-        [0.01, 0.02, 0.04],
-    )):
-        configs.append(MomConfig(f"daily_{i:03d}", "TSMOM_DAILY", lb, hold, thresh))
-    grids["TSMOM_DAILY"] = configs  # 36 configs
+    # TSMOM_1H: short-term  (4 lookbacks × 3 thresholds × 72 barriers = 864)
+    grids["TSMOM_1H"] = cross([
+        {"lookback_hours": lb, "entry_threshold": thresh, "long_only": True}
+        for lb in [1, 2, 4, 6]
+        for thresh in [0.003, 0.007, 0.015]
+    ], "TSMOM_1H")
 
-    # Vol-scaled momentum (position = signal / realized_vol)
-    configs = []
-    for i, (lb, hold, thresh) in enumerate(itertools.product(
-        [4, 12, 24],
-        [4, 12, 24],
-        [0.005, 0.015],
-    )):
-        configs.append(MomConfig(f"volscale_{i:03d}", "VOLSCALE", lb, hold, thresh))
-    grids["VOLSCALE"] = configs   # 18 configs
+    # TSMOM_4H: medium-term  (4 × 3 × 72 = 864)
+    grids["TSMOM_4H"] = cross([
+        {"lookback_hours": lb, "entry_threshold": thresh, "long_only": True}
+        for lb in [4, 8, 12, 24]
+        for thresh in [0.005, 0.010, 0.020]
+    ], "TSMOM_4H")
 
-    # Dual momentum (short AND long must agree)
-    configs = []
-    for i, (short_lb, long_lb, hold) in enumerate(itertools.product(
-        [2, 4],
-        [24, 72],
-        [4, 12, 24],
-    )):
-        configs.append(MomConfig(f"dual_{i:03d}", "DUAL", short_lb, hold, 0.0,
-                                  long_only=True))
-        # Store long_lb in entry_threshold field (hack — reused for dual)
-        configs[-1].entry_threshold = long_lb / 100.0  # encode long lookback
-    grids["DUAL"] = configs   # 12 configs
+    # TSMOM_DAILY: daily  (4 × 3 × 72 = 864)
+    grids["TSMOM_DAILY"] = cross([
+        {"lookback_hours": lb, "entry_threshold": thresh, "long_only": True}
+        for lb in [24, 48, 72, 168]
+        for thresh in [0.010, 0.020, 0.040]
+    ], "TSMOM_DAILY")
 
-    # Short-term reversal (fade the last 1-4h move)
-    configs = []
-    for i, (lb, hold, thresh) in enumerate(itertools.product(
-        [1, 2, 4],
-        [1, 2, 4],
-        [0.005, 0.01, 0.02],
-    )):
-        configs.append(MomConfig(f"rev_{i:03d}", "REVERSAL", lb, hold, thresh))
-    grids["REVERSAL"] = configs   # 27 configs
+    # VOLSCALE: vol-scaled  (3 × 2 × 72 = 432)
+    grids["VOLSCALE"] = cross([
+        {"lookback_hours": lb, "entry_threshold": thresh, "long_only": True}
+        for lb in [4, 12, 24]
+        for thresh in [0.005, 0.015]
+    ], "VOLSCALE")
+
+    # DUAL: requires both short and long to agree  (4 × 72 = 288)
+    # encode long_lookback via entry_threshold field (×100)
+    grids["DUAL"] = cross([
+        {"lookback_hours": short_lb,
+         "entry_threshold": long_lb / 100.0,   # encodes long lookback
+         "long_only": True}
+        for short_lb in [2, 4]
+        for long_lb in [24, 72]
+    ], "DUAL")
+
+    # REVERSAL: fade the move  (3 × 3 × 72 = 648)
+    grids["REVERSAL"] = cross([
+        {"lookback_hours": lb, "entry_threshold": thresh, "long_only": True}
+        for lb in [1, 2, 4]
+        for thresh in [0.005, 0.010, 0.020]
+    ], "REVERSAL")
 
     return grids
 
@@ -194,140 +217,95 @@ def generate_momentum_param_grid() -> dict[str, list[MomConfig]]:
 # ── Single-day execution ──────────────────────────────────────────────────────
 
 def run_momentum_single_day(
-    bars_hist: pd.DataFrame,   # warmup history (>= 168h)
-    bars_day: pd.DataFrame,    # today's hourly bars
+    bars_hist: pd.DataFrame,
+    bars_day: pd.DataFrame,
     config: MomConfig,
     tc_bps: float = 2.0,
 ) -> dict:
     """
-    Run one momentum config on one day's bars.
-
-    Signal generation:
-        - Compute lookback return at the start of each bar
-        - If |ret| > threshold: go long (or short for reversal)
-        - Hold for holding_hours, then close
-
-    Returns {"daily_return": float, "gross_return": float, "n_trades": int}
+    Run one momentum config on one day using the triple barrier framework.
+    Entry: momentum signal exceeds threshold. Exit: SL / TP-then-trailing / vertical.
     """
     if len(bars_day) < 2:
         return {"daily_return": 0.0, "gross_return": 0.0, "n_trades": 0}
 
-    tc_pct = tc_bps / 10000.0  # bps → decimal
+    tc_pct  = tc_bps / 10000.0
+    barrier = config.barrier()
     combined = pd.concat([bars_hist, bars_day]).sort_index()
     combined = combined[~combined.index.duplicated(keep="last")]
-    close = combined["close"]
+    close = combined["close"].values
 
-    equity = 1.0
-    n_trades = 0
-    in_pos = False
-    entry_px = 0.0
-    hold_remaining = 0
-    direction = 1  # 1=long, -1=short
+    equity    = 1.0
+    gross_tot = 0.0
+    n_trades  = 0
+    pos_end   = -1   # absolute index into close[] where position ends
 
-    lb = config.lookback_hours
-    hold = config.holding_hours
+    n_hist = len(combined) - len(bars_day)
+    lb     = config.lookback_hours
     thresh = config.entry_threshold
 
-    for i, idx in enumerate(bars_day.index):
-        loc = combined.index.get_loc(idx)
-        if loc < lb:
+    for rel_i in range(len(bars_day)):
+        abs_i = n_hist + rel_i
+
+        if abs_i <= pos_end:
+            continue
+        if abs_i < lb:
             continue
 
-        px = float(close.iloc[loc])
+        px = close[abs_i]
+        if np.isnan(px):
+            continue
 
-        # Close position if hold period elapsed
-        if in_pos:
-            hold_remaining -= 1
-            if hold_remaining <= 0:
-                ret = (px - entry_px) / entry_px * direction
-                equity *= (1 + ret - tc_pct)
-                in_pos = False
+        past_px    = close[abs_i - lb]
+        ret_signal = (px - past_px) / (past_px + 1e-10)
 
-        # New signal
-        if not in_pos:
-            past_px = float(close.iloc[loc - lb])
-            ret_signal = (px - past_px) / (past_px + 1e-10)
+        if config.mom_type == "REVERSAL":
+            if abs(ret_signal) < thresh:
+                continue
+            direction = -1 if ret_signal > 0 else 1
+            if direction == -1 and config.long_only:
+                continue
 
-            if config.mom_type == "REVERSAL":
-                # Fade: if went up, go short (or skip if long_only)
-                if abs(ret_signal) >= thresh:
-                    if ret_signal > 0 and not config.long_only:
-                        direction = -1
-                        entry_px = px
-                        in_pos = True
-                        hold_remaining = hold
-                        n_trades += 1
-                        equity *= (1 - tc_pct)
-                    elif ret_signal < 0:
-                        direction = 1
-                        entry_px = px
-                        in_pos = True
-                        hold_remaining = hold
-                        n_trades += 1
-                        equity *= (1 - tc_pct)
-
-            elif config.mom_type == "DUAL":
-                # Require short AND long to agree
-                long_lb = int(config.entry_threshold * 100)  # encoded above
-                if loc >= long_lb:
-                    long_px = float(close.iloc[loc - long_lb])
-                    long_ret = (px - long_px) / (long_px + 1e-10)
-                    if ret_signal > 0 and long_ret > 0:
-                        direction = 1
-                        entry_px = px
-                        in_pos = True
-                        hold_remaining = hold
-                        n_trades += 1
-                        equity *= (1 - tc_pct)
-
-            elif config.mom_type == "VOLSCALE":
-                # Vol-scale: signal = ret / realized_vol
-                if loc >= max(lb, 24):
-                    rets_window = close.iloc[loc-24:loc].pct_change().dropna()
-                    rvol = float(rets_window.std()) if len(rets_window) > 2 else 1e-4
-                    scaled = ret_signal / (rvol * np.sqrt(24) + 1e-10)
-                    if abs(scaled) > 1.0 and ret_signal > thresh:
-                        direction = 1
-                        entry_px = px
-                        in_pos = True
-                        hold_remaining = hold
-                        n_trades += 1
-                        equity *= (1 - tc_pct)
-
+        elif config.mom_type == "DUAL":
+            long_lb  = int(thresh * 100)   # encoded long lookback
+            if abs_i < long_lb:
+                continue
+            long_ret = (px - close[abs_i - long_lb]) / (close[abs_i - long_lb] + 1e-10)
+            if ret_signal > 0 and long_ret > 0:
+                direction = 1
             else:
-                # TSMOM_1H / TSMOM_4H / TSMOM_DAILY: follow the move
-                if ret_signal >= thresh:
-                    direction = 1
-                    entry_px = px
-                    in_pos = True
-                    hold_remaining = hold
-                    n_trades += 1
-                    equity *= (1 - tc_pct)
-                elif ret_signal <= -thresh and not config.long_only:
-                    direction = -1
-                    entry_px = px
-                    in_pos = True
-                    hold_remaining = hold
-                    n_trades += 1
-                    equity *= (1 - tc_pct)
+                continue
 
-    # Close open position at day end
-    if in_pos:
-        final_px = float(bars_day["close"].iloc[-1])
-        ret = (final_px - entry_px) / entry_px * direction
-        equity *= (1 + ret - tc_pct)
+        elif config.mom_type == "VOLSCALE":
+            if abs_i < max(lb, 24):
+                continue
+            rvol = float(np.std(np.diff(np.log(close[abs_i-24:abs_i] + 1e-10))))
+            rvol = max(rvol, 1e-4)
+            scaled = ret_signal / (rvol * np.sqrt(24))
+            if abs(scaled) <= 1.0 or ret_signal < thresh:
+                continue
+            direction = 1
 
-    daily_return = equity - 1.0
-    gross_return = daily_return + tc_pct * n_trades * 2 if n_trades > 0 else daily_return
+        else:
+            if ret_signal >= thresh:
+                direction = 1
+            elif ret_signal <= -thresh and not config.long_only:
+                direction = -1
+            else:
+                continue
+
+        result  = simulate_trade(close[abs_i:], direction, barrier, tc_pct)
+        equity    *= (1 + result["net_return"])
+        gross_tot += result["gross_return"]
+        n_trades  += 1
+        pos_end    = abs_i + result["exit_idx"]
 
     return {
-        "daily_return": float(daily_return),
-        "gross_return": float(gross_return),
+        "daily_return": float(equity - 1.0),
+        "gross_return": float(gross_tot),
         "n_trades":     n_trades,
     }
 
-
-# ── Daily feature computation ─────────────────────────────────────────────────
 
 def _compute_momentum_features(
     bars: pd.DataFrame,

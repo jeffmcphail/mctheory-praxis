@@ -77,6 +77,37 @@ def build_strategy(args):
             training_start=args.training_start,
             training_end=args.training_end,
         )
+    elif args.strategy == "vol":
+        from engines.vol_strategy import VolStrategy
+        assets = args.assets.split(",") if args.assets else None
+        return VolStrategy(
+            assets=assets,
+            cache_dir=args.cache_dir,
+            tc_bps=args.tc_bps,
+            training_start=args.training_start,
+            training_end=args.training_end,
+        )
+    elif args.strategy == "grid_bot":
+        from engines.grid_bot_strategy import GridBotStrategy
+        assets = args.assets.split(",") if args.assets else None
+        return GridBotStrategy(
+            assets=assets,
+            cache_dir=args.cache_dir,
+            tc_bps=args.tc_bps,
+            training_start=args.training_start,
+            training_end=args.training_end,
+        )
+    elif args.strategy == "funding_rate":
+        from engines.funding_rate_strategy import FundingRateStrategy
+        assets = args.assets.split(",") if args.assets else None
+        return FundingRateStrategy(
+            assets=assets,
+            cache_dir=args.cache_dir,
+            tc_bps=args.tc_bps,
+            training_start=args.training_start,
+            training_end=args.training_end,
+            feature_mode=getattr(args, "feature_mode", "funding"),
+        )
     elif args.strategy == "momentum":
         from engines.momentum_strategy import MomentumCPOStrategy
         assets    = args.assets.split(",") if args.assets else None
@@ -111,7 +142,8 @@ def build_strategy(args):
 def cmd_phase2(args):
     strategy = build_strategy(args)
     output_dir = Path(args.output_dir) / "cpo"
-    returns_df, features_df = run_phase2(strategy, output_dir)
+    sfx = getattr(args, "feature_mode", "")
+    returns_df, features_df = run_phase2(strategy, output_dir, features_suffix=sfx)
     print(f"\n  Phase 2 complete:")
     print(f"    Returns: {len(returns_df)} rows")
     print(f"    Features: {len(features_df)} rows")
@@ -122,10 +154,22 @@ def cmd_phase3(args):
     output_dir = Path(args.output_dir) / "cpo"
 
     returns_df = pd.read_parquet(output_dir / "phase2_returns.parquet")
-    features_df = pd.read_parquet(output_dir / "phase2_features.parquet")
-    print(f"  Loaded Phase 2 data: {len(returns_df)} returns, {len(features_df)} features")
 
-    # Use strategy's model_group_fn if available (for pre-filtering)
+    # Load features for the correct feature_mode
+    sfx = getattr(args, "feature_mode", "")
+    sfx_str = f"_{sfx}" if sfx else ""
+    features_path = output_dir / f"phase2_features{sfx_str}.parquet"
+
+    if not features_path.exists():
+        # Feature file for this mode doesn't exist — compute it
+        print(f"  Features not cached for mode '{sfx}', computing...")
+        _, features_df = run_phase2(strategy, output_dir, features_suffix=sfx)
+    else:
+        features_df = pd.read_parquet(features_path)
+
+    print(f"  Loaded Phase 2 data: {len(returns_df)} returns, {len(features_df)} features")
+    print(f"  Features file: {features_path.name}")
+
     group_fn = getattr(strategy, 'model_group_fn', None)
     models = run_phase3(strategy, returns_df, features_df, output_dir,
                         model_group_fn=group_fn)
@@ -135,8 +179,9 @@ def cmd_phase3(args):
 
     try:
         import joblib
-        joblib.dump(models, output_dir / "phase3_models.joblib")
-        print(f"  Models saved: {output_dir / 'phase3_models.joblib'}")
+        model_path = output_dir / f"phase3_models{sfx_str}.joblib"
+        joblib.dump(models, model_path)
+        print(f"  Models saved: {model_path}")
     except ImportError:
         print("  WARNING: joblib not available")
 
@@ -145,14 +190,21 @@ def cmd_phase4(args):
     strategy = build_strategy(args)
     output_dir = Path(args.output_dir) / "cpo"
 
+    sfx = getattr(args, "feature_mode", "")
+    sfx_str = f"_{sfx}" if sfx else ""
+
     try:
         import joblib
-        models = joblib.load(output_dir / "phase3_models.joblib")
+        model_path = output_dir / f"phase3_models{sfx_str}.joblib"
+        if not model_path.exists():
+            # Fall back to unsuffixed for backward compat
+            model_path = output_dir / "phase3_models.joblib"
+        models = joblib.load(model_path)
         for mid, m in models.items():
             if m.get("model") is not None:
                 m["model"].n_jobs = 1
         n_loaded = sum(1 for m in models.values() if m.get("model"))
-        print(f"  Loaded {n_loaded} models")
+        print(f"  Loaded {n_loaded} models from {model_path.name}")
     except (ImportError, FileNotFoundError):
         print("  ERROR: phase3_models.joblib not found. Run phase3 first.")
         return
@@ -235,7 +287,7 @@ def main():
     parser = argparse.ArgumentParser(description="CPO Pipeline — Generic Runner")
     parser.add_argument("--strategy", required=True,
                         choices=["pairs", "crypto_ta", "futures_ta", "fx_ta",
-                                 "universal_ta", "mcb_ta", "momentum"],
+                                 "universal_ta", "mcb_ta", "momentum", "funding_rate", "grid_bot", "vol"],
                         help="Trading strategy to use")
     parser.add_argument("--asset-class", default="crypto",
                         choices=["crypto", "futures", "fx"],
@@ -247,6 +299,10 @@ def main():
     parser.add_argument("--max-leverage", type=float, default=2.0)
     parser.add_argument("--max-weight", type=float, default=0.05,
                         help="Max weight per model (default 0.05 = 5%%)")
+    parser.add_argument("--max-portfolio-weight", type=float, default=0.50,
+                        help="Max total portfolio gross exposure (default 0.50 = 50%%). "
+                             "Prevents leverage runaway when many models pass the gate. "
+                             "Weights scaled proportionally if total exceeds this cap.")
     parser.add_argument("--prob-threshold", type=float, default=0.50,
                         help="P(profitable) gate threshold (default 0.50)")
     parser.add_argument("--min-lift", type=float, default=0.0,
@@ -275,6 +331,9 @@ def main():
                              "Options: TSMOM_1H,TSMOM_4H,TSMOM_DAILY,VOLSCALE,DUAL,REVERSAL")
     parser.add_argument("--allow-short", action="store_true", default=False,
                         help="Allow short positions (momentum strategy, requires perps)")
+    parser.add_argument("--feature-mode", type=str, default="funding",
+                        choices=["funding", "funding+regime", "regime"],
+                        help="Feature mode for funding_rate strategy")
 
     subparsers = parser.add_subparsers(dest="phase", required=True)
 
@@ -302,6 +361,15 @@ def main():
 
     if args.strategy == "pairs" and not args.pairs_json:
         parser.error("--pairs-json required for pairs strategy")
+    elif args.strategy == "vol":
+        if args.output_dir is None:
+            args.output_dir = Path("output/vol")
+    elif args.strategy == "grid_bot":
+        if args.output_dir is None:
+            args.output_dir = Path("output/grid_bot")
+    elif args.strategy == "funding_rate":
+        if args.output_dir is None:
+            args.output_dir = Path("output/funding_rate")
     elif args.strategy == "momentum":
         if args.output_dir is None:
             args.output_dir = Path("output/momentum")

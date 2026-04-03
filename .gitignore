@@ -136,3 +136,4 @@ dmypy.json
 # Project-specific
 data/surfaces.duckdb
 logs/
+output/
