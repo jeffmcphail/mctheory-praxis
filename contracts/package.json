@@ -1,0 +1,22 @@
+{
+  "name": "praxis-mev-contracts",
+  "version": "1.0.0",
+  "description": "Flash loan MEV contracts for Polymarket arbitrage on Polygon",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "test:fork": "hardhat test --network hardhat",
+    "deploy:polygon": "hardhat run scripts/deploy.js --network polygon",
+    "deploy:fork": "hardhat run scripts/deploy.js --network hardhat",
+    "verify": "hardhat verify --network polygon"
+  },
+  "dependencies": {
+    "@aave/core-v3": "^1.19.3",
+    "@openzeppelin/contracts": "^4.9.6"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "dotenv": "^16.4.5",
+    "hardhat": "^2.22.0"
+  }
+}

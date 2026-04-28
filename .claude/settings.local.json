@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(tasklist)",
+      "Bash(wmic process *)",
+      "Bash(findstr python *)",
+      "Bash(bash *)",
+      "Bash(tee models/intrabar/probe_binance_history.log)",
+      "Bash(tee models/intrabar/v5_build_features.log)",
+      "Bash(date -Iseconds)",
+      "Bash(taskkill //F //PID 2856 //T)",
+      "Bash(tee models/intrabar/v7_diag1_thermal.log)",
+      "Bash(schtasks /Query /FO LIST)",
+      "Bash(schtasks /Query)",
+      "Bash(schtasks /Query /FO CSV /NH)",
+      "PowerShell(& \".\\\\services\\\\register_order_book_task.ps1\")",
+      "PowerShell(Get-ScheduledTask *)",
+      "PowerShell(& \".\\\\services\\\\register_all_tasks.ps1\" -DryRun)",
+      "PowerShell(& \".\\\\services\\\\register_all_tasks.ps1\" -DryRun -Only \"order_book\",\"crypto_1m\")",
+      "PowerShell(& \".\\\\services\\\\register_trades_task.ps1\")",
+      "PowerShell(Start-ScheduledTask *)"
+    ]
+  }
+}

@@ -137,3 +137,7 @@ dmypy.json
 data/
 logs/
 output/
+models/
+praxis.zip
+praxis_part*.zip
+praxis_manifest.txt

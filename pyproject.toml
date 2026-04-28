@@ -36,6 +36,9 @@ dev = [
 data = [
     "yfinance>=0.2.0",
 ]
+mcp = [
+    "mcp>=1.2.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
