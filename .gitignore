@@ -141,3 +141,7 @@ models/
 praxis.zip
 praxis_part*.zip
 praxis_manifest.txt
+
+# Code-side working scratch files (helpers, throwaway scripts)
+claude/scratch/
+
