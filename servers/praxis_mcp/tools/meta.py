@@ -155,24 +155,54 @@ def register(mcp, db_path: Path):
             # Tables with active scheduled collectors. Threshold = natural
             # cadence + slack for scheduler jitter / windowed-gap behavior.
             #
-            # trades                -- PraxisTradesCollector, continuous 10s.
-            # order_book_snapshots  -- PraxisOrderBookCollector, 10s on-hour
-            #                          but currently 1h-on/1h-off pattern
-            #                          (see retro). 65 min tolerance covers
-            #                          the worst-case sampling moment.
+            # trades                -- PraxisTradesCollector, continuous 30s
+            #                          (now 3550s windowed per Cycle 10
+            #                          patch matching OrderBook).
+            # order_book_snapshots  -- PraxisOrderBookCollector, 10s on-hour,
+            #                          3550s windowed (Cycle 8 fix). 65 min
+            #                          tolerance covers the worst-case
+            #                          sampling moment plus inter-window gap.
             # ohlcv_1m              -- PraxisCrypto1mCollector, 6h batch.
             #                          7h tolerance covers batch + slack.
+            # funding_rates         -- PraxisFundingCollector, 8h cadence
+            #                          aligned approximately to Binance
+            #                          funding events (Cycle 10). 9h
+            #                          tolerance covers cadence + slack.
+            # fear_greed            -- PraxisFearGreedCollector, daily at
+            #                          00:30 local (Cycle 10). 26h tolerance.
+            # ohlcv_daily           -- PraxisOhlcvDailyCollector, daily at
+            #                          00:15 local (Cycle 10). 26h tolerance.
+            # ohlcv_4h              -- PraxisOhlcv4hCollector, daily at
+            #                          00:20 local (Cycle 10). 26h tolerance.
+            #                          (Daily refresh of 4h bars; the cadence
+            #                          is the refresh frequency, not the bar
+            #                          frequency.)
             #
-            # funding_rates and fear_greed are NOT monitored: no scheduled
-            # task writes to them. Populated only by manual one-shot CLI
-            # runs (python -m engines.crypto_data_collector collect-funding /
-            # collect-fear-greed). Listed under `unmonitored` below.
+            # Tables NOT in this dict are computed dynamically below as
+            # `unmonitored` -- the set of tables in the DB minus monitored
+            # minus SQLite internals. Currently this captures onchain_btc
+            # (no scheduled collector) and market_data (legacy/empty).
             monitored_tables = {
                 "trades": 120,
                 "order_book_snapshots": 3900,
                 "ohlcv_1m": 25200,
+                "funding_rates": 32400,    # 8h + 1h slack
+                "fear_greed": 93600,       # 24h + 2h slack
+                "ohlcv_daily": 93600,      # 24h + 2h slack
+                "ohlcv_4h": 93600,         # 24h + 2h slack
             }
-            unmonitored_tables = ["funding_rates", "fear_greed"]
+
+            # Dynamically compute unmonitored: every table in the DB that
+            # isn't monitored and isn't a SQLite internal table.
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "ORDER BY name"
+            )
+            all_tables = {row["name"] for row in cursor.fetchall()}
+            sqlite_internal = {"sqlite_sequence"}
+            unmonitored_tables = sorted(
+                all_tables - set(monitored_tables.keys()) - sqlite_internal
+            )
 
             now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
             result = {
