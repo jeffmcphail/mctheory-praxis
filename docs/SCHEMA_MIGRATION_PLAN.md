@@ -17,7 +17,7 @@
 | Cycle | Table | Pattern | Status | Commit |
 |---|---|---|---|---|
 | 17 | fear_greed | simple | DONE | a03fff6 |
-| 18 | ohlcv_daily | simple | DONE | <TBD> |
+| 18 | ohlcv_daily | simple | DONE | cc6a178 |
 | 19 | market_data | schema-only | pending | -- |
 | 20 | ohlcv_4h | simple | pending | -- |
 | 21 | funding_rates | simple | pending | -- |
@@ -53,7 +53,7 @@ column is ms.
 - Recipe: `scripts/migrations/cycle17_fear_greed_to_v2.py` (idempotent,
   pre/post row-count + latest-UTC cross-check, transactional)
 
-### #2 -- ohlcv_daily (DONE, Cycle 18, commit <TBD>)
+### #2 -- ohlcv_daily (DONE, Cycle 18, commit cc6a178)
 
 - DB: crypto_data.db
 - Rows: 1,802 (901 BTC + 901 ETH)
