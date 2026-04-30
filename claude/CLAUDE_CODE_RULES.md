@@ -2,15 +2,16 @@
 
 ## McTheory Development -- Praxis (Prediction Markets & Systematic Trading)
 
-**Version:** 1.2
+**Version:** 1.3
 **Author:** Jeff McPhail / Claude Chat
-**Date:** April 29, 2026
+**Date:** April 30, 2026
 **Adapted from:** AI Agent Factory protocol (validated, first retro: 30 min vs 2+ hours)
 
 **Changelog:**
 - v1.0 (2026-04-20): Initial Praxis protocol.
 - v1.1 (2026-04-22): Added Progress Reporting Rules (9-15) operationalizing the ETA/Progress Reporting section of WORKFLOW_MODES_PRAXIS.md. Added Brief/Retro retention rules (36-37). Added required reading of WORKFLOW_MODES_PRAXIS.md on session start (rule 3). Renumbered subsequent rules accordingly.
 - v1.2 (2026-04-29): Four new/extended rules from cycles 8-12: extended Rule 20 (ASCII-only) with the Unicode-runtime-recognition pattern using module-level constants; new Rule 21 (CRLF preservation for .bat/.ps1); new Rule 32 (MCP server changes require Claude Desktop full-quit + relaunch including kill of any orphaned Python processes); new Rule 33 (prefer .py file over inline `python -c` for non-trivial diagnostics). Refreshed the Running Services table to reflect Cycle 10's registered tasks plus PraxisLiveCollector and PraxisSmartMoney reactivation. Refreshed the Key Directories tree to include `servers/`, `tests/`, `src/`, `contracts/`, `dashboards/`, `gui/`, `k8s/`, `spikes/`, `examples/`, `battle_results/`, `market_data/`, and `claude/scratch/` -- long-present directories that were never added. Renamed "Testing Rules" to "Testing and Diagnostics Rules". Renumbered subsequent rules accordingly. Total rule count: 40 (was 37).
+- v1.3 (2026-04-30): One new rule from Cycle 15 diagnostic investigation: new Rule 34 (explicit transaction management on SQLite reads against actively-written DBs). Python's sqlite3 module has documented quirks around implicit BEGIN that can cause long-lived connections to see snapshot views from past states. The defensive practice is fresh connections per logical read pass OR `isolation_level=None` OR explicit `conn.commit()` between SELECTs to release the implicit read transaction. Rule lands in the Testing and Diagnostics Rules subsection. Renumbered Retro Rules from 34-40 to 35-41. Total rule count: 41 (was 40).
 
 ---
 
@@ -311,15 +312,34 @@ These rules operationalize the "ETA and Progress Reporting" section of `WORKFLOW
     python claude\scratch\check_trades.py
     ```
     The single-quoted here-string `@'...'@` preserves quotes literally without PowerShell variable interpolation. Trivial one-liners (no embedded quotes, no format strings) are still fine inline. Cycle 9 retro 6.7 and Cycle 11 implementation notes both surfaced this.
+34. **Always explicitly manage transactions when reading a SQLite DB that another process is actively writing to.** Python's `sqlite3` module has documented quirks around implicit `BEGIN` that can cause a long-lived connection to see a snapshot view from a past state, missing all writes that committed since. The exact reproduction is version- and pattern-dependent and can manifest as "I'm reading the same DB the live MCP server is reading and getting hours-old data." Three acceptable patterns:
+    - **Fresh connection per logical read pass.** Open, query, close. The MCP server's `connect_ro` does this and never sees stale data. Cheapest and most foolproof:
+        ```python
+        def fresh_read():
+            conn = sqlite3.connect("data/live_collector.db")
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT MAX(timestamp) FROM price_snapshots")
+                return cur.fetchone()
+            finally:
+                conn.close()
+        ```
+    - **`isolation_level=None` for true autocommit.** Each statement is its own transaction; no implicit BEGIN sticks around:
+        ```python
+        conn = sqlite3.connect("data/live_collector.db", isolation_level=None)
+        ```
+    - **Explicit `conn.commit()` between SELECTs.** On a read connection, `commit()` ends any open implicit transaction without changing data; the next SELECT begins a fresh transaction with current state.
+
+    Do NOT keep a single `sqlite3.Connection` open across multiple SELECT passes that span more than a few seconds without one of the above. Cycle 15 diagnostic confirmed this is real and the cause of mysterious "stale data" reads. See `claude/retros/RETRO_sqlite_freshness_diagnostic.md` for the full investigation.
 
 ### Retro Rules (cross-reference `WORKFLOW_MODES_PRAXIS.md` for Brief/Retro retention)
-34. **Write the retro before ending the session.** Save to `claude/retros/RETRO_<slug>.md`.
-35. **Include ALL files modified** with line ranges.
-36. **Include the debugging trail** -- what was tried, what failed, why.
-37. **Include test results** -- both passes and failures.
-38. **Include open items** -- anything that needs Chat's attention for strategy.
-39. **Retros are permanent.** Never delete a retro, even for failed/partial attempts. Failed experiments are data.
-40. **Briefs are permanent once a matching retro exists.** Do not delete Briefs to "clean up" `claude/handoffs/`. The only removable case: a Brief never executed and superseded -- rename to `ARCHIVED_<slug>.md`, do not delete.
+35. **Write the retro before ending the session.** Save to `claude/retros/RETRO_<slug>.md`.
+36. **Include ALL files modified** with line ranges.
+37. **Include the debugging trail** -- what was tried, what failed, why.
+38. **Include test results** -- both passes and failures.
+39. **Include open items** -- anything that needs Chat's attention for strategy.
+40. **Retros are permanent.** Never delete a retro, even for failed/partial attempts. Failed experiments are data.
+41. **Briefs are permanent once a matching retro exists.** Do not delete Briefs to "clean up" `claude/handoffs/`. The only removable case: a Brief never executed and superseded -- rename to `ARCHIVED_<slug>.md`, do not delete.
 
 ---
 
@@ -431,3 +451,4 @@ The MCP server (`servers/praxis_mcp/`) provides `get_collector_health()` for liv
 - CRLF line endings on `.bat` and `.ps1` files; verify with `file <path>` after every edit (Rule 21)
 - Every token/money movement needs confirmation gate (Rule 24)
 - Diagnostics in `claude/scratch/` as `.py` files; avoid quote-heavy inline `python -c` (Rule 33)
+- Reads against actively-written SQLite DBs need explicit transaction management: fresh connections per pass, `isolation_level=None`, or `conn.commit()` between SELECTs (Rule 34)
