@@ -1,15 +1,16 @@
 # Dual-Claude Workflow Protocol
 
-## McTheory Development — Praxis (Prediction Markets & Systematic Trading)
+## McTheory Development -- Praxis (Prediction Markets & Systematic Trading)
 
-**Version:** 1.1
+**Version:** 1.2
 **Author:** Jeff McPhail / Claude Chat
-**Date:** April 22, 2026
+**Date:** April 29, 2026
 **Adapted from:** AI Agent Factory protocol (validated, first retro: 30 min vs 2+ hours)
 
 **Changelog:**
 - v1.0 (2026-04-20): Initial Praxis protocol.
 - v1.1 (2026-04-22): Added Progress Reporting Rules (9-15) operationalizing the ETA/Progress Reporting section of WORKFLOW_MODES_PRAXIS.md. Added Brief/Retro retention rules (36-37). Added required reading of WORKFLOW_MODES_PRAXIS.md on session start (rule 3). Renumbered subsequent rules accordingly.
+- v1.2 (2026-04-29): Four new/extended rules from cycles 8-12: extended Rule 20 (ASCII-only) with the Unicode-runtime-recognition pattern using module-level constants; new Rule 21 (CRLF preservation for .bat/.ps1); new Rule 32 (MCP server changes require Claude Desktop full-quit + relaunch including kill of any orphaned Python processes); new Rule 33 (prefer .py file over inline `python -c` for non-trivial diagnostics). Refreshed the Running Services table to reflect Cycle 10's registered tasks plus PraxisLiveCollector and PraxisSmartMoney reactivation. Refreshed the Key Directories tree to include `servers/`, `tests/`, `src/`, `contracts/`, `dashboards/`, `gui/`, `k8s/`, `spikes/`, `examples/`, `battle_results/`, `market_data/`, and `claude/scratch/` -- long-present directories that were never added. Renamed "Testing Rules" to "Testing and Diagnostics Rules". Renumbered subsequent rules accordingly. Total rule count: 40 (was 37).
 
 ---
 
@@ -102,6 +103,7 @@ praxis/
 |   |   +-- RETRO_lstm_lightgbm.md
 |   |   +-- RETRO_convergence_detector.md
 |   |   +-- ...
+|   +-- scratch/                     # Diagnostic helpers, throwaway scripts (gitignored)
 |   +-- CLAUDE_CODE_RULES.md         # This protocol (for Code to read)
 +-- .claude/
     +-- commands/                    # Slash commands for Claude Code
@@ -272,30 +274,52 @@ These rules operationalize the "ETA and Progress Reporting" section of `WORKFLOW
 17. **NEVER modify `*.db` database files directly.** Use migration scripts or JSON exports.
 18. **NEVER delete or overwrite `data/` directory contents** without explicit confirmation from Jeff.
 19. **Always run `python -c "import ast; ast.parse(open('file.py').read())"` after editing Python files.**
-20. **All scripts must be ASCII-only** -- no em dashes, box-drawing chars, emoji. Windows Task Scheduler pipes through cp1252.
+20. **All scripts must be ASCII-only** -- no em dashes, box-drawing chars, emoji. Windows Task Scheduler pipes through cp1252. **When a parser must RECOGNIZE Unicode characters at runtime** (e.g., `engines/atlas_sync.py` parsing markdown that contains em dashes, multiplication signs, etc.), define module-level constants like `EM_DASH = "\u2014"`, `EN_DASH = "\u2013"`, `MULT_SIGN = "\u00d7"`, and concatenate them into regex patterns:
+    ```python
+    EM_DASH = "\u2014"
+    MULT_SIGN = "\u00d7"
+    parts = re.split(r"\s+[xX" + MULT_SIGN + r"]\s+", body, maxsplit=1)
+    ```
+    This keeps source ASCII while runtime correctly handles non-ASCII input. Cycle 12 retro section 8 has the canonical example.
+21. **Preserve CRLF line endings on `.bat` and `.ps1` files.** The Edit tool silently rewrites these files with LF-only line endings, which can break Windows Task Scheduler execution. After every edit to a `.bat` or `.ps1` file:
+    - Run `unix2dos <path>` to restore CRLF
+    - Verify with `file <path>` showing "with CRLF line terminators"
+    - Verify with `tr -cd '\r' < <path> | wc -c` showing a non-zero count matching the line count
+    Caught early in Cycle 8 (RETRO_order_book_duration_fix.md section 4); a recurring trap. Don't skip the verification step -- the failure mode is silent at edit time and only surfaces when Task Scheduler tries to invoke the file.
 
 ### Praxis-Specific Rules
-21. **Always use `load_dotenv()` before accessing any API keys.** Never assume raw environment variables.
-22. **Always check the resolution oracle/source** for any Polymarket bet before trading.
-23. **Every script that moves tokens or money** MUST have `input("Type YES to confirm: ")` gate before execution.
-24. **Default to maximum validation and verbose output.** Add `--validate` and `--verbose` args. Relax as confidence increases.
-25. **Polymarket API field names:** `proxyWallet` (not `userAddress`), `vol` (not `volume`), `userName` (not `username`).
+22. **Always use `load_dotenv()` before accessing any API keys.** Never assume raw environment variables.
+23. **Always check the resolution oracle/source** for any Polymarket bet before trading.
+24. **Every script that moves tokens or money** MUST have `input("Type YES to confirm: ")` gate before execution.
+25. **Default to maximum validation and verbose output.** Add `--validate` and `--verbose` args. Relax as confidence increases.
+26. **Polymarket API field names:** `proxyWallet` (not `userAddress`), `vol` (not `volume`), `userName` (not `username`).
 
-### Testing Rules
-26. **Run the script manually** with `python -m engines.<module> <command>` and paste the output.
-27. **For scheduled task scripts:** verify no non-ASCII characters with `grep -P "[^\x00-\x7F]" file.py`.
-28. **For data collection:** run `python -m engines.crypto_data_collector status` to verify data landed.
-29. **For trading scripts:** ALWAYS dry-run first. Never `--execute` without Jeff's explicit approval.
-30. **For Polymarket redemption/trading:** check on-chain balances before and after.
+### Testing and Diagnostics Rules
+27. **Run the script manually** with `python -m engines.<module> <command>` and paste the output.
+28. **For scheduled task scripts:** verify no non-ASCII characters with `grep -P "[^\x00-\x7F]" file.py`.
+29. **For data collection:** run `python -m engines.crypto_data_collector status` to verify data landed.
+30. **For trading scripts:** ALWAYS dry-run first. Never `--execute` without Jeff's explicit approval.
+31. **For Polymarket redemption/trading:** check on-chain balances before and after.
+32. **For MCP server changes:** the running MCP subprocess in Claude Desktop won't pick up source changes until Desktop is fully relaunched (right-click tray icon -> Quit, kill any lingering Claude.exe via `Get-Process -Name "Claude*" | Stop-Process -Force`, kill any orphaned Python from the praxis venv via `Get-Process -Name "python*" | Where-Object { $_.Path -like '*praxis\.venv*' } | Stop-Process -Force`, then relaunch). Verification of MCP changes happens via `python -m servers.praxis_mcp.test_smoke` (standalone) or via a `claude/scratch/` helper script that loads tools through `FastMCP` directly. The smoke test gives the canonical "Registered tools: N" count.
+33. **Prefer a `.py` file over inline `python -c` for any non-trivial diagnostic.** PowerShell's quote-mangling on Windows breaks inline Python with embedded single+double quotes, format strings, or multi-line content. Write the helper to `claude/scratch/<name>.py` (gitignored per the convention established in Cycle 9) and invoke it normally:
+    ```powershell
+    @'
+    import sqlite3
+    c = sqlite3.connect('data/crypto_data.db')
+    print(c.execute('SELECT COUNT(*) FROM trades').fetchone()[0])
+    '@ | Out-File -Encoding utf8 claude\scratch\check_trades.py
+    python claude\scratch\check_trades.py
+    ```
+    The single-quoted here-string `@'...'@` preserves quotes literally without PowerShell variable interpolation. Trivial one-liners (no embedded quotes, no format strings) are still fine inline. Cycle 9 retro 6.7 and Cycle 11 implementation notes both surfaced this.
 
 ### Retro Rules (cross-reference `WORKFLOW_MODES_PRAXIS.md` for Brief/Retro retention)
-31. **Write the retro before ending the session.** Save to `claude/retros/RETRO_<slug>.md`.
-32. **Include ALL files modified** with line ranges.
-33. **Include the debugging trail** -- what was tried, what failed, why.
-34. **Include test results** -- both passes and failures.
-35. **Include open items** -- anything that needs Chat's attention for strategy.
-36. **Retros are permanent.** Never delete a retro, even for failed/partial attempts. Failed experiments are data.
-37. **Briefs are permanent once a matching retro exists.** Do not delete Briefs to "clean up" `claude/handoffs/`. The only removable case: a Brief never executed and superseded -- rename to `ARCHIVED_<slug>.md`, do not delete.
+34. **Write the retro before ending the session.** Save to `claude/retros/RETRO_<slug>.md`.
+35. **Include ALL files modified** with line ranges.
+36. **Include the debugging trail** -- what was tried, what failed, why.
+37. **Include test results** -- both passes and failures.
+38. **Include open items** -- anything that needs Chat's attention for strategy.
+39. **Retros are permanent.** Never delete a retro, even for failed/partial attempts. Failed experiments are data.
+40. **Briefs are permanent once a matching retro exists.** Do not delete Briefs to "clean up" `claude/handoffs/`. The only removable case: a Brief never executed and superseded -- rename to `ARCHIVED_<slug>.md`, do not delete.
 
 ---
 
@@ -350,31 +374,60 @@ These rules operationalize the "ETA and Progress Reporting" section of `WORKFLOW
 `C:\Data\Development\Python\McTheoryApps\praxis`
 
 ### Key Directories
+
 ```
 praxis/
-+-- engines/           # Trading engines (lstm_predictor, ai_ensemble, smart_money, etc.)
++-- engines/           # Trading engines, data collectors, models, analysis
 +-- scripts/           # One-off scripts (redeem, batch_sell, debug tools)
-+-- services/          # Windows scheduled task scripts (.bat, .ps1)
-+-- data/              # SQLite databases (crypto_data.db, smart_money.db, etc.)
-+-- models/            # Trained models (lstm/, crypto/)
-+-- logs/              # Service logs
-+-- docs/              # Documentation (TRADING_ATLAS.md, REGIME_MATRIX.md)
-+-- claude/            # Dual-Claude handoffs and retros
-+-- .claude/commands/  # Slash commands for Claude Code
++-- services/          # Windows scheduled task scripts (.bat + register_*.ps1)
++-- servers/
+|   +-- praxis_mcp/    # MCP server exposing read-only data access (Cycle 7)
+|       +-- tools/     # MCP tool modules (meta, ohlcv, order_book, trades, funding, raw, atlas)
++-- src/               # Modern post-migration src layout (praxis package)
++-- tests/             # pytest suite
++-- data/              # SQLite databases (crypto_data.db, smart_money.db, praxis_meta.db, etc.); gitignored
++-- models/            # Trained models; gitignored
++-- logs/              # Service logs; gitignored
++-- docs/              # TRADING_ATLAS.md, REGIME_MATRIX.md, ATLAS_DB.md, etc.
++-- contracts/         # Solidity contracts for on-chain execution
++-- dashboards/        # Streamlit / web dashboards
++-- gui/               # Desktop GUI components (mcb_studio)
++-- k8s/               # Kubernetes manifests (forward-looking)
++-- spikes/            # Throwaway exploration code
++-- examples/          # Reference implementations
++-- battle_results/    # Backtest output archives
++-- market_data/       # Vendor data captures
++-- claude/
+|   +-- handoffs/      # Chat -> Code briefs (permanent per WORKFLOW_MODES_PRAXIS.md)
+|   +-- retros/        # Code -> Chat session logs (permanent)
+|   +-- scratch/       # Diagnostic helpers, throwaway scripts (gitignored, Cycle 9)
++-- .claude/
+    +-- commands/      # Slash commands for Claude Code (brief.md, retro.md, etc.)
 ```
 
 ### Running Services (Windows Scheduled Tasks)
-| Task | Schedule | What |
-|------|----------|------|
-| PraxisLiveCollector | 60 seconds | Polymarket price snapshots |
-| PraxisSmartMoney | 6 hours | Wallet discovery + position snapshots |
-| PraxisCrypto1mCollector | 6 hours | BTC+ETH 1-minute candles |
-| Praxis Funding Monitor | Periodic | Funding rate alerts |
-| Praxis Sentiment Collector | Periodic | Sentiment data collection |
+
+After Cycle 10's recovery and Cycle 13's reactivation of `PraxisLiveCollector` and `PraxisSmartMoney`, the canonical set of registered tasks is below. All registration scripts live in `services/`. The meta-registrar at `services/register_all_tasks.ps1` discovers them by glob and supports `-Only` to target a subset.
+
+| Task | Schedule | Source bat | Notes |
+|------|----------|------------|-------|
+| PraxisOrderBookCollector | Hourly back-to-back | order_book_collector_service.bat | 3550s windowed (Cycle 8 race fix); 10s cadence; BTC+ETH order book snapshots |
+| PraxisTradesCollector | Hourly back-to-back | trades_collector_service.bat | 3550s windowed (Cycle 10 audit fix); 30s cadence; BTC+ETH trades with buyer/seller tagging |
+| PraxisCrypto1mCollector | Every 6 hours | crypto_1m_collector_service.bat | BTC+ETH 1m candles, --days 2 overlap |
+| PraxisOhlcvDailyCollector | Daily 00:15 | ohlcv_daily_collector_service.bat | Cycle 10; BTC+ETH daily candles, --days 7 overlap |
+| PraxisOhlcv4hCollector | Daily 00:20 | ohlcv_4h_collector_service.bat | Cycle 10; BTC+ETH 4h candles, --days 7 overlap |
+| PraxisFundingCollector | 00:05/08:05/16:05 | funding_collector_service.bat | Cycle 10; local time, not UTC; --days 7 absorbs offset |
+| PraxisFearGreedCollector | Daily 00:30 | fear_greed_collector_service.bat | Cycle 10; alternative.me F&G index |
+| PraxisLiveCollector | At system startup, restart-on-failure loop | live_collector_service.bat | Pre-recovery + Cycle 13 reactivation; samples top 50 Polymarket markets every 60s; auto-restart with 30s delay; writes to data/live.db (or similar) |
+| PraxisSmartMoney | Every 6 hours | smart_money_service.bat | Pre-recovery + Cycle 13 reactivation; wallet discovery + position snapshots; writes to data/smart_money.db |
+
+The MCP server (`servers/praxis_mcp/`) provides `get_collector_health()` for live staleness monitoring of the registered set. Per-table thresholds defined in `servers/praxis_mcp/tools/meta.py` (Cycle 11 expansion). Note: `PraxisLiveCollector` and `PraxisSmartMoney` write to separate SQLite DBs (`live.db` / `smart_money.db`) which are NOT currently monitored by the MCP health check; expanding `get_collector_health()` to cover those is queued as a future cycle.
 
 ### Key Principles
 - "Everything is a parameter" -- never restrict at design time
 - Maximum validation and verbose output by default
 - Always use `load_dotenv()` before API keys
-- ASCII-only for scheduled task scripts (cp1252 encoding)
-- Every token/money movement needs confirmation gate
+- ASCII-only for scheduled task scripts (cp1252 encoding); use module-level Unicode constants when runtime parsing needs non-ASCII recognition (Rule 20)
+- CRLF line endings on `.bat` and `.ps1` files; verify with `file <path>` after every edit (Rule 21)
+- Every token/money movement needs confirmation gate (Rule 24)
+- Diagnostics in `claude/scratch/` as `.py` files; avoid quote-heavy inline `python -c` (Rule 33)
