@@ -34,12 +34,14 @@ Upload the project zip, then read these files in this exact sequence:
 
 | Priority | File | What It Contains |
 |----------|------|------------------|
-| **1st** | `claude/chat/CLAUDE_CHAT_CONVENTIONS.md` | Conventions hierarchy, overrides, naming rules, zip checklist |
-| **2nd** | `docs/praxis_main_series.md` | Project overview, architecture, implementation phases, spike results |
-| **3rd** | `docs/praxis_main_series_transcript.md` | Chronological decision log with key findings |
-| **4th** | `claude/chat/NEW_CHAT_README.md` | This file — onboarding procedures |
-| **5th** | `claude/chat/CHAT_WORKAROUNDS.md` | Known platform limitations and solutions |
-| **6th** | `/mnt/transcripts/journal.txt` | Transcript catalog from all compacted chat sessions |
+| **1st** | `claude/META_DOCS.md` | Meta-doc convention: which `claude/*.md` and `docs/*.md` files to read at session start, the memory-vs-meta-docs split, per-Project memory model |
+| **2nd** | `claude/chat/CLAUDE_CHAT_CONVENTIONS.md` | Conventions hierarchy, overrides, naming rules, zip checklist |
+| **3rd** | `claude/TODO.md` | Active work queue, deferred items, multi-cycle plans for Praxis |
+| **4th** | `docs/praxis_main_series.md` | Project overview, architecture, implementation phases, spike results |
+| **5th** | `docs/praxis_main_series_transcript.md` | Chronological decision log with key findings |
+| **6th** | `claude/chat/NEW_CHAT_README.md` | This file — onboarding procedures |
+| **7th** | `claude/chat/CHAT_WORKAROUNDS.md` | Known platform limitations and solutions |
+| **8th** | `/mnt/transcripts/journal.txt` | Transcript catalog from all compacted chat sessions |
 
 After these core documents, scan for architectural context:
 
