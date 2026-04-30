@@ -21,6 +21,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from servers.praxis_mcp.tools import (
+    atlas,
     funding,
     meta,
     ohlcv,
@@ -45,6 +46,7 @@ log = logging.getLogger(__name__)
 # parents[2] -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = REPO_ROOT / "data" / "crypto_data.db"
+ATLAS_DB_PATH = REPO_ROOT / "data" / "praxis_meta.db"
 
 if not DB_PATH.exists():
     log.error(f"DB not found at {DB_PATH}")
@@ -60,6 +62,7 @@ order_book.register(mcp, DB_PATH)
 trades.register(mcp, DB_PATH)
 funding.register(mcp, DB_PATH)
 raw.register(mcp, DB_PATH)
+atlas.register(mcp, ATLAS_DB_PATH)
 
 
 if __name__ == "__main__":

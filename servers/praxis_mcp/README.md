@@ -118,7 +118,7 @@ means the failure is upstream of the tool function.
 
 ## Tools
 
-Ten tools across six modules.
+Twelve tools across seven modules.
 
 ### Meta (`tools/meta.py`)
 
@@ -172,6 +172,19 @@ Ten tools across six modules.
 **Prefer targeted tools over `raw_query`.** The targeted tools encode the
 correct filters and time-range semantics; raw queries are easy to get
 subtly wrong.
+
+### Atlas (`tools/atlas.py`)
+
+Semantic search over the Praxis Atlas (TRADING_ATLAS.md, PREDICTION_MARKET_
+ATLAS.md, REGIME_MATRIX.md). Reads the sidecar `data/praxis_meta.db`
+populated by `python -m engines.atlas_sync`. See `docs/ATLAS_DB.md`.
+
+- `atlas_search(query, top_k=5)` -- find the `top_k` Atlas experiments most
+  similar to a natural-language query, ranked by cosine similarity over
+  Voyage / OpenAI embeddings. Use this when triaging a new trading idea
+  against accumulated experimental evidence.
+- `atlas_get(entry_id)` -- retrieve full markdown + parsed structured
+  fields + a `source_file:lines` citation for a single experiment.
 
 ## Safety
 

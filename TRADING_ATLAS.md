@@ -1,5 +1,9 @@
 # Trading Strategy Atlas
 
+> **Sync state:** This file is the source of truth. After editing, run
+> `python -m engines.atlas_sync` to update the queryable DB at
+> `data/praxis_meta.db`. See `docs/ATLAS_DB.md`.
+
 ## Purpose
 
 A systematic knowledge base mapping the landscape of trading strategies across asset classes, signal types, time horizons, and market regimes. Every experiment adds a data point. The atlas compounds — when a new trading idea appears, we can immediately contextualize it against accumulated evidence and optimize faster.

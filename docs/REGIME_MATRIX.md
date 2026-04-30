@@ -1,5 +1,9 @@
 # CPO Regime Matrix Design
 
+> **Sync state:** This file is the source of truth. After editing, run
+> `python -m engines.atlas_sync` to update the queryable DB at
+> `data/praxis_meta.db`. See `docs/ATLAS_DB.md`.
+
 ## The Framework
 
 The regime matrix is a principled hierarchical feature selection protocol:

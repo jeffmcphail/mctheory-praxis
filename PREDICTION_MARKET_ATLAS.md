@@ -2,6 +2,10 @@
 ## McTheory Praxis — Prediction Market Trading Research
 ### Created: 2026-04-04 | Status: Initial Research Phase
 
+> **Sync state:** This file is the source of truth. After editing, run
+> `python -m engines.atlas_sync` to update the queryable DB at
+> `data/praxis_meta.db`. See `docs/ATLAS_DB.md`.
+
 ---
 
 ## 1. PLATFORM MECHANICS & MICROSTRUCTURE
