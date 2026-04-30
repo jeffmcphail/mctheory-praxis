@@ -18,14 +18,12 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **Cycle 18: Write `docs/SCHEMA_MIGRATION_PLAN.md` and start migrating
-  second table per Rule 35.** Cycle 17 landed Rule 35 (Temporal data
-  storage standard) and the `fear_greed` pilot migration. Cycle 18
-  produces the ordered plan covering the remaining ~8 nonconforming
-  tables, then begins the next migration. Decision points: which table
-  goes second, dual-write vs. stop-migrate-start per table, ordering
-  by risk/value. *(Source: BRIEF_temporal_standard_pilot.md
-  out-of-scope list)*
+- **Cycle 19: Migrate next table per `docs/SCHEMA_MIGRATION_PLAN.md`.**
+  Plan slots `market_data` next as a schema-only change (empty table;
+  decide whether to keep or drop it before touching schema), with
+  `ohlcv_4h` queued as the next non-trivial migration if `market_data`
+  defers. Specific table choice and pattern (simple vs. drop-and-rebuild)
+  set in the next-cycle Brief. *(Source: docs/SCHEMA_MIGRATION_PLAN.md)*
 
 - **TRADING_ATLAS.md count reconciliation**: 15 numbered headings vs 17
   prose-claimed. Either find the two missing experiments or fix the prose.
@@ -206,15 +204,22 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   transaction management)
 - Cycle 16: Meta-docs convention setup, memory cleanup, claude/TODO.md
   plus META_DOCS.md and docs/TRADING_*.md created.
-- **Cycle 17 (this cycle)**: CLAUDE_CODE_RULES.md v1.4 -- new Rule 35
+- Cycle 17: CLAUDE_CODE_RULES.md v1.4 -- new Rule 35
   (temporal data storage standard); pilot migration of `fear_greed`
   table to ms-since-epoch UTC PK schema; `onchain_btc` added to MCP
   `get_collector_health` monitoring (48h threshold, intentionally
   alarming until a collector is registered); `docs/SCHEMA_NOTES.md`
   created documenting all 17 tables across the 3 Praxis SQLite DBs
-  with Rule 35 conformance status. Closes prior TODOs:
-  "docs/SCHEMA_NOTES.md documenting timestamp heterogeneity" and
-  "Add onchain_btc to MCP get_collector_health monitoring".
+  with Rule 35 conformance status.
+- **Cycle 18 (this cycle)**: `docs/SCHEMA_MIGRATION_PLAN.md` written
+  (ordered roadmap for the remaining ~8 nonconforming tables, with
+  pattern annotations and per-cycle execution log); `ohlcv_daily`
+  migrated as the second table to Rule 35 (compound PK on
+  `(asset, timestamp)`, timestamp seconds -> ms; 1,802 rows preserved,
+  latest UTC delta 0s); writer in `engines/crypto_data_collector.py`
+  updated; reader in `engines/lstm_predictor.py:68` verified
+  unchanged; MCP `get_collector_health` autodetect heuristic confirmed
+  working across the now-mixed (ms + seconds) tables.
 
 ---
 

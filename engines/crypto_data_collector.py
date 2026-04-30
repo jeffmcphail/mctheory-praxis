@@ -53,13 +53,12 @@ def init_db():
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ohlcv_daily (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             asset TEXT NOT NULL,
             timestamp INTEGER NOT NULL,
             date TEXT NOT NULL,
             open REAL, high REAL, low REAL, close REAL,
             volume REAL,
-            UNIQUE(asset, timestamp)
+            PRIMARY KEY (asset, timestamp)
         )
     """)
 
@@ -247,8 +246,8 @@ def collect_ohlcv_daily(asset, days, conn):
 
     stored = 0
     for c in all_candles:
-        ts = int(c[0] / 1000)
-        date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        ts = int(c[0])
+        date = datetime.fromtimestamp(ts // 1000, tz=timezone.utc).strftime("%Y-%m-%d")
         try:
             conn.execute("""
                 INSERT OR REPLACE INTO ohlcv_daily
