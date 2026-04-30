@@ -89,12 +89,10 @@ def init_db():
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS fear_greed (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp INTEGER NOT NULL,
+            timestamp INTEGER PRIMARY KEY,
             date TEXT NOT NULL,
             value INTEGER,
-            classification TEXT,
-            UNIQUE(timestamp)
+            classification TEXT
         )
     """)
 
@@ -396,8 +394,8 @@ def collect_fear_greed(days, conn):
 
         stored = 0
         for d in data:
-            ts = int(d.get("timestamp", 0))
-            date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            ts = int(d.get("timestamp", 0)) * 1000
+            date = datetime.fromtimestamp(ts // 1000, tz=timezone.utc).strftime("%Y-%m-%d")
             try:
                 conn.execute("""
                     INSERT OR REPLACE INTO fear_greed

@@ -18,16 +18,14 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **`docs/SCHEMA_NOTES.md`** documenting timestamp heterogeneity across all 4
-  Praxis SQLite DBs. Schema heterogeneity has now appeared in 5 retros
-  (Cycles 9, 10, 11, 14, 15). One short prose page covering all conventions.
-  Should also include the Rule 34 reading patterns. ~30 min Code time.
-  *(Source: 2026-04-30 morning queue)*
-
-- **Add `onchain_btc` to MCP get_collector_health monitoring** (uses `date`
-  TEXT column not `timestamp`; needs its own format spec like the
-  smart_money ISO-text pattern). ~10-15 min if combined with SCHEMA_NOTES
-  cycle. *(Source: 2026-04-30 morning queue)*
+- **Cycle 18: Write `docs/SCHEMA_MIGRATION_PLAN.md` and start migrating
+  second table per Rule 35.** Cycle 17 landed Rule 35 (Temporal data
+  storage standard) and the `fear_greed` pilot migration. Cycle 18
+  produces the ordered plan covering the remaining ~8 nonconforming
+  tables, then begins the next migration. Decision points: which table
+  goes second, dual-write vs. stop-migrate-start per table, ordering
+  by risk/value. *(Source: BRIEF_temporal_standard_pilot.md
+  out-of-scope list)*
 
 - **TRADING_ATLAS.md count reconciliation**: 15 numbered headings vs 17
   prose-claimed. Either find the two missing experiments or fix the prose.
@@ -68,6 +66,16 @@ Priority-grouped, then domain-grouped within each priority.
   the underlying tool-discovery mechanism.
 
 ### Lower priority -- meaningful but not urgent
+
+- **Register scheduled collector for `onchain_btc` table**: Cycle 17
+  added it to MCP `get_collector_health` (48h threshold) but no
+  scheduled task is currently running. Latest data is from 2026-04-28
+  (~2.7 days stale at the 48h threshold), so health alarms will fire
+  until a collector lands. `engines/crypto_data_collector.py`
+  `collect_onchain` exists but is not invoked by any registered
+  scheduled task. Pattern would mirror the existing daily collector
+  service registrations. *(Source: BRIEF_temporal_standard_pilot.md
+  Task 3 deferred follow-up)*
 
 - **VR profile experimental framework**: Design framework for using VR
   profile info (multi-timescale mean-reversion) to inform entry/exit
@@ -196,8 +204,17 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   funding_rates threshold widening (9h -> 17h)
 - Cycle 15: CLAUDE_CODE_RULES.md v1.3 -- new Rule 34 (SQLite read
   transaction management)
-- **Cycle 16 (this cycle)**: Meta-docs convention setup, memory cleanup,
-  this file plus META_DOCS.md and docs/TRADING_*.md created.
+- Cycle 16: Meta-docs convention setup, memory cleanup, claude/TODO.md
+  plus META_DOCS.md and docs/TRADING_*.md created.
+- **Cycle 17 (this cycle)**: CLAUDE_CODE_RULES.md v1.4 -- new Rule 35
+  (temporal data storage standard); pilot migration of `fear_greed`
+  table to ms-since-epoch UTC PK schema; `onchain_btc` added to MCP
+  `get_collector_health` monitoring (48h threshold, intentionally
+  alarming until a collector is registered); `docs/SCHEMA_NOTES.md`
+  created documenting all 17 tables across the 3 Praxis SQLite DBs
+  with Rule 35 conformance status. Closes prior TODOs:
+  "docs/SCHEMA_NOTES.md documenting timestamp heterogeneity" and
+  "Add onchain_btc to MCP get_collector_health monitoring".
 
 ---
 

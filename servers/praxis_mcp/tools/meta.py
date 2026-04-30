@@ -217,6 +217,18 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
         #                          00:15 local (Cycle 10). 26h tolerance.
         # ohlcv_4h              -- PraxisOhlcv4hCollector, daily at
         #                          00:20 local (Cycle 10). 26h tolerance.
+        # onchain_btc           -- Cycle 17: monitored via `date` column
+        #                          (YYYY-MM-DD, UTC midnight). 48h
+        #                          threshold matches daily-publish cadence
+        #                          plus one missed run of slack. No
+        #                          scheduled collector currently registered;
+        #                          will alarm is_stale=true until one lands.
+        # Values are EITHER an int (threshold_seconds; uses `timestamp`
+        # column with auto ms/s detection) OR a dict spec:
+        #   {"threshold_seconds": int,
+        #    "timestamp_column": str,
+        #    "timestamp_format": "ms"|"s"|"iso_text"|"auto"|"date"}
+        # The "date" format treats the column as YYYY-MM-DD UTC midnight.
         primary_monitored = {
             "trades": 120,
             "order_book_snapshots": 3900,
@@ -225,6 +237,11 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
             "fear_greed": 93600,       # 24h + 2h slack
             "ohlcv_daily": 93600,      # 24h + 2h slack
             "ohlcv_4h": 93600,         # 24h + 2h slack
+            "onchain_btc": {           # Cycle 17
+                "threshold_seconds": 172800,   # 48h
+                "timestamp_column": "date",
+                "timestamp_format": "date",
+            },
         }
 
         result = {
@@ -273,9 +290,13 @@ def _collect_db_health(*, db_path: Path, monitored_tables: dict,
 
     Args:
         db_path: SQLite DB path
-        monitored_tables: {table_name: threshold_seconds}
-        timestamp_format: "auto" (autodetect ms vs s by magnitude),
-            "ms", "s", or "iso_text"
+        monitored_tables: {table_name: spec} where spec is either an int
+            (threshold_seconds; uses `timestamp` column with the default
+            timestamp_format) OR a dict {"threshold_seconds": int,
+            "timestamp_column": str, "timestamp_format": str} per Cycle 17.
+        timestamp_format: default format applied when spec is an int.
+            "auto" autodetects ms vs s by magnitude. Other accepted values:
+            "ms", "s", "iso_text", "date".
 
     Returns dict with `tables` (per-table status) and `unmonitored` (list).
     """
@@ -297,7 +318,16 @@ def _collect_db_health(*, db_path: Path, monitored_tables: dict,
 
         now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
 
-        for table, threshold_s in monitored_tables.items():
+        for table, spec in monitored_tables.items():
+            if isinstance(spec, dict):
+                threshold_s = spec["threshold_seconds"]
+                ts_col = spec.get("timestamp_column", "timestamp")
+                ts_fmt = spec.get("timestamp_format", timestamp_format)
+            else:
+                threshold_s = spec
+                ts_col = "timestamp"
+                ts_fmt = timestamp_format
+
             cursor.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name=?",
@@ -309,26 +339,13 @@ def _collect_db_health(*, db_path: Path, monitored_tables: dict,
 
             cursor.execute(f"PRAGMA table_info({table})")
             columns = {row["name"] for row in cursor.fetchall()}
-            if "timestamp" not in columns:
-                if "date" in columns:
-                    cursor.execute(
-                        f"SELECT COUNT(*) as n, MAX(date) as latest "
-                        f"FROM {table}"
-                    )
-                    row = cursor.fetchone()
-                    out_tables[table] = {
-                        "row_count": row["n"],
-                        "latest": row["latest"],
-                        "note": "date-only table; staleness not computed",
-                    }
-                else:
-                    out_tables[table] = {
-                        "error": "no timestamp or date column"}
+            if ts_col not in columns:
+                out_tables[table] = {
+                    "error": f"timestamp column '{ts_col}' not in table"}
                 continue
 
             cursor.execute(
-                f"SELECT COUNT(*) as n, MAX(timestamp) as latest "
-                f"FROM {table}"
+                f"SELECT COUNT(*) as n, MAX({ts_col}) as latest FROM {table}"
             )
             row = cursor.fetchone()
             n = row["n"]
@@ -337,7 +354,7 @@ def _collect_db_health(*, db_path: Path, monitored_tables: dict,
                 out_tables[table] = {"row_count": 0, "error": "empty table"}
                 continue
 
-            latest_ms = _to_latest_ms(latest, timestamp_format)
+            latest_ms = _to_latest_ms(latest, ts_fmt)
             if latest_ms is None:
                 out_tables[table] = {
                     "row_count": n,
@@ -471,11 +488,20 @@ def _to_latest_ms(latest, fmt: str):
       "iso_text" -- ISO 8601 string (e.g. "2026-04-29 22:25:24.71" or
                     "2026-04-29T22:25:24+00:00"). datetime.fromisoformat
                     handles both space and T separators in Python 3.11+.
+      "date"     -- "YYYY-MM-DD" string treated as UTC midnight.
 
     Returns int (ms) or None if unparseable.
     """
     if latest is None:
         return None
+
+    if fmt == "date":
+        try:
+            dt = datetime.strptime(str(latest).strip(), "%Y-%m-%d")
+        except ValueError:
+            return None
+        dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
 
     if fmt == "iso_text" or isinstance(latest, str):
         # Try ISO parsing. Smart_money's timestamps look like

@@ -2,7 +2,7 @@
 
 ## McTheory Development -- Praxis (Prediction Markets & Systematic Trading)
 
-**Version:** 1.3
+**Version:** 1.4
 **Author:** Jeff McPhail / Claude Chat
 **Date:** April 30, 2026
 **Adapted from:** AI Agent Factory protocol (validated, first retro: 30 min vs 2+ hours)
@@ -12,6 +12,7 @@
 - v1.1 (2026-04-22): Added Progress Reporting Rules (9-15) operationalizing the ETA/Progress Reporting section of WORKFLOW_MODES_PRAXIS.md. Added Brief/Retro retention rules (36-37). Added required reading of WORKFLOW_MODES_PRAXIS.md on session start (rule 3). Renumbered subsequent rules accordingly.
 - v1.2 (2026-04-29): Four new/extended rules from cycles 8-12: extended Rule 20 (ASCII-only) with the Unicode-runtime-recognition pattern using module-level constants; new Rule 21 (CRLF preservation for .bat/.ps1); new Rule 32 (MCP server changes require Claude Desktop full-quit + relaunch including kill of any orphaned Python processes); new Rule 33 (prefer .py file over inline `python -c` for non-trivial diagnostics). Refreshed the Running Services table to reflect Cycle 10's registered tasks plus PraxisLiveCollector and PraxisSmartMoney reactivation. Refreshed the Key Directories tree to include `servers/`, `tests/`, `src/`, `contracts/`, `dashboards/`, `gui/`, `k8s/`, `spikes/`, `examples/`, `battle_results/`, `market_data/`, and `claude/scratch/` -- long-present directories that were never added. Renamed "Testing Rules" to "Testing and Diagnostics Rules". Renumbered subsequent rules accordingly. Total rule count: 40 (was 37).
 - v1.3 (2026-04-30): One new rule from Cycle 15 diagnostic investigation: new Rule 34 (explicit transaction management on SQLite reads against actively-written DBs). Python's sqlite3 module has documented quirks around implicit BEGIN that can cause long-lived connections to see snapshot views from past states. The defensive practice is fresh connections per logical read pass OR `isolation_level=None` OR explicit `conn.commit()` between SELECTs to release the implicit read transaction. Rule lands in the Testing and Diagnostics Rules subsection. Renumbered Retro Rules from 34-40 to 35-41. Total rule count: 41 (was 40).
+- v1.4 (2026-04-30): One new rule from Cycle 17: new Rule 35 (temporal data storage standard). Establishes the canonical schema for any table holding temporally indexed data: INTEGER `timestamp` column in ms-since-epoch UTC, part of the primary key, optionally with a derived `datetime`/`date` TEXT cache in ISO 8601 with `+00:00` offset. Codifies the dual-write migration pattern for high-frequency tables. Lands in a new "Data Storage Rules" subsection between "Testing and Diagnostics Rules" and "Retro Rules". Renumbered Retro Rules from 35-41 to 36-42. Total rule count: 42 (was 41).
 
 ---
 
@@ -332,14 +333,78 @@ These rules operationalize the "ETA and Progress Reporting" section of `WORKFLOW
 
     Do NOT keep a single `sqlite3.Connection` open across multiple SELECT passes that span more than a few seconds without one of the above. Cycle 15 diagnostic confirmed this is real and the cause of mysterious "stale data" reads. See `claude/retros/RETRO_sqlite_freshness_diagnostic.md` for the full investigation.
 
+### Data Storage Rules
+35. **Temporal data storage standard.** Every table that contains
+    temporally indexed data MUST have:
+
+    1. A `timestamp` column of INTEGER type, storing Unix epoch
+       milliseconds in UTC. Always the same units (milliseconds, not
+       seconds). Always UTC. The column name is always `timestamp`.
+       Date-only data converts to midnight-UTC milliseconds before
+       storage.
+
+    2. `timestamp` is part of the table's primary key. Alone for
+       single-asset tables, or compound (`(asset, timestamp)`,
+       `(slug, timestamp)`, etc.) for multi-keyed tables. Whatever
+       uniquely identifies a row, the temporal component IS the
+       `timestamp` column.
+
+    3. Optionally, a redundant `datetime` (or `date`) TEXT column if
+       read-side speed matters. When present, it's strictly derived
+       from `timestamp` and stored in ISO 8601 with explicit UTC offset
+       (`+00:00`) for datetime, or `YYYY-MM-DD` (interpreted as UTC
+       midnight) for date-only. The `timestamp` column remains
+       canonical; `datetime`/`date` is a cache.
+
+    4. For data feeds that return non-UTC timestamps, the collector MUST
+       convert to UTC before storage. Common foot-guns: APIs that return
+       local time without offset, APIs that return seconds-since-epoch
+       but anchor to local-midnight, file-based feeds (CSV) where the
+       timezone is documented in the source's API docs but invisible in
+       the data itself. When in doubt, audit a known-time sample (e.g.
+       fetch a Binance kline that should close at 04:00:00 UTC and
+       confirm the stored timestamp matches).
+
+    5. For new tables / new collectors, conformance is mandatory.
+       For existing tables, migration is tracked in
+       `docs/SCHEMA_MIGRATION_PLAN.md` and executes one table per cycle.
+
+    6. For migrations of actively-written tables, use the dual-write
+       pattern:
+       - Phase 0: Build new schema as `<table>_v2` and a parallel
+         collector path
+       - Phase 1: Register a new scheduled task targeting `_v2`; old
+         task keeps running
+       - Phase 2: Backfill historical rows from old -> `_v2` (timestamp
+         converted, UTC text rendered with `+00:00`)
+       - Phase 3: Verify the overlap window (rows collected by both
+         tasks) is identical at the source-API level, and all readers
+         work against `_v2`
+       - Phase 4: Stop old task, rename old table to `<table>_legacy`,
+         rename `_v2` -> `<table>`, point readers at the renamed table
+       - Phase 5: Burn-in observation (24-48h) before deleting `_legacy`
+
+       For batch/daily collectors where the source API allows full
+       re-fetch (Binance OHLCV, funding rates, etc.), the simpler
+       stop-migrate-start pattern is acceptable as long as the gap
+       window can be backfilled from the API after the new collector
+       starts. Document which pattern is used for each table in
+       `docs/SCHEMA_MIGRATION_PLAN.md`.
+
+    Migration recipe (SQLite, simple pattern): create new table with
+    target schema, INSERT-SELECT from old table converting units and
+    rendering UTC text, DROP old, RENAME new. Verify all readers
+    (engines, MCP tools, analysis scripts) still work before
+    committing.
+
 ### Retro Rules (cross-reference `WORKFLOW_MODES_PRAXIS.md` for Brief/Retro retention)
-35. **Write the retro before ending the session.** Save to `claude/retros/RETRO_<slug>.md`.
-36. **Include ALL files modified** with line ranges.
-37. **Include the debugging trail** -- what was tried, what failed, why.
-38. **Include test results** -- both passes and failures.
-39. **Include open items** -- anything that needs Chat's attention for strategy.
-40. **Retros are permanent.** Never delete a retro, even for failed/partial attempts. Failed experiments are data.
-41. **Briefs are permanent once a matching retro exists.** Do not delete Briefs to "clean up" `claude/handoffs/`. The only removable case: a Brief never executed and superseded -- rename to `ARCHIVED_<slug>.md`, do not delete.
+36. **Write the retro before ending the session.** Save to `claude/retros/RETRO_<slug>.md`.
+37. **Include ALL files modified** with line ranges.
+38. **Include the debugging trail** -- what was tried, what failed, why.
+39. **Include test results** -- both passes and failures.
+40. **Include open items** -- anything that needs Chat's attention for strategy.
+41. **Retros are permanent.** Never delete a retro, even for failed/partial attempts. Failed experiments are data.
+42. **Briefs are permanent once a matching retro exists.** Do not delete Briefs to "clean up" `claude/handoffs/`. The only removable case: a Brief never executed and superseded -- rename to `ARCHIVED_<slug>.md`, do not delete.
 
 ---
 
@@ -452,3 +517,4 @@ The MCP server (`servers/praxis_mcp/`) provides `get_collector_health()` for liv
 - Every token/money movement needs confirmation gate (Rule 24)
 - Diagnostics in `claude/scratch/` as `.py` files; avoid quote-heavy inline `python -c` (Rule 33)
 - Reads against actively-written SQLite DBs need explicit transaction management: fresh connections per pass, `isolation_level=None`, or `conn.commit()` between SELECTs (Rule 34)
+- Temporal data: store as INTEGER ms-since-epoch UTC `timestamp` column, primary key. Optional `datetime`/`date` TEXT cache renders ISO 8601 with `+00:00` (Rule 35).
