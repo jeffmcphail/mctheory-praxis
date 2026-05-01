@@ -123,8 +123,8 @@ def init_db():
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS market_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             asset TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
             date TEXT NOT NULL,
             market_cap REAL,
             total_volume REAL,
@@ -133,7 +133,7 @@ def init_db():
             ath REAL,
             ath_change_pct REAL,
             btc_dominance REAL,
-            UNIQUE(asset, date)
+            PRIMARY KEY (asset, timestamp)
         )
     """)
 
@@ -532,9 +532,35 @@ def collect_onchain_btc(days, conn):
     print(f"    Stored {stored} days of on-chain data")
 
 
-def collect_market_data(asset, conn):
-    """Collect current market data from CoinGecko."""
+def _fetch_btc_dominance():
+    """Fetch BTC market-cap dominance from CoinGecko /global. Returns None on error."""
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/global", timeout=15)
+        if r.status_code != 200:
+            print(f"    /global HTTP {r.status_code}")
+            return None
+        return r.json().get("data", {}).get("market_cap_percentage", {}).get("btc")
+    except Exception as e:
+        print(f"    /global error: {e}")
+        return None
+
+
+def collect_market_data(asset, conn, btc_dominance=None):
+    """Collect current market data + BTC dominance from CoinGecko.
+
+    CoinGecko free tier: /coins/{id} returns current state only -- no
+    historical backfill. The table populates from the day this collector
+    first runs, forward.
+
+    `btc_dominance` is a single global value (from /global). Pass it in
+    when looping over multiple assets to avoid redundant /global calls
+    (CoinGecko free tier rate-limits aggressively); if None, this function
+    fetches it itself for single-asset use.
+    """
     print(f"\n  Collecting market data for {asset}...")
+
+    if btc_dominance is None:
+        btc_dominance = _fetch_btc_dominance()
 
     cg_id = SUPPORTED_ASSETS[asset]["coingecko_id"]
 
@@ -547,24 +573,33 @@ def collect_market_data(asset, conn):
         if r.status_code == 200:
             data = r.json()
             md = data.get("market_data", {})
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            now_utc = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            ts_ms = int(now_utc.timestamp() * 1000)
+            today = now_utc.strftime("%Y-%m-%d")
 
             conn.execute("""
                 INSERT OR REPLACE INTO market_data
-                (asset, date, market_cap, total_volume, circulating_supply,
-                 total_supply, ath, ath_change_pct)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (asset, today,
+                (asset, timestamp, date, market_cap, total_volume,
+                 circulating_supply, total_supply, ath, ath_change_pct,
+                 btc_dominance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (asset, ts_ms, today,
                   md.get("market_cap", {}).get("usd", 0),
                   md.get("total_volume", {}).get("usd", 0),
                   md.get("circulating_supply", 0),
                   md.get("total_supply", 0),
                   md.get("ath", {}).get("usd", 0),
-                  md.get("ath_change_percentage", {}).get("usd", 0)))
+                  md.get("ath_change_percentage", {}).get("usd", 0),
+                  btc_dominance))
             conn.commit()
             print(f"    Price: ${md.get('current_price', {}).get('usd', 0):,.2f}")
             print(f"    Market cap: ${md.get('market_cap', {}).get('usd', 0):,.0f}")
             print(f"    ATH distance: {md.get('ath_change_percentage', {}).get('usd', 0):.1f}%")
+            if btc_dominance is not None:
+                print(f"    BTC dominance: {btc_dominance:.2f}%")
+            else:
+                print(f"    BTC dominance: NULL (fetch failed)")
         else:
             print(f"    CoinGecko HTTP {r.status_code}")
 
@@ -971,6 +1006,31 @@ def cmd_collect_all(args):
     print(f"\n{'='*70}")
 
 
+def cmd_collect_market_data(args):
+    """CLI handler for `collect-market-data --asset {BTC|ETH|SOL|all}`.
+
+    Fetches /global once and threads the dominance value through to each
+    asset's collect_market_data call; otherwise CoinGecko free-tier
+    rate-limits when N=3 assets x 2 calls/asset hit the same minute.
+    """
+    asset_arg = args.asset.upper()
+    btc_dominance = _fetch_btc_dominance()
+    conn = init_db()
+    try:
+        if asset_arg == "ALL":
+            for a in SUPPORTED_ASSETS:
+                collect_market_data(a, conn, btc_dominance=btc_dominance)
+                time.sleep(2)
+        else:
+            if asset_arg not in SUPPORTED_ASSETS:
+                print(f"  Unsupported: {asset_arg}. Use: "
+                      f"{', '.join(SUPPORTED_ASSETS.keys())} or 'all'")
+                return
+            collect_market_data(asset_arg, conn, btc_dominance=btc_dominance)
+    finally:
+        conn.close()
+
+
 def cmd_status(args):
     """Show data collection status."""
     conn = init_db()
@@ -1050,6 +1110,11 @@ def main():
     p_oc = subs.add_parser("collect-onchain", help="BTC on-chain")
     p_oc.add_argument("--days", type=int, default=365)
 
+    p_md = subs.add_parser("collect-market-data",
+                           help="CoinGecko market data + BTC dominance")
+    p_md.add_argument("--asset", default="BTC",
+                      help="Asset to collect (BTC, ETH, SOL, or 'all')")
+
     p_ob = subs.add_parser("collect-order-book",
                            help="Collect one order book snapshot per asset")
     p_ob.add_argument("--assets", nargs="+", default=["BTC", "ETH"])
@@ -1096,6 +1161,7 @@ def main():
         "collect-fear-greed": lambda a: collect_fear_greed(a.days, init_db()),
         "collect-funding": lambda a: collect_funding_rates(a.asset.upper(), a.days, init_db()),
         "collect-onchain": lambda a: collect_onchain_btc(a.days, init_db()),
+        "collect-market-data": cmd_collect_market_data,
         "collect-order-book": cmd_collect_order_book,
         "collect-order-book-loop": cmd_collect_order_book_loop,
         "collect-trades": cmd_collect_trades,

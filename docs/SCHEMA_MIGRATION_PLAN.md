@@ -18,7 +18,7 @@
 |---|---|---|---|---|
 | 17 | fear_greed | simple | DONE | a03fff6 |
 | 18 | ohlcv_daily | simple | DONE | cc6a178 |
-| 19 | market_data | schema-only | pending | -- |
+| 19 | market_data | schema-only + collector fix | DONE | <TBD> |
 | 20 | ohlcv_4h | simple | pending | -- |
 | 21 | funding_rates | simple | pending | -- |
 | 22 | ohlcv_1m | simple | pending | -- |
@@ -66,19 +66,33 @@ column is ms.
 - `date` semantics unchanged
 - Recipe: `scripts/migrations/cycle18_ohlcv_daily_to_v2.py`
 
-### #3 -- market_data (NEXT CYCLE, schema-only)
+### #3 -- market_data (DONE, Cycle 19, commit <TBD>)
 
 - DB: crypto_data.db
-- Rows: 0 (empty table)
-- Writer: not currently registered
-- Reader: none active
-- Pattern: schema-only (no data to preserve). Either drop or rebuild.
-- Decision points to settle in next-cycle Brief:
-  - Should this table even exist? Pre-Praxis-recovery artifact.
-  - If kept: add `timestamp INTEGER` (ms UTC) and make
-    `(asset, timestamp)` the compound PK. `date` remains as a derived
-    column.
-  - If dropped: confirm no consumers via grep before DROP.
+- Rows: 3 (BTC + ETH + SOL for 2026-05-01; populates forward only)
+- Writer: `engines/crypto_data_collector.py` `collect_market_data`
+  (rewritten this cycle: now fetches `/global` for BTC dominance and
+  populates the previously-unfilled `btc_dominance` column; ms
+  timestamp computed from UTC midnight of the collection day)
+- Reader: none active yet
+- Scheduled task: `PraxisMarketDataCollector` (daily 00:35 local) --
+  see "Outstanding admin step" below
+- Pattern: schema-only migration (empty table) plus a four-part
+  collector overhaul (CLI subcommand, /global call,
+  btc_dominance population, scheduled task registration)
+- Schema: dropped `id` AUTOINCREMENT; added `timestamp INTEGER NOT NULL`
+  (UTC midnight ms); compound `PRIMARY KEY (asset, timestamp)`;
+  `date` becomes a derived TEXT cache
+- Limitation: CoinGecko's free-tier `/coins/{id}` endpoint returns
+  current state only -- no historical backfill. Table populates
+  from "today forward" only. Documented in `docs/SCHEMA_NOTES.md`.
+- Outstanding admin step: `Register-ScheduledTask` requires
+  Administrator privileges, which Code's Claude session does not have.
+  Jeff must run `.\services\register_market_data_task.ps1` from an
+  elevated PowerShell once. The .bat and .ps1 files are in place;
+  the manual first-run backfill via `python -m
+  engines.crypto_data_collector collect-market-data --asset all`
+  has already seeded today's 3 rows.
 
 ### #4 -- ohlcv_4h
 

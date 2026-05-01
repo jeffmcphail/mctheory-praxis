@@ -18,12 +18,19 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **Cycle 19: Migrate next table per `docs/SCHEMA_MIGRATION_PLAN.md`.**
-  Plan slots `market_data` next as a schema-only change (empty table;
-  decide whether to keep or drop it before touching schema), with
-  `ohlcv_4h` queued as the next non-trivial migration if `market_data`
-  defers. Specific table choice and pattern (simple vs. drop-and-rebuild)
-  set in the next-cycle Brief. *(Source: docs/SCHEMA_MIGRATION_PLAN.md)*
+- **Cycle 20: Migrate `ohlcv_4h` per `docs/SCHEMA_MIGRATION_PLAN.md`.**
+  10,818 rows (BTC + ETH 4h candles); simple stop-migrate-start pattern
+  matching Cycle 18's `ohlcv_daily` recipe. Re-fetchable from Binance.
+  Schema change: `id` AUTOINCREMENT + `UNIQUE(asset, timestamp)` ->
+  compound `PRIMARY KEY (asset, timestamp)`; timestamp seconds -> ms;
+  `datetime` text rewritten with `+00:00` offset. *(Source:
+  docs/SCHEMA_MIGRATION_PLAN.md row #4)*
+
+- **Run `services/register_market_data_task.ps1` from elevated
+  PowerShell** (one-shot admin step). Files in place; manual first-run
+  has already seeded 3 rows for 2026-05-01. The scheduled task only
+  needs registering so it picks up daily at 00:35 going forward.
+  *(Source: Cycle 19 -- session lacked admin privileges)*
 
 - **TRADING_ATLAS.md count reconciliation**: 15 numbered headings vs 17
   prose-claimed. Either find the two missing experiments or fix the prose.
@@ -211,7 +218,7 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   alarming until a collector is registered); `docs/SCHEMA_NOTES.md`
   created documenting all 17 tables across the 3 Praxis SQLite DBs
   with Rule 35 conformance status.
-- **Cycle 18 (this cycle)**: `docs/SCHEMA_MIGRATION_PLAN.md` written
+- Cycle 18: `docs/SCHEMA_MIGRATION_PLAN.md` written
   (ordered roadmap for the remaining ~8 nonconforming tables, with
   pattern annotations and per-cycle execution log); `ohlcv_daily`
   migrated as the second table to Rule 35 (compound PK on
@@ -220,6 +227,18 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   updated; reader in `engines/lstm_predictor.py:68` verified
   unchanged; MCP `get_collector_health` autodetect heuristic confirmed
   working across the now-mixed (ms + seconds) tables.
+- **Cycle 19 (this cycle)**: `market_data` migrated to Rule 35
+  (compound PK on `(asset, timestamp)`, ms timestamp, no `id`);
+  `collect_market_data` rewritten to fetch `/global` once per cycle
+  and populate the previously-unfilled `btc_dominance` column;
+  `collect-market-data` CLI subcommand added (parser + dispatch +
+  `cmd_collect_market_data` handler); `services/market_data_collector_service.bat`
+  and `services/register_market_data_task.ps1` created (CRLF); MCP
+  `get_collector_health` extended to monitor `market_data` (25h
+  threshold); `docs/SCHEMA_NOTES.md` updated to mark `market_data`
+  CONFORMING; manual first-run seeded 3 rows (BTC, ETH, SOL) for
+  2026-05-01 with dominance 58.47%. **Outstanding**: scheduled-task
+  registration needs an elevated PowerShell -- see Active TODOs.
 
 ---
 

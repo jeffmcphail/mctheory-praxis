@@ -242,6 +242,7 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
                 "timestamp_column": "date",
                 "timestamp_format": "date",
             },
+            "market_data": 90000,      # Cycle 19: 25h (24h + 1h slack)
         }
 
         result = {

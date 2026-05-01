@@ -91,15 +91,24 @@ server, all engines, and analysis scripts.
   `+00:00`; `id` PK instead of `(asset, timestamp)` PK.
 - Migration cycle: TBD.
 
-#### Table: market_data (EMPTY, NONCONFORMING)
+#### Table: market_data (CONFORMING -- Cycle 19)
 
-- Columns: `id`, `asset`, `date`, `market_cap`, `total_volume`,
+- Columns: `asset`, `timestamp` (INTEGER ms UTC midnight),
+  `date` (TEXT `YYYY-MM-DD` derived), `market_cap`, `total_volume`,
   `circulating_supply`, `total_supply`, `ath`, `ath_change_pct`,
-  `btc_dominance`. No `timestamp` column.
-- 0 rows. Schema exists; collector logic may exist in
-  `crypto_data_collector.py` but is not currently invoked.
-- Pre-Praxis-recovery artifact. Defer migration until populated
-  (or remove if confirmed dead).
+  `btc_dominance`. PK: `(asset, timestamp)`.
+- Writer: `engines/crypto_data_collector.py` `collect_market_data`
+  (CoinGecko `/coins/{id}` per asset + one `/global` per cycle for
+  dominance, threaded through via the CLI handler).
+- Scheduled task: `PraxisMarketDataCollector` (daily 00:35 local).
+- `btc_dominance` is a single global value (from `/global`); written
+  identically across all asset rows for a given collection day. Read
+  it from any one row. A single normalized "global state" table would
+  be cleaner but isn't worth the join cost given N=3 assets.
+- **No historical backfill capability**: CoinGecko's free
+  `/coins/{id}` endpoint returns current state only. Table populates
+  from Cycle 19 forward. Backfill would require a paid CoinGecko tier
+  or an alternative data source (Glassnode, CoinMetrics).
 
 #### Table: ohlcv_1m (NONCONFORMING)
 
@@ -123,16 +132,16 @@ server, all engines, and analysis scripts.
 - Migration cycle: TBD. Re-fetchable from Binance; stop-migrate-start
   pattern viable.
 
-#### Table: ohlcv_daily (NONCONFORMING)
+#### Table: ohlcv_daily (CONFORMING -- Cycle 18)
 
-- Columns: `id` PK, `asset`, `timestamp` (INTEGER **seconds** UTC,
-  midnight), `date` (TEXT `YYYY-MM-DD`), OHLCV columns.
-- Writer: `engines/crypto_data_collector.py` `collect_daily`
+- Columns: `asset`, `timestamp` (INTEGER **ms** UTC midnight),
+  `date` (TEXT `YYYY-MM-DD`), OHLCV columns. PK: `(asset, timestamp)`.
+- Writer: `engines/crypto_data_collector.py` `collect_ohlcv_daily`
 - Scheduled task: `PraxisOhlcvDailyCollector` (daily 00:15 local,
   `--days 7`).
-- Conformance gaps: timestamp units, PK shape (date column already
-  conforms).
-- Migration cycle: TBD. Re-fetchable; stop-migrate-start viable.
+- 1,802 rows (901 per asset, 2023-11-12 onward). Reader at
+  `engines/lstm_predictor.py:68` queries by `date` (unaffected by the
+  migration).
 
 #### Table: onchain_btc (NONCONFORMING -- monitored as of Cycle 17)
 
@@ -255,10 +264,10 @@ added it to MCP health.
 |---|---|---|---|---|---|
 | crypto_data | fear_greed | **CONFORMING** | **17** | stop-migrate-start | Done |
 | crypto_data | funding_rates | NONCONFORMING | TBD | stop-migrate-start | Re-fetchable from Binance |
-| crypto_data | market_data | EMPTY | -- | -- | Defer until populated |
+| crypto_data | market_data | **CONFORMING** | **19** | schema-only + collector fix | No backfill (CoinGecko free-tier limit) |
 | crypto_data | ohlcv_1m | NONCONFORMING | TBD | dual-write | ~520k rows; high frequency |
 | crypto_data | ohlcv_4h | NONCONFORMING | TBD | stop-migrate-start | Re-fetchable |
-| crypto_data | ohlcv_daily | NONCONFORMING | TBD | stop-migrate-start | Re-fetchable |
+| crypto_data | ohlcv_daily | **CONFORMING** | **18** | stop-migrate-start | Done |
 | crypto_data | onchain_btc | NONCONFORMING | TBD | stop-migrate-start | No active collector |
 | crypto_data | order_book_snapshots | NONCONFORMING | TBD | dual-write | High frequency |
 | crypto_data | trades | NEAR-CONFORMING | TBD | dual-write | timestamp already ms |
@@ -271,8 +280,8 @@ added it to MCP health.
 | smart_money | position_snapshots | NONCONFORMING | TBD | dual-write | Active 6h cadence |
 | smart_money | tracked_wallets | N/A | -- | -- | State, not temporal |
 
-Cycle 18 will produce `docs/SCHEMA_MIGRATION_PLAN.md` ordering and
-sequencing the remaining migrations.
+`docs/SCHEMA_MIGRATION_PLAN.md` carries the ordered roadmap and
+per-cycle execution log for the remaining migrations.
 
 ---
 
@@ -283,9 +292,11 @@ sequencing the remaining migrations.
   collector lands. 364 rows, latest `2026-04-28`. Last collected
   during recovery; coverage is roughly 1 year. Registering a
   scheduled task is queued under "Active TODOs" in `claude/TODO.md`.
-- `market_data`: empty (0 rows). Schema exists; collector logic may
-  be in `crypto_data_collector.py` but is not currently invoked.
-  Investigate before populating; pre-Praxis-recovery artifact.
+- `market_data`: CONFORMING as of Cycle 19. Migrated to Rule 35
+  schema, writer fixed (added `/global` BTC-dominance call), CLI
+  subcommand wired, scheduled task `PraxisMarketDataCollector`
+  registered (daily 00:35). 3 rows seeded by manual first-run.
+  No historical backfill possible -- table populates forward only.
 
 ---
 
