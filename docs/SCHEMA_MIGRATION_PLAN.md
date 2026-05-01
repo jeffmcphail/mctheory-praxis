@@ -18,7 +18,7 @@
 |---|---|---|---|---|
 | 17 | fear_greed | simple | DONE | a03fff6 |
 | 18 | ohlcv_daily | simple | DONE | cc6a178 |
-| 19 | market_data | schema-only + collector fix | DONE | <TBD> |
+| 19 | market_data | schema-only + collector fix | DONE | 7e73128 |
 | 20 | ohlcv_4h | simple | pending | -- |
 | 21 | funding_rates | simple | pending | -- |
 | 22 | ohlcv_1m | simple | pending | -- |
@@ -66,7 +66,7 @@ column is ms.
 - `date` semantics unchanged
 - Recipe: `scripts/migrations/cycle18_ohlcv_daily_to_v2.py`
 
-### #3 -- market_data (DONE, Cycle 19, commit <TBD>)
+### #3 -- market_data (DONE, Cycle 19, commit 7e73128)
 
 - DB: crypto_data.db
 - Rows: 3 (BTC + ETH + SOL for 2026-05-01; populates forward only)
