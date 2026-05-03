@@ -19,7 +19,7 @@
 | 17 | fear_greed | simple | DONE | a03fff6 |
 | 18 | ohlcv_daily | simple | DONE | cc6a178 |
 | 19 | market_data | schema-only + collector fix | DONE | 7e73128 |
-| 20 | ohlcv_4h | simple | DONE | <TBD> |
+| 20 | ohlcv_4h | simple | DONE | ca316e3 |
 | 21 | funding_rates | simple | pending | -- |
 | 22 | ohlcv_1m | simple | pending | -- |
 | 23 | order_book_snapshots | dual-write | pending | -- |
@@ -94,7 +94,7 @@ column is ms.
   engines.crypto_data_collector collect-market-data --asset all`
   has already seeded today's 3 rows.
 
-### #4 -- ohlcv_4h (DONE, Cycle 20, commit <TBD>)
+### #4 -- ohlcv_4h (DONE, Cycle 20, commit ca316e3)
 
 - DB: crypto_data.db
 - Rows: 10,830 (5,415 4-hour bars x 2 assets)
