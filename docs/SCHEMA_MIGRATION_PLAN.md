@@ -19,7 +19,7 @@
 | 17 | fear_greed | simple | DONE | a03fff6 |
 | 18 | ohlcv_daily | simple | DONE | cc6a178 |
 | 19 | market_data | schema-only + collector fix | DONE | 7e73128 |
-| 20 | ohlcv_4h | simple | pending | -- |
+| 20 | ohlcv_4h | simple | DONE | <TBD> |
 | 21 | funding_rates | simple | pending | -- |
 | 22 | ohlcv_1m | simple | pending | -- |
 | 23 | order_book_snapshots | dual-write | pending | -- |
@@ -94,17 +94,24 @@ column is ms.
   engines.crypto_data_collector collect-market-data --asset all`
   has already seeded today's 3 rows.
 
-### #4 -- ohlcv_4h
+### #4 -- ohlcv_4h (DONE, Cycle 20, commit <TBD>)
 
 - DB: crypto_data.db
-- Rows: 10,806 (5,403 4-hour bars x 2 assets)
+- Rows: 10,830 (5,415 4-hour bars x 2 assets)
 - Writer: `engines/crypto_data_collector.py` `collect_ohlcv_4h()`
-- Reader: `engines/lstm_predictor.py` (queries via date)
+- Reader: none external; consumed inside the collector pipeline.
+  `lstm_predictor.py` was hypothesized but not actually a reader
+  (only `ohlcv_daily` is queried there).
 - Pattern: simple (Binance API supports full re-fetch; daily cadence
   for the scheduled task)
 - Schema change: same shape as ohlcv_daily -- compound PK on
-  (asset, timestamp), drop id
-- `datetime` column already in `+00:00` ISO format; no semantic change
+  (asset, timestamp), drop id; timestamp seconds -> ms
+- **Datetime correction**: prior plan note said the column was
+  already `+00:00`; verified empirically it was naive
+  (`'YYYY-MM-DD HH:MM:SS'`). Migration re-derives datetime from
+  `timestamp` via SQLite `strftime('%Y-%m-%dT%H:%M:%S+00:00', ...,
+  'unixepoch')` for defense in depth, matching `order_book_snapshots`'s
+  format.
 
 ### #5 -- funding_rates
 

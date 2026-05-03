@@ -121,16 +121,16 @@ server, all engines, and analysis scripts.
 - Migration cycle: TBD. **High row count (~520k); plan dual-write
   pattern.**
 
-#### Table: ohlcv_4h (NONCONFORMING)
+#### Table: ohlcv_4h (CONFORMING -- Cycle 20)
 
-- Columns: `id` PK, `asset`, `timestamp` (INTEGER **seconds** UTC),
-  `datetime` (TEXT naive), OHLCV columns.
-- Writer: `engines/crypto_data_collector.py` `collect_4h`
+- Columns: `asset`, `timestamp` (INTEGER **ms** UTC),
+  `datetime` (TEXT ISO `YYYY-MM-DDTHH:MM:SS+00:00`),
+  OHLCV columns. PK: `(asset, timestamp)`.
+- Writer: `engines/crypto_data_collector.py` `collect_ohlcv_4h`
 - Scheduled task: `PraxisOhlcv4hCollector` (daily 00:20 local,
   `--days 7`).
-- Conformance gaps: timestamp units, datetime format, PK shape.
-- Migration cycle: TBD. Re-fetchable from Binance; stop-migrate-start
-  pattern viable.
+- 10,830 rows (5,415 per asset, 2023-11-11 onward). No external
+  reader audited; fully consumed inside the collector pipeline.
 
 #### Table: ohlcv_daily (CONFORMING -- Cycle 18)
 
@@ -266,7 +266,7 @@ added it to MCP health.
 | crypto_data | funding_rates | NONCONFORMING | TBD | stop-migrate-start | Re-fetchable from Binance |
 | crypto_data | market_data | **CONFORMING** | **19** | schema-only + collector fix | No backfill (CoinGecko free-tier limit) |
 | crypto_data | ohlcv_1m | NONCONFORMING | TBD | dual-write | ~520k rows; high frequency |
-| crypto_data | ohlcv_4h | NONCONFORMING | TBD | stop-migrate-start | Re-fetchable |
+| crypto_data | ohlcv_4h | **CONFORMING** | **20** | stop-migrate-start | Done |
 | crypto_data | ohlcv_daily | **CONFORMING** | **18** | stop-migrate-start | Done |
 | crypto_data | onchain_btc | NONCONFORMING | TBD | stop-migrate-start | No active collector |
 | crypto_data | order_book_snapshots | NONCONFORMING | TBD | dual-write | High frequency |

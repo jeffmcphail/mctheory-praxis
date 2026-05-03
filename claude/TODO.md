@@ -18,13 +18,13 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **Cycle 20: Migrate `ohlcv_4h` per `docs/SCHEMA_MIGRATION_PLAN.md`.**
-  10,818 rows (BTC + ETH 4h candles); simple stop-migrate-start pattern
-  matching Cycle 18's `ohlcv_daily` recipe. Re-fetchable from Binance.
-  Schema change: `id` AUTOINCREMENT + `UNIQUE(asset, timestamp)` ->
-  compound `PRIMARY KEY (asset, timestamp)`; timestamp seconds -> ms;
-  `datetime` text rewritten with `+00:00` offset. *(Source:
-  docs/SCHEMA_MIGRATION_PLAN.md row #4)*
+- **Cycle 21: Migrate `funding_rates` per `docs/SCHEMA_MIGRATION_PLAN.md`.**
+  ~2,200 rows (3x/day cadence, BTC + ETH); simple stop-migrate-start
+  pattern. Schema change: drop `id`, compound `PRIMARY KEY
+  (asset, timestamp)`, timestamp seconds -> ms, rewrite `datetime` text
+  to ISO `+00:00`. Re-fetchable from Binance; verify Cycle 14's 17h
+  staleness threshold remains appropriate post-migration. *(Source:
+  docs/SCHEMA_MIGRATION_PLAN.md row #5)*
 
 - **Run `services/register_market_data_task.ps1` from elevated
   PowerShell** (one-shot admin step). Files in place; manual first-run
@@ -227,7 +227,7 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   updated; reader in `engines/lstm_predictor.py:68` verified
   unchanged; MCP `get_collector_health` autodetect heuristic confirmed
   working across the now-mixed (ms + seconds) tables.
-- **Cycle 19 (this cycle)**: `market_data` migrated to Rule 35
+- Cycle 19: `market_data` migrated to Rule 35
   (compound PK on `(asset, timestamp)`, ms timestamp, no `id`);
   `collect_market_data` rewritten to fetch `/global` once per cycle
   and populate the previously-unfilled `btc_dominance` column;
@@ -239,6 +239,17 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   CONFORMING; manual first-run seeded 3 rows (BTC, ETH, SOL) for
   2026-05-01 with dominance 58.47%. **Outstanding**: scheduled-task
   registration needs an elevated PowerShell -- see Active TODOs.
+- **Cycle 20 (this cycle)**: `ohlcv_4h` migrated to Rule 35
+  (compound PK on `(asset, timestamp)`, timestamp seconds -> ms,
+  datetime rewritten naive -> ISO `+00:00`; 10,830 rows preserved
+  with latest UTC delta 0s); writer in
+  `engines/crypto_data_collector.py` `collect_ohlcv_4h` updated
+  (init_db schema + INSERT path); MCP `get_collector_health`
+  autodetect verified for the now-mixed ms/seconds tables;
+  `docs/SCHEMA_NOTES.md` + `docs/SCHEMA_MIGRATION_PLAN.md` updated.
+  Note: prior plan-doc note that ohlcv_4h.datetime was already
+  `+00:00` was empirically wrong (it was naive); migration re-derived
+  datetime from `timestamp` for defense in depth.
 
 ---
 
