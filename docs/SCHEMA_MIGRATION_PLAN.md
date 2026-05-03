@@ -20,7 +20,7 @@
 | 18 | ohlcv_daily | simple | DONE | cc6a178 |
 | 19 | market_data | schema-only + collector fix | DONE | 7e73128 |
 | 20 | ohlcv_4h | simple | DONE | ca316e3 |
-| 21 | funding_rates | simple | DONE | <TBD> |
+| 21 | funding_rates | simple | DONE | b977cd3 |
 | 22 | ohlcv_1m | simple | pending | -- |
 | 23 | order_book_snapshots | dual-write | pending | -- |
 | 24 | live_collector.price_snapshots | dual-write | pending | -- |
@@ -113,7 +113,7 @@ column is ms.
   'unixepoch')` for defense in depth, matching `order_book_snapshots`'s
   format.
 
-### #5 -- funding_rates (DONE, Cycle 21, commit <TBD>)
+### #5 -- funding_rates (DONE, Cycle 21, commit b977cd3)
 
 - DB: crypto_data.db
 - Rows: 2,212 at migration time (1,106 BTC + 1,106 ETH; growing 3x/day)
