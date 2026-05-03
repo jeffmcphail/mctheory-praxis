@@ -78,18 +78,22 @@ server, all engines, and analysis scripts.
   collector multiplies by 1000).
 - Migration cycle: 17 (this cycle).
 
-#### Table: funding_rates (NONCONFORMING)
+#### Table: funding_rates (CONFORMING -- Cycle 21)
 
-- Columns: `id` (INTEGER PK AUTOINCREMENT), `asset` (TEXT NOT NULL),
-  `timestamp` (INTEGER NOT NULL, **seconds** UTC), `datetime` (TEXT
-  NOT NULL, naive `"YYYY-MM-DD HH:MM:SS"`, no offset suffix),
-  `funding_rate` (REAL).
+- Columns: `asset` (TEXT NOT NULL), `timestamp` (INTEGER NOT NULL,
+  **ms** UTC), `datetime` (TEXT NOT NULL, ISO
+  `YYYY-MM-DDTHH:MM:SS+00:00`), `funding_rate` (REAL). PK:
+  `(asset, timestamp)`.
 - Writer: `engines/crypto_data_collector.py` `collect_funding_rates`
 - Scheduled task: `PraxisFundingCollector`
   (`00:05`/`08:05`/`16:05` local Toronto, NOT UTC).
-- Conformance gaps: timestamp units (sec, want ms); `datetime` lacks
-  `+00:00`; `id` PK instead of `(asset, timestamp)` PK.
-- Migration cycle: TBD.
+- 2,212 rows at migration time (1,106 BTC + 1,106 ETH, 2025-04-30
+  onward). Reader at `servers/praxis_mcp/tools/funding.py` uses
+  runtime ms/sec autodetect (`ms_mode = ts_sample > 1e12`); migration
+  required only a comment-header refresh, no logic change. Reader at
+  `engines/lstm_predictor.py:86-90` uses `DATE(datetime)` GROUP BY,
+  which SQLite handles for both naive and ISO datetime formats --
+  reader-transparent across the format change.
 
 #### Table: market_data (CONFORMING -- Cycle 19)
 
@@ -263,7 +267,7 @@ added it to MCP health.
 | Database | Table | Conformance | Cycle | Pattern | Notes |
 |---|---|---|---|---|---|
 | crypto_data | fear_greed | **CONFORMING** | **17** | stop-migrate-start | Done |
-| crypto_data | funding_rates | NONCONFORMING | TBD | stop-migrate-start | Re-fetchable from Binance |
+| crypto_data | funding_rates | **CONFORMING** | **21** | stop-migrate-start | Done |
 | crypto_data | market_data | **CONFORMING** | **19** | schema-only + collector fix | No backfill (CoinGecko free-tier limit) |
 | crypto_data | ohlcv_1m | NONCONFORMING | TBD | dual-write | ~520k rows; high frequency |
 | crypto_data | ohlcv_4h | **CONFORMING** | **20** | stop-migrate-start | Done |

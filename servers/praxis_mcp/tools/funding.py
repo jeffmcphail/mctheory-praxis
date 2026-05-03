@@ -1,7 +1,13 @@
 """Funding rate tool.
 
-The funding_rates table schema (verified during v0.1 implementation):
-    asset TEXT, timestamp INTEGER (seconds), datetime TEXT, funding_rate REAL
+The funding_rates table schema (Rule 35 / Cycle 21 conforming):
+    asset TEXT, timestamp INTEGER (UTC milliseconds), datetime TEXT (ISO +00:00),
+    funding_rate REAL. Compound primary key on (asset, timestamp).
+
+The body of get_funding_rate_history() retains a runtime ms/sec autodetect
+(`ms_mode = ts_sample > 1e12`); post-Cycle-21 it always lands in the ms
+branch, but the autodetect is kept so the tool stays robust if any
+auxiliary or test DB still uses pre-migration seconds.
 """
 
 from datetime import datetime, timezone

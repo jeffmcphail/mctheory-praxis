@@ -18,13 +18,12 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **Cycle 21: Migrate `funding_rates` per `docs/SCHEMA_MIGRATION_PLAN.md`.**
-  ~2,200 rows (3x/day cadence, BTC + ETH); simple stop-migrate-start
-  pattern. Schema change: drop `id`, compound `PRIMARY KEY
-  (asset, timestamp)`, timestamp seconds -> ms, rewrite `datetime` text
-  to ISO `+00:00`. Re-fetchable from Binance; verify Cycle 14's 17h
-  staleness threshold remains appropriate post-migration. *(Source:
-  docs/SCHEMA_MIGRATION_PLAN.md row #5)*
+- **Cycle 22: Migrate `ohlcv_1m` per `docs/SCHEMA_MIGRATION_PLAN.md`.**
+  ~530k rows; largest non-dual-write table; verify migration script
+  performance. Same simple stop-migrate-start pattern, Binance-
+  backfillable. Reader audit: multiple LSTM/quant strategies consume
+  this; grep before migrating. *(Source: docs/SCHEMA_MIGRATION_PLAN.md
+  row #6)*
 
 - **Run `services/register_market_data_task.ps1` from elevated
   PowerShell** (one-shot admin step). Files in place; manual first-run
@@ -239,7 +238,7 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   CONFORMING; manual first-run seeded 3 rows (BTC, ETH, SOL) for
   2026-05-01 with dominance 58.47%. **Outstanding**: scheduled-task
   registration needs an elevated PowerShell -- see Active TODOs.
-- **Cycle 20 (this cycle)**: `ohlcv_4h` migrated to Rule 35
+- Cycle 20: `ohlcv_4h` migrated to Rule 35
   (compound PK on `(asset, timestamp)`, timestamp seconds -> ms,
   datetime rewritten naive -> ISO `+00:00`; 10,830 rows preserved
   with latest UTC delta 0s); writer in
@@ -250,6 +249,22 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   Note: prior plan-doc note that ohlcv_4h.datetime was already
   `+00:00` was empirically wrong (it was naive); migration re-derived
   datetime from `timestamp` for defense in depth.
+- **Cycle 21 (this cycle)**: `funding_rates` migrated to Rule 35
+  (compound PK on `(asset, timestamp)`, timestamp seconds -> ms,
+  datetime rewritten naive -> ISO `+00:00`; 2,212 rows preserved with
+  latest UTC delta 0s); writer in `engines/crypto_data_collector.py`
+  `collect_funding_rates` updated (init_db schema + INSERT path); MCP
+  `funding.py` comment header refreshed (the autodetect-aware reader
+  needed zero logic changes); cross-engine SQL audit verified no engine
+  has hardcoded seconds-since-epoch SQL filters against `funding_rates`
+  -- phase3 model retrain unblocked from this migration's perspective
+  (the standalone retrain TODO remains tracked separately under Mid
+  priority); Cycle 14 17h staleness threshold confirmed valid
+  post-migration via `get_collector_health` (~11h staleness, is_stale
+  false); `docs/SCHEMA_NOTES.md` + `docs/SCHEMA_MIGRATION_PLAN.md`
+  updated. Process note: per the Brief, Mode B requires a Brief from
+  Chat every cycle -- Cycle 20's "Mode B-lite" self-dispatch was the
+  exception, not a new pattern. This cycle ran from a proper Brief.
 
 ---
 

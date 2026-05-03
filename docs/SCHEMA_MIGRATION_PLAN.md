@@ -20,7 +20,7 @@
 | 18 | ohlcv_daily | simple | DONE | cc6a178 |
 | 19 | market_data | schema-only + collector fix | DONE | 7e73128 |
 | 20 | ohlcv_4h | simple | DONE | ca316e3 |
-| 21 | funding_rates | simple | pending | -- |
+| 21 | funding_rates | simple | DONE | <TBD> |
 | 22 | ohlcv_1m | simple | pending | -- |
 | 23 | order_book_snapshots | dual-write | pending | -- |
 | 24 | live_collector.price_snapshots | dual-write | pending | -- |
@@ -113,18 +113,33 @@ column is ms.
   'unixepoch')` for defense in depth, matching `order_book_snapshots`'s
   format.
 
-### #5 -- funding_rates
+### #5 -- funding_rates (DONE, Cycle 21, commit <TBD>)
 
 - DB: crypto_data.db
-- Rows: ~2,200 (growing 3x/day)
+- Rows: 2,212 at migration time (1,106 BTC + 1,106 ETH; growing 3x/day)
 - Writer: `engines/crypto_data_collector.py` `collect_funding_rates()`
-- Reader: phase3 model retrain consumes this
+- Readers: `servers/praxis_mcp/tools/funding.py`
+  `get_funding_rate_history` (autodetect-aware, no logic change --
+  comment header refresh only); `engines/lstm_predictor.py:86-90`
+  `SELECT DATE(datetime) ... GROUP BY` (SQLite `DATE()` handles both
+  naive and ISO formats, reader-transparent); `regime_engine.py`,
+  `funding_rate_strategy.py`, `cpo_training.py` consume DataFrames not
+  raw SQL, also reader-transparent. phase3 model retrain consumes via
+  the same DataFrame path.
 - Pattern: simple (Binance API supports full re-fetch; 3-runs-per-day
   cadence means even an hour-long gap is naturally backfilled)
-- Schema change: same shape (compound PK on (asset, timestamp), drop id)
-- Note: Cycle 14 widened the staleness threshold to 17h. After
-  migration, verify the threshold is still appropriate (no change
-  expected since the cadence and API contract are unchanged).
+- Schema change: same shape as ohlcv_4h -- compound PK on
+  (asset, timestamp), drop `id`; timestamp seconds -> ms; datetime
+  re-derived from timestamp via SQLite `strftime('%Y-%m-%dT%H:%M:%S+00:00',
+  ..., 'unixepoch')` (was naive `'YYYY-MM-DD HH:MM:SS'`).
+- Cycle 14 staleness threshold (17h / 61,200s) verified valid
+  post-migration: `get_collector_health` reported `funding_rates`
+  staleness ~11h with `is_stale=false` immediately after the migration
+  ran. No threshold change required.
+- Cross-engine SQL audit (per Brief Task 4): no raw `WHERE timestamp`
+  clauses against `funding_rates` with hardcoded seconds-since-epoch
+  constants found anywhere in `engines/` or `scripts/`. phase3 retrain
+  is unblocked from this migration's perspective.
 
 ### #6 -- ohlcv_1m
 

@@ -96,12 +96,11 @@ def init_db():
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS funding_rates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             asset TEXT NOT NULL,
             timestamp INTEGER NOT NULL,
             datetime TEXT NOT NULL,
             funding_rate REAL,
-            UNIQUE(asset, timestamp)
+            PRIMARY KEY (asset, timestamp)
         )
     """)
 
@@ -450,8 +449,8 @@ def collect_funding_rates(asset, days, conn):
 
     stored = 0
     for r in all_rates:
-        ts = int(r["timestamp"] / 1000)
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        ts = int(r["timestamp"])
+        dt = datetime.fromtimestamp(ts // 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
         try:
             conn.execute("""
                 INSERT OR REPLACE INTO funding_rates
