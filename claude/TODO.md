@@ -18,12 +18,13 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **Cycle 22: Migrate `ohlcv_1m` per `docs/SCHEMA_MIGRATION_PLAN.md`.**
-  ~530k rows; largest non-dual-write table; verify migration script
-  performance. Same simple stop-migrate-start pattern, Binance-
-  backfillable. Reader audit: multiple LSTM/quant strategies consume
-  this; grep before migrating. *(Source: docs/SCHEMA_MIGRATION_PLAN.md
-  row #6)*
+- **Cycle 23: Migrate `order_book_snapshots` per
+  `docs/SCHEMA_MIGRATION_PLAN.md` row #7. Dual-write pilot cycle.**
+  ~70k rows, growing 5/min via 60s-cadence collector. First
+  migration that requires the Phase 0-5 dual-write recipe per
+  Rule 35.6. Use this cycle to write up the dual-write pattern as
+  a section in the migration plan doc once the pilot lands.
+  *(Source: docs/SCHEMA_MIGRATION_PLAN.md row #7)*
 
 - **Run `services/register_market_data_task.ps1` from elevated
   PowerShell** (one-shot admin step). Files in place; manual first-run
@@ -249,7 +250,28 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   Note: prior plan-doc note that ohlcv_4h.datetime was already
   `+00:00` was empirically wrong (it was naive); migration re-derived
   datetime from `timestamp` for defense in depth.
-- **Cycle 21.5 (this cycle)**: funding_rates writer alignment hotfix.
+- **Cycle 22 (this cycle)**: `ohlcv_1m` migrated to Rule 35
+  (compound PK on `(asset, timestamp)`, timestamp seconds -> ms,
+  datetime rewritten naive -> ISO `+00:00`; 530,836 rows preserved
+  with latest UTC delta 0s); writer in
+  `engines/crypto_data_collector.py` `collect_ohlcv_1m` updated
+  (init_db schema + INSERT path); MCP `ohlcv.py` docstring updated
+  to specify ms units (no body change). **First non-cosmetic reader
+  fix in the migration program**: `engines/intrabar_predictor.py`
+  line 110 `bar_seconds = bar_minutes * 60 -> bar_minutes * 60 *
+  1000` -- pre-fix the bar-bucketing arithmetic silently returned
+  zero aggregated bars for any `bar_minutes >= 2` post-migration.
+  Verified empirically post-fix: `bar_minutes=5` returns aggregated
+  bars at exact 5-min boundaries. Cycle 21.5's writer-alignment-
+  audit prescription caught this pre-merge. Performance datapoint:
+  530,836-row INSERT-SELECT completed in 0.567s wall-clock (Brief
+  budgeted 5-30s). Writer-alignment audit confirmed for kline
+  endpoints: Binance kline `openTime` is bar-aligned by contract
+  (no jitter); only event-driven endpoints like
+  `fetch_funding_rate_history` carry reporting jitter requiring
+  writer-side truncation. Durable result for future cycles
+  touching kline data.
+- Cycle 21.5: funding_rates writer alignment hotfix.
   Caught during post-Cycle-21 independent verification: writer was
   preserving Binance's sub-second jitter (e.g., 1777795200003 vs
   migration's 1777795200000), accumulating duplicate rows for each

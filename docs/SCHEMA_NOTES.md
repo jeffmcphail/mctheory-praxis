@@ -123,16 +123,42 @@ server, all engines, and analysis scripts.
   from Cycle 19 forward. Backfill would require a paid CoinGecko tier
   or an alternative data source (Glassnode, CoinMetrics).
 
-#### Table: ohlcv_1m (NONCONFORMING)
+#### Table: ohlcv_1m (CONFORMING -- Cycle 22)
 
-- Columns: `id` PK, `asset`, `timestamp` (INTEGER **seconds** UTC),
-  `datetime` (TEXT naive `"YYYY-MM-DD HH:MM:SS"`),
-  `open`/`high`/`low`/`close`/`volume`.
-- Writer: `engines/crypto_data_collector.py` `collect_1m`
-- Scheduled task: `PraxisCrypto1mCollector` (every 6h, --days 2).
-- Conformance gaps: timestamp units, datetime format, PK shape.
-- Migration cycle: TBD. **High row count (~520k); plan dual-write
-  pattern.**
+- Columns: `asset`, `timestamp` (INTEGER **ms** UTC),
+  `datetime` (TEXT ISO `YYYY-MM-DDTHH:MM:SS+00:00`),
+  `open`/`high`/`low`/`close`/`volume`. PK: `(asset, timestamp)`.
+- Writer: `engines/crypto_data_collector.py` `collect_ohlcv_1m`
+- Scheduled task: `PraxisCrypto1mCollector` (every 6h, --days 180).
+- 530,836 rows at migration time (BTC: 265,419, ETH: 265,417;
+  2025-10-31 onward). The 2-row asymmetry is a pre-existing data-
+  quality footnote: BTC starts 2025-10-31T17:45:00 UTC, ETH starts
+  17:47:00, likely a 2-min lag in ETH's first collector backfill
+  batch in October. Migration preserved both assets' rows
+  independently.
+- **Reader fix (Cycle 22)**: `engines/intrabar_predictor.py`
+  `load_intrabar_data` line 110 changed from
+  `bar_seconds = bar_minutes * 60` to `bar_minutes * 60 * 1000` to
+  match the post-migration ms timestamps. Pre-fix the bar-bucketing
+  arithmetic produced unique buckets per 1-min row, causing
+  `bar_minutes >= 2` to silently return zero aggregated bars. This
+  is the first migration cycle in the program requiring a
+  non-cosmetic reader change (Cycles 17-21 needed only writer +
+  comment-header updates). Verified empirically post-fix:
+  `bar_minutes=5` returns aggregated bars at exact 5-min boundaries.
+- Reader at `servers/praxis_mcp/tools/ohlcv.py` `get_recent_ohlcv`
+  is reader-transparent (sorts and returns the column without
+  arithmetic). Docstring updated to specify ms units; pre-Cycle-22
+  callers expecting seconds need to adapt.
+- Migration script timing: 530,836-row INSERT-SELECT completed in
+  0.567s wall-clock (well under the 2-minute concerning threshold).
+- **Writer alignment** (per Cycle 21.5 lesson): Binance kline
+  `openTime` values from `fetch_ohlcv` are bar-aligned by contract
+  (no sub-second jitter). Confirmed empirically post-migration: all
+  530,836 rows have `timestamp % 1000 == 0`. The `funding_rates`
+  jitter pattern does not apply to kline endpoints. This audit
+  result is durable for any future cycle dealing with Binance kline
+  data.
 
 #### Table: ohlcv_4h (CONFORMING -- Cycle 20)
 
@@ -278,7 +304,7 @@ added it to MCP health.
 | crypto_data | fear_greed | **CONFORMING** | **17** | stop-migrate-start | Done |
 | crypto_data | funding_rates | **CONFORMING** | **21** | stop-migrate-start | Done |
 | crypto_data | market_data | **CONFORMING** | **19** | schema-only + collector fix | No backfill (CoinGecko free-tier limit) |
-| crypto_data | ohlcv_1m | NONCONFORMING | TBD | dual-write | ~520k rows; high frequency |
+| crypto_data | ohlcv_1m | **CONFORMING** | **22** | stop-migrate-start | Done; 530k rows in 0.567s |
 | crypto_data | ohlcv_4h | **CONFORMING** | **20** | stop-migrate-start | Done |
 | crypto_data | ohlcv_daily | **CONFORMING** | **18** | stop-migrate-start | Done |
 | crypto_data | onchain_btc | NONCONFORMING | TBD | stop-migrate-start | No active collector |

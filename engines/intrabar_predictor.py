@@ -107,7 +107,10 @@ def load_intrabar_data(asset, bar_minutes=BAR_SIZE_MINUTES, limit_bars=None):
     if bar_minutes == 1:
         clean = filtered
     else:
-        bar_seconds = bar_minutes * 60
+        # Operate in ms to match the post-Cycle-22 ohlcv_1m schema.
+        # Pre-Cycle-22 the timestamp column was UTC seconds; this code
+        # used `bar_minutes * 60`. Now ts is UTC ms.
+        bar_seconds = bar_minutes * 60 * 1000
         aggregated = []
         current_group = []
         current_bar_start = None

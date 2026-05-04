@@ -21,7 +21,7 @@
 | 19 | market_data | schema-only + collector fix | DONE | 7e73128 |
 | 20 | ohlcv_4h | simple | DONE | ca316e3 |
 | 21 | funding_rates | simple | DONE | b977cd3 |
-| 22 | ohlcv_1m | simple | pending | -- |
+| 22 | ohlcv_1m | simple | DONE | <TBD> |
 | 23 | order_book_snapshots | dual-write | pending | -- |
 | 24 | live_collector.price_snapshots | dual-write | pending | -- |
 | 25 | smart_money.position_snapshots | dual-write | pending | -- |
@@ -177,22 +177,57 @@ data. If not, decide between (a) truncating in the writer,
 (c) accepting duplicates with documentation. For Cycle 21's pattern,
 (a) was correct.
 
-### #6 -- ohlcv_1m
+### #6 -- ohlcv_1m (DONE, Cycle 22, commit <TBD>)
 
 - DB: crypto_data.db
-- Rows: ~521,000 (~260k bars per asset over ~6 months at minute cadence)
+- Rows: 530,836 at migration time (BTC: 265,419 + ETH: 265,417;
+  asymmetry is a pre-existing 2-row data-quality footnote, ETH starts
+  2 mins later than BTC on 2025-10-31)
 - Writer: `engines/crypto_data_collector.py` `collect_ohlcv_1m()`
-- Reader: multiple LSTM/quant strategies
+- Readers (exactly 2 raw-SQL readers found via cross-engine audit):
+  - `engines/intrabar_predictor.py:96` (`load_intrabar_data`) --
+    required a non-cosmetic fix at line 110 (see "Reader fix" below)
+  - `servers/praxis_mcp/tools/ohlcv.py:30` (`get_recent_ohlcv`) --
+    reader-transparent; docstring update only
 - Pattern: simple (Binance API supports full re-fetch;
   PraxisCrypto1mCollector runs every 6h so a small gap window is
   naturally re-pulled)
-- Schema change: compound PK on (asset, timestamp), drop id
-- `datetime` text currently naive; rewrite with `+00:00` offset during
-  migration
-- Performance note: largest table by row count after `trades`. Migration
-  script must handle ~520k rows; verify performance (single
-  INSERT-SELECT inside a transaction is expected to be sub-second on
-  this volume but confirm before commit).
+- Schema change: compound PK on (asset, timestamp), drop id;
+  timestamp seconds -> ms (multiply x1000); datetime re-derived
+  from `timestamp` via SQLite `strftime('%Y-%m-%dT%H:%M:%S+00:00',
+  ..., 'unixepoch')` (was naive `'YYYY-MM-DD HH:MM:SS'`).
+- Performance result: 530,836-row INSERT-SELECT completed in
+  0.567s wall-clock (Brief had budgeted 5-30s, with 2 minutes as
+  the concerning threshold). Total transaction wall-clock 1.013s
+  including DROP+RENAME. Single INSERT-SELECT inside a transaction
+  is the right approach at this row count.
+- **Reader fix (first non-cosmetic reader change in the migration
+  program)**: `engines/intrabar_predictor.py` `load_intrabar_data`
+  computed bar-bucket ids via integer floor-division of the
+  timestamp by `bar_seconds = bar_minutes * 60`. Pre-Cycle-22 the
+  timestamp column was UTC seconds and this worked correctly.
+  Post-migration the timestamp is UTC ms but `bar_seconds` was
+  still in seconds-magnitude, so every 1-min row got a unique
+  bucket id and `bar_minutes >= 2` silently returned zero
+  aggregated bars. Fixed at line 110:
+  `bar_seconds = bar_minutes * 60 * 1000`. The variable name
+  `bar_seconds` becomes a slight misnomer post-fix (it's now
+  bar-ms) -- left as-is to keep the diff minimal; explanatory
+  comment added in-place. Verified empirically post-fix:
+  `bar_minutes=5` returns 100 aggregated bars at exact 5-min ms
+  boundaries (300,000 ms apart). Cycle 21.5's writer-alignment-
+  audit prescription predicted exactly this class of issue would
+  surface in subsequent cycles; this is the first time it has,
+  and the prescription caught it pre-merge.
+- **Writer alignment audit** (per Cycle 21.5 lesson): Binance
+  `fetch_ohlcv` returns kline `openTime` values bar-aligned by
+  contract (no sub-second jitter). Confirmed empirically post-
+  migration: all 530,836 rows have `timestamp % 1000 == 0`. The
+  `funding_rates` jitter pattern does NOT apply to kline endpoints.
+  Durable result for future cycles: Binance kline endpoints
+  (1m / 4h / 1d / etc.) are jitter-free; only event-driven
+  endpoints like `fetch_funding_rate_history` carry reporting
+  jitter that requires writer-side truncation.
 
 ### #7 -- order_book_snapshots (DUAL-WRITE PILOT)
 

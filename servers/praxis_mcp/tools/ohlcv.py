@@ -16,8 +16,11 @@ def register(mcp, db_path: Path):
                 Capped at 1440 (1 day) to avoid giant payloads.
 
         Returns:
-            Dict with asset, rows (list of bars with timestamp, open, high,
-            low, close, volume, oldest-first), and count.
+            Dict with asset, rows (list of bars with timestamp [UTC ms],
+            datetime [ISO +00:00], open, high, low, close, volume;
+            oldest-first), and count. Cycle 22 migrated ohlcv_1m to
+            Rule 35 (ms timestamps); pre-Cycle-22 callers expecting
+            seconds need to adapt.
         """
         asset = asset.upper()
         lookback_bars = min(max(1, int(lookback_bars)), 1440)
