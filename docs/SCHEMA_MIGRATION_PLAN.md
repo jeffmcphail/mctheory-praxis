@@ -141,6 +141,42 @@ column is ms.
   constants found anywhere in `engines/` or `scripts/`. phase3 retrain
   is unblocked from this migration's perspective.
 
+#### Hotfix (Cycle 21.5)
+
+The post-Cycle-21 writer initially preserved Binance's sub-second
+jitter on `fundingTime` (e.g., `1777795200003`), while the migration
+produced seconds-aligned ms (`1777795200000`). The compound PK on
+`(asset, timestamp)` did not collapse `.000` and `.NNN` for the same
+event, so each new funding event accumulated a duplicate row. Over
+~4 days, 26 duplicate rows accumulated (13 events x 2 assets BTC + ETH).
+
+Cycle 21.5 fixed this with two surgical changes:
+
+1. **Writer truncation**: `collect_funding_rates` now computes
+   `ts = (int(r["timestamp"]) // 1000) * 1000` to drop the sub-second
+   tail before storage. Future writes for the same event collapse
+   correctly via `INSERT OR REPLACE`.
+2. **One-shot dedup**: `scripts/migrations/cycle21_5_funding_rates_dedup.py`
+   deleted the 26 jittered rows (`WHERE timestamp % 1000 != 0`),
+   verified pre-DELETE that funding-rate values were byte-identical
+   within each duplicate group (lossless), wrapped in a transaction.
+   Idempotent: re-running on a clean table prints "Already deduped"
+   and exits 0.
+
+Cross-table sanity check (run before the dedup): `fear_greed`,
+`ohlcv_daily`, `ohlcv_4h`, `market_data` all show 0 `(asset, datetime)`
+duplicates. The bug pattern is isolated to `funding_rates` because
+Binance's OHLCV `openTime` is bar-aligned by contract while
+`fundingTime` carries reporting-clock jitter.
+
+Lesson for future migration cycles: add a "writer alignment audit"
+step that asks whether the new writer produces timestamp values
+byte-identical (in their key-relevant bits) to the migrated legacy
+data. If not, decide between (a) truncating in the writer,
+(b) re-rendering the migration to match writer precision, or
+(c) accepting duplicates with documentation. For Cycle 21's pattern,
+(a) was correct.
+
 ### #6 -- ohlcv_1m
 
 - DB: crypto_data.db

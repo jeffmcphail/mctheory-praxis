@@ -94,6 +94,15 @@ server, all engines, and analysis scripts.
   `engines/lstm_predictor.py:86-90` uses `DATE(datetime)` GROUP BY,
   which SQLite handles for both naive and ISO datetime formats --
   reader-transparent across the format change.
+- **Writer alignment (Cycle 21.5 hotfix)**: `collect_funding_rates`
+  truncates Binance's `fundingTime` to seconds-aligned ms before
+  storage (`ts = (int(r["timestamp"]) // 1000) * 1000`). Sub-second
+  jitter from Binance's reporting clock has no information value
+  (funding events are aligned to UTC hour boundaries by contract) and
+  would otherwise produce duplicate rows for the same hourly event,
+  since the compound PK on `(asset, timestamp)` does not collapse
+  `.000` and `.NNN` into one row. Cycle 21.5 also deduped the 26
+  rows that accumulated between Cycle 21 and the hotfix.
 
 #### Table: market_data (CONFORMING -- Cycle 19)
 

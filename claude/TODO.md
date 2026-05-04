@@ -249,7 +249,20 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   Note: prior plan-doc note that ohlcv_4h.datetime was already
   `+00:00` was empirically wrong (it was naive); migration re-derived
   datetime from `timestamp` for defense in depth.
-- **Cycle 21 (this cycle)**: `funding_rates` migrated to Rule 35
+- **Cycle 21.5 (this cycle)**: funding_rates writer alignment hotfix.
+  Caught during post-Cycle-21 independent verification: writer was
+  preserving Binance's sub-second jitter (e.g., 1777795200003 vs
+  migration's 1777795200000), accumulating duplicate rows for each
+  hourly event. Fixed via 2-task hotfix: writer now truncates to
+  seconds-aligned ms before storage; deduplication script collapsed
+  26 existing dupes (lossless -- duplicate pairs had identical
+  funding_rate values). Cross-table sanity check confirmed the bug
+  pattern is isolated to funding_rates (fear_greed, ohlcv_daily,
+  ohlcv_4h, market_data all show 0 dupes; their writers feed off
+  bar-aligned openTime). Future migrations should sanity-check
+  post-cycle row growth against expected cadence to catch this class
+  of bug earlier.
+- Cycle 21: `funding_rates` migrated to Rule 35
   (compound PK on `(asset, timestamp)`, timestamp seconds -> ms,
   datetime rewritten naive -> ISO `+00:00`; 2,212 rows preserved with
   latest UTC delta 0s); writer in `engines/crypto_data_collector.py`

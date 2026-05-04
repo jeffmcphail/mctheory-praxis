@@ -449,7 +449,12 @@ def collect_funding_rates(asset, days, conn):
 
     stored = 0
     for r in all_rates:
-        ts = int(r["timestamp"])
+        # Funding events are aligned to UTC hour boundaries by Binance contract.
+        # Binance's reporting clock includes sub-second jitter (e.g., .003 ms)
+        # which has no information value -- truncate to seconds-aligned ms so
+        # repeated INSERT OR REPLACE collapses rows for the same event,
+        # matching the migration's representation. (Cycle 21.5 hotfix.)
+        ts = (int(r["timestamp"]) // 1000) * 1000
         dt = datetime.fromtimestamp(ts // 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
         try:
             conn.execute("""
