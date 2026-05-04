@@ -22,7 +22,8 @@
 | 20 | ohlcv_4h | simple | DONE | ca316e3 |
 | 21 | funding_rates | simple | DONE | b977cd3 |
 | 22 | ohlcv_1m | simple | DONE | 5c1f248 |
-| 23 | order_book_snapshots | dual-write | pending | -- |
+| 23 | order_book_snapshots | dual-write | DONE-PARTIAL | <TBD> |
+| 23.5 | order_book_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 24 | live_collector.price_snapshots | dual-write | pending | -- |
 | 25 | smart_money.position_snapshots | dual-write | pending | -- |
 | 26 | trades | dual-write | pending | -- |
@@ -35,6 +36,140 @@ high-frequency tables -- to debug the recipe before applying to the
 larger live-collector and trades tables. Cycle 27 collapses the
 autodetect heuristic in `_to_latest_ms` once every monitored timestamp
 column is ms.
+
+---
+
+## Dual-write recipe (Rule 35.6 expanded, Cycle 23 pilot)
+
+The dual-write pattern applies to actively-written tables where a
+stop-migrate-start gap would lose data (high-cadence collectors,
+WebSocket streams, anything sub-minute). Cycle 23 piloted this on
+`order_book_snapshots`; Cycles 24-26 will use the same six-phase
+recipe. The Cycle 23 retro is the canonical reference for actual
+gotchas; this section is the durable summary.
+
+### The six phases
+
+**Phase 0 -- Build `<table>_v2` and the dual-write writer**
+
+1. CREATE TABLE `<table>_v2` with the target Rule 35 schema alongside
+   the existing table. Same database. Idempotent (`IF NOT EXISTS`).
+2. Modify the writer to write to BOTH tables in the same transaction:
+   - Old table: keep current behavior (preserve any pre-cycle
+     reader's expectation; e.g., seconds-truncated timestamp)
+   - New table: target Rule 35 representation (ms timestamp, etc.)
+3. Both INSERTs in the same `cursor.execute` chain inside one
+   `conn.commit()` for atomicity.
+4. **Commit Phase 0 standalone** -- separate from Phases 2-4 -- so
+   the live collector picks it up at its next process restart.
+   For hourly-relaunched collectors, time the commit so the next
+   `:00` boundary picks up the fresh code.
+
+**Phase 1 -- Parallel collection burn-in (>=60 minutes)**
+
+1. Wait until enough dual-write rows have accumulated to support
+   meaningful verification (>=60 min was the Cycle 23 budget; the
+   real constraint is "the collector has fired enough cycles to have
+   a clean window of dual-write rows").
+2. Verify counts grow at the same rate in both tables over a clean
+   60-min window inside the dual-write era.
+3. Spot-check 5 random rows: each (asset, datetime) appears in both
+   tables with timestamp values consistent (e.g., for sec-vs-ms,
+   `legacy_ts * 1000 + sub_second_ms == v2_ts`).
+
+**Phase 2 -- Backfill legacy data into `<table>_v2`**
+
+1. INSERT INTO `<table>_v2` SELECT FROM `<table>` WHERE NOT EXISTS in
+   `<table>_v2` (key on `(asset, datetime)` since timestamp differs by
+   unit between the two tables).
+2. **Use pure-SQL INSERT-SELECT, not Python row-by-row**. Cycle 23
+   first-cut Python implementation hung indefinitely on 87k rows due
+   to lock contention with the live collector; rewriting as a single
+   INSERT-SELECT statement reduced wall-clock to 7.2s.
+3. **For seconds-to-ms conversion via SQLite, use ROUND not CAST**:
+   ```sql
+   CAST(ROUND((julianday(datetime) - 2440587.5) * 86400000) AS INTEGER)
+   ```
+   The product is a `double` and lands ~1 ULP below the integer for
+   ~half of datetimes with .NNN-precision fractional seconds; CAST
+   AS INTEGER truncates toward zero, producing off-by-1ms errors.
+   Cycle 23 hit this on 43,596 of 87,668 backfilled rows; fix was
+   a follow-up UPDATE with ROUND-derived ms.
+4. Idempotent: re-running on a fully-backfilled state inserts zero
+   rows.
+5. **Add an index on `(asset, datetime)` on both tables** before
+   running Phase 2 / Phase 3 verification. The NOT EXISTS subquery
+   is O(n^2) without it -- Cycle 23 verification hung for 12+ minutes
+   without the index, completed in 0.04s with it.
+
+**Phase 3 -- Verification of overlap**
+
+1. `count(<table>_v2) >= count(<table>)`.
+2. Every legacy `(asset, datetime)` exists in `<table>_v2` exactly
+   once (no missing, no duplicates).
+3. Sample 100 random rows: every column except `id` (legacy only) and
+   `timestamp` is byte-identical; ts relationship matches the
+   migration formula (e.g., `legacy_ts == v2_ts // 1000`).
+4. **ABORT if any check fails**. Surface to chat; do not proceed to
+   Phase 4 cutover.
+
+**Phase 4 -- Atomic cutover (the dangerous step)**
+
+```sql
+BEGIN;
+ALTER TABLE <table> RENAME TO <table>_legacy;
+ALTER TABLE <table>_v2 RENAME TO <table>;
+COMMIT;
+```
+
+1. Single transaction, RENAME pair. SQLite executes both DDL
+   statements atomically (or rolls back if either fails).
+2. Idempotent: detect cut-over state via PRAGMA + sqlite_master.
+3. **The writer must adapt at runtime to the new table names**.
+   This is the load-bearing gotcha Cycle 23 surfaced: a writer that
+   hardcodes `INSERT INTO <table>_v2` will break post-cutover because
+   `<table>_v2` no longer exists. Two options:
+   - **Runtime introspection** (Cycle 23's choice): the writer
+     introspects the live table's PK shape on each iteration and
+     adapts -- if `id` column present, it's pre-cutover (write sec
+     to live + ms to `_v2`); else post-cutover (write ms to live +
+     sec to `_legacy`).
+   - **Bundled writer update + cutover commit**: rewrite the writer
+     to use post-cutover names AND run cutover in the same commit;
+     gives one moment of inconsistency but a simpler writer.
+   Cycle 23 retrofitted runtime introspection mid-cycle; future
+   cycles should consider the bundled-update approach as cleaner.
+4. Verify post-cutover via PRAGMA table_info that the live table has
+   the new schema; verify the writer's next iteration succeeds.
+
+**Phase 5 -- Burn-in 24-48h, then drop legacy + collapse writer**
+
+Always deferred to a follow-up cycle (Cycle 23.5 for this pilot).
+Runs only after 24-48h of clean post-cutover operation:
+
+1. Modify the writer to single-write (drop the `_legacy` INSERT).
+2. DROP TABLE `<table>_legacy`.
+
+Bundling Phase 5 into the main cycle defeats the burn-in safety net.
+
+### Sequencing guidance for future dual-write cycles
+
+| Step | What | When |
+|------|------|------|
+| 0 | Backup DB; delete previous-cycle backup | Before any change |
+| 1 | Phase 0 commit (table + dual-write writer) | Standalone commit |
+| 2 | Wait for collector to pick up new code | Next process restart |
+| 3 | Phase 1 verification (count match) | After 60+ min dual-write |
+| 4 | Add `(asset, datetime)` index on both tables | Before Phase 2 |
+| 5 | Phase 2 backfill (pure-SQL, ROUND for ms) | After Phase 1 |
+| 6 | Phase 2 idempotent re-run | Verify exit 0 |
+| 7 | Phase 3 verification (ABORT on fail) | After Phase 2 |
+| 8 | Phase 4 atomic cutover | After Phase 3 |
+| 9 | Verify writer still works post-cutover | Within minutes |
+| 10 | Update doc trio + retro | After cutover |
+| 11 | Phases 2-4 commit (main + hash patch) | Final commit |
+| 12 | (24-48h burn-in) | Real-world clock |
+| 13 | Phase 5 cleanup cycle | Separate cycle |
 
 ---
 
@@ -229,19 +364,52 @@ data. If not, decide between (a) truncating in the writer,
   endpoints like `fetch_funding_rate_history` carry reporting
   jitter that requires writer-side truncation.
 
-### #7 -- order_book_snapshots (DUAL-WRITE PILOT)
+### #7 -- order_book_snapshots (DONE-PARTIAL, Cycle 23, commit <TBD>)
 
 - DB: crypto_data.db
-- Rows: ~20,000 (growing ~5/min)
-- Writer: `engines/crypto_data_collector.py` `collect_order_book()`,
-  scheduled as PraxisOrderBookCollector with 60s cadence
-- Reader: convergence detection / spike alerts
-- Pattern: **DUAL-WRITE** (Phase 0-5 per Rule 35.6). High-frequency
-  writes mean even a 30-second gap matters.
+- Rows: 88,894 at cutover (BTC + ETH; growing ~12 rows/min via 10s
+  cadence collector)
+- Writer: `engines/crypto_data_collector.py` `collect_order_book_snapshot`,
+  scheduled as PraxisOrderBookCollector (3550s windowed, hourly
+  back-to-back, 10s cadence)
+- Readers (exactly 2 raw-SQL readers found via cross-engine audit):
+  - `servers/praxis_mcp/tools/order_book.py` `get_order_book_snapshot`
+    + `get_order_book_range` (both pre-existing buggy due to unit
+    mismatch; silently fixed by migration -- docstrings updated this
+    cycle)
+  - `servers/praxis_mcp/tools/meta.py` (monitoring config, autodetect-
+    aware, reader-transparent)
+- Pattern: **DUAL-WRITE** pilot (Rule 35.6 Phase 0-5).
 - Why pilot here: smallest of the dual-write tables. Best place to
   debug the dual-write recipe before applying to bigger volumes.
-- Schema change: compound PK on (asset, timestamp), drop id, convert
-  timestamp seconds -> ms; `datetime` already uses `+00:00` offset
+- Schema change: compound PK on (asset, timestamp); drop `id`;
+  timestamp seconds -> ms; **`datetime` ALREADY had microsecond
+  precision** (verified empirically: `2026-05-04T19:35:51.647000+00:00`).
+  The pre-Cycle-23 writer truncated Binance's ms timestamp to seconds
+  via `ts_ms // 1000` while the matching `datetime` retained sub-second
+  precision. The migration recovers ms by parsing `datetime` (the
+  "real" precision) -- not by `legacy_ts * 1000`.
+- **Phase 5 (cleanup) deferred to Cycle 23.5**: drop `_legacy`,
+  collapse writer to single-write. Runs after 24-48h burn-in confirms
+  no errors.
+- Performance datapoints:
+  - Phase 2 backfill (87,668 rows, pure-SQL INSERT-SELECT with
+    julianday-derived ms): 7.219s wall-clock for the INSERT-SELECT;
+    a follow-up ROUND-correction UPDATE of 43,596 off-by-1ms rows
+    completed in 0.453s
+  - Phase 4 atomic RENAME pair: 0.005s wall-clock
+- Pre-existing MCP tool bugs silently fixed by migration:
+  - `get_order_book_range`'s `WHERE timestamp BETWEEN start_ts_ms
+    AND end_ts_ms` returned `total_in_range = 0` for any sane ms
+    input pre-Cycle-23 (table stored sec, clients passed ms)
+  - `get_order_book_snapshot`'s `ABS(timestamp - at_timestamp_ms)`
+    math was unit-mismatched but happened to "return latest row" by
+    accident pre-Cycle-23
+- Lessons-learned (codified in retro and the new "Dual-write recipe"
+  section above): the cutover RENAME pair invalidates the writer's
+  hardcoded table names; the writer must adapt at runtime (introspect
+  the live table's PK shape) or be updated in the same commit as the
+  cutover. We chose the runtime-adaptive approach for this cycle.
 
 ### #8 -- live_collector.price_snapshots
 

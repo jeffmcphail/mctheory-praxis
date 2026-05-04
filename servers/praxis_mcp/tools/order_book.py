@@ -20,10 +20,16 @@ def register(mcp, db_path: Path):
             at_timestamp_ms: Unix milliseconds. If None, returns the latest.
 
         Returns:
-            Dict with all fields from order_book_snapshots for the nearest row,
-            including all 10 bid + 10 ask levels, spread, and derived
-            aggregates (bid_volume_top10, ask_volume_top10,
-            order_imbalance_top10).
+            Dict with all fields from order_book_snapshots for the nearest
+            row (timestamp [UTC ms], datetime [ISO with microsecond
+            precision and +00:00 offset]), including all 10 bid + 10 ask
+            levels, spread, and derived aggregates (bid_volume_top10,
+            ask_volume_top10, order_imbalance_top10). Cycle 23 migrated
+            order_book_snapshots to Rule 35 (ms timestamps); pre-Cycle-23
+            the table stored seconds and the ABS(timestamp -
+            at_timestamp_ms) math was unit-mismatched but happened to
+            return "the latest row" by accident -- the math is correct
+            now.
         """
         asset = asset.upper()
         try:
@@ -73,6 +79,12 @@ def register(mcp, db_path: Path):
 
         Returns:
             Dict with asset, total_in_range, returned, sampled (bool), rows.
+
+        Cycle 23 migrated order_book_snapshots to Rule 35 (ms timestamps);
+        pre-Cycle-23 the table stored seconds while clients passed ms, so
+        BETWEEN clauses returned 0 rows for any sane ms input. This tool
+        was effectively broken before Cycle 23 and is silently fixed by
+        the migration.
         """
         asset = asset.upper()
         max_rows = min(max(1, int(max_rows)), 1000)

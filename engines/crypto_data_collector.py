@@ -707,11 +707,34 @@ def collect_order_book_snapshot(asset, exchange, conn):
     bid_flat = [v for b in bids for v in b]
     ask_flat = [v for a in asks for v in a]
 
-    # Cycle 23 dual-write: legacy table gets seconds-truncated ts (preserves
-    # current behavior for any pre-cycle reader); _v2 table gets ms ts directly
-    # (Rule 35; matches the API's native precision and the datetime field's
-    # microsecond tail). Both INSERTs share the same column shape; only the
-    # timestamp value differs. A single conn.commit() makes them atomic.
+    # Cycle 23 dual-write. The writer adapts to whichever phase the table
+    # rename is in (Phase 0-3 vs Phase 4+ post-cutover):
+    #   * Pre-cutover: live name "order_book_snapshots" is the OLD seconds-
+    #     format table; "order_book_snapshots_v2" is the NEW ms-format
+    #     table. Insert seconds-truncated ts into the live name; ms into v2.
+    #   * Post-cutover: live name "order_book_snapshots" is the NEW
+    #     ms-format table (was v2, renamed); "order_book_snapshots_legacy"
+    #     is the OLD seconds-format table (was the live name, renamed).
+    #     Insert ms ts into the live name; seconds into legacy.
+    # Detect by introspecting the live table's PK shape: if it has an
+    # `id` column, we're pre-cutover; otherwise we're post-cutover.
+    # This dual-write window is removed by Cycle 23.5 (drop _legacy +
+    # single-write to live only). Until then the writer keeps both
+    # representations in sync for any pre-Cycle-23 reader.
+    cursor = conn.cursor()
+    pre_cutover = any(
+        c[1] == "id" for c in cursor.execute(
+            "PRAGMA table_info(order_book_snapshots)"
+        ).fetchall()
+    )
+    if pre_cutover:
+        live_table = "order_book_snapshots"   # OLD schema (seconds, with id)
+        ms_table = "order_book_snapshots_v2"  # NEW schema (ms, no id)
+    else:
+        live_table = "order_book_snapshots"           # NEW schema (ms, no id)
+        ms_table = None                               # live is already ms
+        legacy_table = "order_book_snapshots_legacy"  # OLD schema (seconds)
+
     cols_sql = (
         "asset, timestamp, datetime, mid_price, best_bid, best_ask, "
         "spread, spread_bps, "
@@ -727,30 +750,40 @@ def collect_order_book_snapshot(asset, exchange, conn):
     )
     placeholders = ", ".join(["?"] * 51)
     common_tail = [
-        asset, dt, mid, best_bid, best_ask, spread, spread_bps,
+        dt, mid, best_bid, best_ask, spread, spread_bps,
         *bid_flat, *ask_flat,
         bid_top10, ask_top10, imbalance,
     ]
-    legacy_values = [asset, ts_ms // 1000] + common_tail[1:]
-    v2_values = [asset, ts_ms] + common_tail[1:]
+    sec_values = [asset, ts_ms // 1000] + common_tail
+    ms_values = [asset, ts_ms] + common_tail
 
     try:
-        cursor = conn.cursor()
-        cursor.execute(
-            f"INSERT OR IGNORE INTO order_book_snapshots ({cols_sql}) "
-            f"VALUES ({placeholders})",
-            legacy_values,
-        )
-        legacy_inserted = cursor.rowcount
-        cursor.execute(
-            f"INSERT OR IGNORE INTO order_book_snapshots_v2 ({cols_sql}) "
-            f"VALUES ({placeholders})",
-            v2_values,
-        )
+        if pre_cutover:
+            cursor.execute(
+                f"INSERT OR IGNORE INTO {live_table} ({cols_sql}) "
+                f"VALUES ({placeholders})",
+                sec_values,
+            )
+            primary_inserted = cursor.rowcount
+            cursor.execute(
+                f"INSERT OR IGNORE INTO {ms_table} ({cols_sql}) "
+                f"VALUES ({placeholders})",
+                ms_values,
+            )
+        else:
+            cursor.execute(
+                f"INSERT OR IGNORE INTO {live_table} ({cols_sql}) "
+                f"VALUES ({placeholders})",
+                ms_values,
+            )
+            primary_inserted = cursor.rowcount
+            cursor.execute(
+                f"INSERT OR IGNORE INTO {legacy_table} ({cols_sql}) "
+                f"VALUES ({placeholders})",
+                sec_values,
+            )
         conn.commit()
-        # Report legacy table's rowcount to keep callers' counters
-        # consistent with pre-Cycle-23 behavior.
-        return (legacy_inserted, None)
+        return (primary_inserted, None)
     except Exception as e:
         return (0, f"insert: {type(e).__name__}: {e}")
 

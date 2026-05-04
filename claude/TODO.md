@@ -18,13 +18,28 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **Cycle 23: Migrate `order_book_snapshots` per
-  `docs/SCHEMA_MIGRATION_PLAN.md` row #7. Dual-write pilot cycle.**
-  ~70k rows, growing 5/min via 60s-cadence collector. First
-  migration that requires the Phase 0-5 dual-write recipe per
-  Rule 35.6. Use this cycle to write up the dual-write pattern as
-  a section in the migration plan doc once the pilot lands.
-  *(Source: docs/SCHEMA_MIGRATION_PLAN.md row #7)*
+- **Cycle 23.5: order_book_snapshots Phase 5 cleanup.** Run after
+  24-48h burn-in confirms the post-cutover dual-write writer is
+  stable. Two-task cleanup:
+  1. Modify `engines/crypto_data_collector.py`
+     `collect_order_book_snapshot` to single-write to
+     `order_book_snapshots` only (drop the `_legacy` INSERT and the
+     runtime PK-introspection branch added in Cycle 23).
+  2. DROP TABLE `order_book_snapshots_legacy`.
+  Plus standard cleanup: doc updates marking row #7 as DONE
+  (no longer DONE-PARTIAL), retro at
+  `claude/retros/RETRO_order_book_phase5_cleanup.md`.
+  *(Source: Cycle 23 retro; deferred per Rule 35.6 Phase 5 pattern.)*
+
+- **Cycle 24: Migrate `live_collector.price_snapshots` per the
+  dual-write recipe established in Cycle 23.** Sidecar DB
+  (`data/live_collector.db`) -- new wrinkle: writer is in
+  `engines/live_collector.py`, not `crypto_data_collector.py`.
+  ~52k rows, growing ~50/min (continuous polling). Schema change:
+  ADD `datetime` column with `+00:00` (currently no datetime column
+  at all), convert timestamp seconds -> ms. Use the Cycle 23 retro's
+  lessons-learned section as the operational checklist.
+  *(Source: docs/SCHEMA_MIGRATION_PLAN.md row #8)*
 
 - **Run `services/register_market_data_task.ps1` from elevated
   PowerShell** (one-shot admin step). Files in place; manual first-run
@@ -250,7 +265,29 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   Note: prior plan-doc note that ohlcv_4h.datetime was already
   `+00:00` was empirically wrong (it was naive); migration re-derived
   datetime from `timestamp` for defense in depth.
-- **Cycle 22 (this cycle)**: `ohlcv_1m` migrated to Rule 35
+- **Cycle 23 (this cycle)**: `order_book_snapshots` migrated to
+  Rule 35 via the **first dual-write pilot** in the migration program
+  (Phases 0-4; Phase 5 cleanup deferred to Cycle 23.5 after 24-48h
+  burn-in). 88,894 rows preserved (BTC + ETH); compound PK on
+  `(asset, timestamp)`, dropped `id`, timestamp seconds -> ms with
+  full sub-second precision recovered from the existing `datetime`
+  column (which had always carried microseconds even though the old
+  ts column truncated to seconds). Phase 2 backfill: 87,668 rows
+  via pure-SQL INSERT-SELECT in 7.219s; required a follow-up
+  ROUND-correction UPDATE on 43,596 off-by-1ms rows
+  (SQLite's `julianday * 86400000` lands ~1 ULP below the integer
+  for half of .NNN-precision datetimes; CAST AS INTEGER truncates,
+  ROUND fixes). Phase 4 atomic cutover: 5ms wall-clock.
+  Two pre-existing MCP tool bugs silently fixed by the migration:
+  `get_order_book_range` (returned 0 rows for any sane ms input
+  pre-Cycle-23) and `get_order_book_snapshot` (ABS math was
+  unit-mismatched). Mid-cycle gotcha: cutover RENAME pair invalidated
+  the writer's hardcoded `_v2` table reference, breaking dual-write
+  for ~5 min until the writer was retrofitted with runtime PK-shape
+  introspection. Documented as a load-bearing lesson in the new
+  "Dual-write recipe" section of `docs/SCHEMA_MIGRATION_PLAN.md`,
+  which becomes the durable template for Cycles 24-26.
+- Cycle 22: `ohlcv_1m` migrated to Rule 35
   (compound PK on `(asset, timestamp)`, timestamp seconds -> ms,
   datetime rewritten naive -> ISO `+00:00`; 530,836 rows preserved
   with latest UTC delta 0s); writer in
