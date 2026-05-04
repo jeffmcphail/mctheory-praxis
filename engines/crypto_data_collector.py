@@ -176,6 +176,53 @@ def init_db():
             ON order_book_snapshots(asset, timestamp DESC)
     """)
 
+    # Cycle 23 dual-write target (Rule 35). Created alongside the legacy
+    # table for the dual-write window; will become the live `order_book_snapshots`
+    # at Phase 4 cutover (RENAME pair). Schema differences from legacy:
+    #   * no `id` AUTOINCREMENT; compound `PRIMARY KEY (asset, timestamp)`
+    #   * `timestamp` stored as Binance API ms (no `// 1000` truncation)
+    # Datetime column unchanged (already ISO with microsecond precision).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS order_book_snapshots_v2 (
+            asset TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            datetime TEXT NOT NULL,
+            mid_price REAL NOT NULL,
+            best_bid REAL NOT NULL,
+            best_ask REAL NOT NULL,
+            spread REAL NOT NULL,
+            spread_bps REAL NOT NULL,
+            bid_price_1 REAL, bid_vol_1 REAL,
+            bid_price_2 REAL, bid_vol_2 REAL,
+            bid_price_3 REAL, bid_vol_3 REAL,
+            bid_price_4 REAL, bid_vol_4 REAL,
+            bid_price_5 REAL, bid_vol_5 REAL,
+            bid_price_6 REAL, bid_vol_6 REAL,
+            bid_price_7 REAL, bid_vol_7 REAL,
+            bid_price_8 REAL, bid_vol_8 REAL,
+            bid_price_9 REAL, bid_vol_9 REAL,
+            bid_price_10 REAL, bid_vol_10 REAL,
+            ask_price_1 REAL, ask_vol_1 REAL,
+            ask_price_2 REAL, ask_vol_2 REAL,
+            ask_price_3 REAL, ask_vol_3 REAL,
+            ask_price_4 REAL, ask_vol_4 REAL,
+            ask_price_5 REAL, ask_vol_5 REAL,
+            ask_price_6 REAL, ask_vol_6 REAL,
+            ask_price_7 REAL, ask_vol_7 REAL,
+            ask_price_8 REAL, ask_vol_8 REAL,
+            ask_price_9 REAL, ask_vol_9 REAL,
+            ask_price_10 REAL, ask_vol_10 REAL,
+            bid_volume_top10 REAL NOT NULL,
+            ask_volume_top10 REAL NOT NULL,
+            order_imbalance_top10 REAL NOT NULL,
+            PRIMARY KEY (asset, timestamp)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ob_v2_asset_timestamp
+            ON order_book_snapshots_v2(asset, timestamp DESC)
+    """)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -660,32 +707,50 @@ def collect_order_book_snapshot(asset, exchange, conn):
     bid_flat = [v for b in bids for v in b]
     ask_flat = [v for a in asks for v in a]
 
+    # Cycle 23 dual-write: legacy table gets seconds-truncated ts (preserves
+    # current behavior for any pre-cycle reader); _v2 table gets ms ts directly
+    # (Rule 35; matches the API's native precision and the datetime field's
+    # microsecond tail). Both INSERTs share the same column shape; only the
+    # timestamp value differs. A single conn.commit() makes them atomic.
+    cols_sql = (
+        "asset, timestamp, datetime, mid_price, best_bid, best_ask, "
+        "spread, spread_bps, "
+        "bid_price_1, bid_vol_1, bid_price_2, bid_vol_2, bid_price_3, bid_vol_3, "
+        "bid_price_4, bid_vol_4, bid_price_5, bid_vol_5, bid_price_6, bid_vol_6, "
+        "bid_price_7, bid_vol_7, bid_price_8, bid_vol_8, bid_price_9, bid_vol_9, "
+        "bid_price_10, bid_vol_10, "
+        "ask_price_1, ask_vol_1, ask_price_2, ask_vol_2, ask_price_3, ask_vol_3, "
+        "ask_price_4, ask_vol_4, ask_price_5, ask_vol_5, ask_price_6, ask_vol_6, "
+        "ask_price_7, ask_vol_7, ask_price_8, ask_vol_8, ask_price_9, ask_vol_9, "
+        "ask_price_10, ask_vol_10, "
+        "bid_volume_top10, ask_volume_top10, order_imbalance_top10"
+    )
+    placeholders = ", ".join(["?"] * 51)
+    common_tail = [
+        asset, dt, mid, best_bid, best_ask, spread, spread_bps,
+        *bid_flat, *ask_flat,
+        bid_top10, ask_top10, imbalance,
+    ]
+    legacy_values = [asset, ts_ms // 1000] + common_tail[1:]
+    v2_values = [asset, ts_ms] + common_tail[1:]
+
     try:
         cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR IGNORE INTO order_book_snapshots (
-                asset, timestamp, datetime, mid_price, best_bid, best_ask,
-                spread, spread_bps,
-                bid_price_1, bid_vol_1, bid_price_2, bid_vol_2, bid_price_3, bid_vol_3,
-                bid_price_4, bid_vol_4, bid_price_5, bid_vol_5, bid_price_6, bid_vol_6,
-                bid_price_7, bid_vol_7, bid_price_8, bid_vol_8, bid_price_9, bid_vol_9,
-                bid_price_10, bid_vol_10,
-                ask_price_1, ask_vol_1, ask_price_2, ask_vol_2, ask_price_3, ask_vol_3,
-                ask_price_4, ask_vol_4, ask_price_5, ask_vol_5, ask_price_6, ask_vol_6,
-                ask_price_7, ask_vol_7, ask_price_8, ask_vol_8, ask_price_9, ask_vol_9,
-                ask_price_10, ask_vol_10,
-                bid_volume_top10, ask_volume_top10, order_imbalance_top10
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?)
-        """, [
-            asset, ts_ms // 1000, dt, mid, best_bid, best_ask, spread, spread_bps,
-            *bid_flat, *ask_flat,
-            bid_top10, ask_top10, imbalance
-        ])
+        cursor.execute(
+            f"INSERT OR IGNORE INTO order_book_snapshots ({cols_sql}) "
+            f"VALUES ({placeholders})",
+            legacy_values,
+        )
+        legacy_inserted = cursor.rowcount
+        cursor.execute(
+            f"INSERT OR IGNORE INTO order_book_snapshots_v2 ({cols_sql}) "
+            f"VALUES ({placeholders})",
+            v2_values,
+        )
         conn.commit()
-        return (cursor.rowcount, None)
+        # Report legacy table's rowcount to keep callers' counters
+        # consistent with pre-Cycle-23 behavior.
+        return (legacy_inserted, None)
     except Exception as e:
         return (0, f"insert: {type(e).__name__}: {e}")
 
