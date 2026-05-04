@@ -19,7 +19,9 @@
       "PowerShell(& \".\\\\services\\\\register_all_tasks.ps1\" -DryRun)",
       "PowerShell(& \".\\\\services\\\\register_all_tasks.ps1\" -DryRun -Only \"order_book\",\"crypto_1m\")",
       "PowerShell(& \".\\\\services\\\\register_trades_task.ps1\")",
-      "PowerShell(Start-ScheduledTask *)"
+      "PowerShell(Start-ScheduledTask *)",
+      "Skill(update-config)",
+      "Bash(git push origin master)"
     ]
   }
 }
