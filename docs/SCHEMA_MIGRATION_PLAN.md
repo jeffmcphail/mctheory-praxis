@@ -22,7 +22,7 @@
 | 20 | ohlcv_4h | simple | DONE | ca316e3 |
 | 21 | funding_rates | simple | DONE | b977cd3 |
 | 22 | ohlcv_1m | simple | DONE | 5c1f248 |
-| 23 | order_book_snapshots | dual-write | DONE-PARTIAL | <TBD> |
+| 23 | order_book_snapshots | dual-write | DONE-PARTIAL | 10724bc |
 | 23.5 | order_book_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 24 | live_collector.price_snapshots | dual-write | pending | -- |
 | 25 | smart_money.position_snapshots | dual-write | pending | -- |
@@ -364,7 +364,7 @@ data. If not, decide between (a) truncating in the writer,
   endpoints like `fetch_funding_rate_history` carry reporting
   jitter that requires writer-side truncation.
 
-### #7 -- order_book_snapshots (DONE-PARTIAL, Cycle 23, commit <TBD>)
+### #7 -- order_book_snapshots (DONE-PARTIAL, Cycle 23, commit 10724bc)
 
 - DB: crypto_data.db
 - Rows: 88,894 at cutover (BTC + ETH; growing ~12 rows/min via 10s
