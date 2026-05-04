@@ -21,7 +21,7 @@
 | 19 | market_data | schema-only + collector fix | DONE | 7e73128 |
 | 20 | ohlcv_4h | simple | DONE | ca316e3 |
 | 21 | funding_rates | simple | DONE | b977cd3 |
-| 22 | ohlcv_1m | simple | DONE | <TBD> |
+| 22 | ohlcv_1m | simple | DONE | 5c1f248 |
 | 23 | order_book_snapshots | dual-write | pending | -- |
 | 24 | live_collector.price_snapshots | dual-write | pending | -- |
 | 25 | smart_money.position_snapshots | dual-write | pending | -- |
@@ -177,7 +177,7 @@ data. If not, decide between (a) truncating in the writer,
 (c) accepting duplicates with documentation. For Cycle 21's pattern,
 (a) was correct.
 
-### #6 -- ohlcv_1m (DONE, Cycle 22, commit <TBD>)
+### #6 -- ohlcv_1m (DONE, Cycle 22, commit 5c1f248)
 
 - DB: crypto_data.db
 - Rows: 530,836 at migration time (BTC: 265,419 + ETH: 265,417;
