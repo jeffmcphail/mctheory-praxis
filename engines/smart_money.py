@@ -94,6 +94,29 @@ def init_db():
         )
     """)
 
+    # Cycle 25 dual-write target. Compound PK on the natural key (no
+    # synthetic id), INTEGER ms timestamp, separate TEXT datetime.
+    # Pre-cutover: this is the v2 staging table. Post-cutover: this gets
+    # renamed to `position_snapshots` and the legacy table becomes
+    # `position_snapshots_legacy`.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS position_snapshots_v2 (
+            snapshot_id TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            datetime TEXT NOT NULL,
+            wallet TEXT NOT NULL,
+            market_slug TEXT,
+            market_title TEXT,
+            outcome TEXT,
+            size REAL,
+            avg_price REAL,
+            current_price REAL,
+            value_usd REAL,
+            pnl_usd REAL,
+            PRIMARY KEY (snapshot_id, wallet, market_slug, outcome)
+        )
+    """)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS position_changes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +157,71 @@ def init_db():
 
     conn.commit()
     return conn
+
+
+def _position_snapshots_pre_cutover(conn):
+    """Cycle 25 dual-write helper: introspect which schema is live.
+
+    Returns True if `position_snapshots` still has the legacy `id`
+    column (pre-cutover; v2 is the staging table), False if the cutover
+    has happened (live table is the compound-PK schema; the old table
+    has been renamed to `position_snapshots_legacy`).
+    """
+    return any(
+        c[1] == "id" for c in conn.execute(
+            "PRAGMA table_info(position_snapshots)"
+        ).fetchall()
+    )
+
+
+def _insert_position_pair(conn, pre_cutover, snapshot_id, now_iso,
+                           now_ms, address, slug, title, outcome,
+                           size, avg_price, cur_price, value, pnl):
+    """Cycle 25 dual-write helper: write a single position row to both
+    the legacy (TEXT timestamp) and v2 (ms + datetime) shapes.
+
+    Caller passes `pre_cutover` once per snapshot batch (introspect via
+    `_position_snapshots_pre_cutover`). Both tables are written every
+    call; INSERT OR REPLACE preserves the existing UPSERT semantics on
+    the natural key.
+    """
+    if pre_cutover:
+        # Live = OLD schema (id PK + timestamp TEXT); _v2 = NEW schema.
+        conn.execute("""
+            INSERT OR REPLACE INTO position_snapshots
+            (snapshot_id, timestamp, wallet, market_slug, market_title,
+             outcome, size, avg_price, current_price, value_usd, pnl_usd)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (snapshot_id, now_iso, address, slug, str(title)[:100],
+              outcome, size, avg_price, cur_price, value, pnl))
+        conn.execute("""
+            INSERT OR REPLACE INTO position_snapshots_v2
+            (snapshot_id, timestamp, datetime, wallet, market_slug,
+             market_title, outcome, size, avg_price, current_price,
+             value_usd, pnl_usd)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (snapshot_id, now_ms, now_iso, address, slug,
+              str(title)[:100], outcome, size, avg_price, cur_price,
+              value, pnl))
+    else:
+        # Live = NEW schema (compound PK + ms + datetime);
+        # _legacy = renamed OLD schema.
+        conn.execute("""
+            INSERT OR REPLACE INTO position_snapshots
+            (snapshot_id, timestamp, datetime, wallet, market_slug,
+             market_title, outcome, size, avg_price, current_price,
+             value_usd, pnl_usd)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (snapshot_id, now_ms, now_iso, address, slug,
+              str(title)[:100], outcome, size, avg_price, cur_price,
+              value, pnl))
+        conn.execute("""
+            INSERT OR REPLACE INTO position_snapshots_legacy
+            (snapshot_id, timestamp, wallet, market_slug, market_title,
+             outcome, size, avg_price, current_price, value_usd, pnl_usd)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (snapshot_id, now_iso, address, slug, str(title)[:100],
+              outcome, size, avg_price, cur_price, value, pnl))
 
 
 # ═══════════════════════════════════════════════════════
@@ -333,7 +421,9 @@ def cmd_snapshot(args):
         return
 
     snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    now = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    now_ms = int(time.time() * 1000)
+    pre_cutover = _position_snapshots_pre_cutover(conn)
 
     print(f"\n{'='*90}")
     print(f"  POSITION SNAPSHOT — {snapshot_id}")
@@ -367,15 +457,11 @@ def cmd_snapshot(args):
             if value < MIN_POSITION_USD:
                 continue
 
-            conn.execute("""
-                INSERT OR REPLACE INTO position_snapshots
-                (snapshot_id, timestamp, wallet, market_slug, market_title,
-                 outcome, size, avg_price, current_price, value_usd, pnl_usd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                snapshot_id, now, address, slug, str(title)[:100],
-                outcome, size, avg_price, cur_price, value, pnl,
-            ))
+            _insert_position_pair(
+                conn, pre_cutover, snapshot_id, now_iso, now_ms,
+                address, slug, title, outcome, size, avg_price,
+                cur_price, value, pnl,
+            )
             total_positions += 1
 
         time.sleep(0.3)  # Rate limit
@@ -679,7 +765,9 @@ def cmd_monitor(args):
                 continue
 
             snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            now = datetime.now(timezone.utc).isoformat()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            now_ms = int(time.time() * 1000)
+            pre_cutover = _position_snapshots_pre_cutover(conn)
             total_pos = 0
 
             for address, username in wallets:
@@ -699,16 +787,11 @@ def cmd_monitor(args):
                     if value < MIN_POSITION_USD:
                         continue
 
-                    conn.execute("""
-                        INSERT OR REPLACE INTO position_snapshots
-                        (snapshot_id, timestamp, wallet, market_slug, market_title,
-                         outcome, size, avg_price, current_price, value_usd, pnl_usd)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        snapshot_id, now, address, slug, str(title)[:100],
-                        outcome, size, avg_price, cur_price, value,
-                        (cur_price - avg_price) * size,
-                    ))
+                    _insert_position_pair(
+                        conn, pre_cutover, snapshot_id, now_iso, now_ms,
+                        address, slug, title, outcome, size, avg_price,
+                        cur_price, value, (cur_price - avg_price) * size,
+                    )
                     total_pos += 1
                 time.sleep(0.2)
 
