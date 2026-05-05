@@ -2,7 +2,8 @@
 
 **Brief:** `claude/handoffs/BRIEF_price_snapshots_dual_write.md`
 **Date:** 2026-05-05
-**Duration:** ~<TBD> wall-clock (<TBD> active work + 60-min burn-in)
+**Duration:** ~70 min wall-clock (~10 min Phase 0 + 60-min burn-in
++ ~5 min Phases 2-4 + commits)
 **Status:** DONE-PARTIAL (Phases 0-4 complete; Phase 5 cleanup
 deferred to Cycle 24.5)
 **Predecessor:** Cycle 23 (`ca5c719`, `10724bc`, `5cf1c03`) --
@@ -14,7 +15,7 @@ order_book_snapshots dual-write pilot
 
 **Second use of the dual-write recipe**. Six-phase pattern
 established in Cycle 23 reapplied to `live_collector.price_snapshots`
-(<TBD> rows at cutover, ~50 rows/min via continuous 60s polling of
+(358,715 rows at cutover, ~50 rows/min via continuous 60s polling of
 ~50 active Polymarket markets). Recipe held up cleanly across a new
 DB (sidecar `live_collector.db`), a new writer file
 (`engines/live_collector.py`), and a different process pattern
@@ -23,7 +24,9 @@ DB (sidecar `live_collector.db`), a new writer file
 **Headline result**: schema migrated to Rule 35 (compound PK on
 `(slug, timestamp)`, no `id`, ms timestamps with sub-second precision
 for new rows, ISO `+00:00` `datetime` column derived from
-`timestamp`), all <TBD> rows preserved, atomic cutover in <TBD>s,
+`timestamp`), all 358,715 legacy rows preserved (now in
+`price_snapshots_legacy`) plus 361,961 in the new live
+`price_snapshots`, atomic cutover in 4ms,
 in-process spike detection + ms-aware reader fixes verified working
 post-cutover.
 
@@ -46,7 +49,10 @@ post-cutover.
    indefinitely. File changes do NOT auto-pick-up. The Phase 0
    commit was paired with an explicit kill-and-relaunch step
    (Task Scheduler then relaunches with the new code). Elapsed time
-   from `git push` to confirmed dual-write: <TBD>. This is a
+   from `git push` to confirmed dual-write: ~immediate (Task
+   Scheduler had already picked up the on-disk edits before the
+   remote push landed; first v2 row at 03:04:28 UTC, ~4 min before
+   commit b8fa847 pushed at ~03:08 UTC). This is a
    load-bearing operational detail for Cycles 25-26 -- TODO entry
    added to investigate whether smart_money and trades collectors
    share this pattern before their Briefs are written.
@@ -75,7 +81,7 @@ post-cutover.
 | `dashboards/data_collector.py` | `get_live_collector_stats` MIN/MAX ts -> datetime conversion now uses magnitude-detect (`>1e12 -> ms`). Same pattern as the live_collector stats display. Surfaced during cross-engine audit; not in original Brief but same break pattern as the three Brief-named sites. |
 | `servers/praxis_mcp/server.py` | SIDECAR_DBS `live_collector.price_snapshots.timestamp_format`: `"s"` -> `"ms"`. The Brief implied the autodetect heuristic in `_to_latest_ms` would handle the unit change transparently, but autodetect only runs when format=`"auto"`; explicit `"s"` was hardcoded. Without this change, post-cutover `get_collector_health` would interpret ms as seconds, place `last_sample` in year ~58000, and report `is_stale=true` continuously. Schema comment block (~L65-71) updated to describe the new ms-precision schema. |
 | `docs/SCHEMA_NOTES.md` | `price_snapshots` per-table prose: NONCONFORMING -> CONFORMING (Cycle 24, dual-write). Status table row updated to DONE-PARTIAL. Added the "no precision to recover" note and the four reader fixes. |
-| `docs/SCHEMA_MIGRATION_PLAN.md` | Status row #8 -> DONE-PARTIAL with `<TBD>` hash + new row 24.5 for Phase 5 cleanup. Per-table spec rewritten with full cycle history including performance datapoints, lessons-learned, and the long-lived-process gotcha. Recipe section unchanged -- Cycle 24 surfaced no new gotchas worth durably documenting (the dual-write pattern carried cleanly to a new DB + new writer file). |
+| `docs/SCHEMA_MIGRATION_PLAN.md` | Status row #8 -> DONE-PARTIAL with hash `6ca1796` + new row 24.5 for Phase 5 cleanup. Per-table spec rewritten with full cycle history including performance datapoints, lessons-learned, and the long-lived-process gotcha. Recipe section unchanged -- Cycle 24 surfaced no new gotchas worth durably documenting (the dual-write pattern carried cleanly to a new DB + new writer file). |
 | `claude/TODO.md` | Cycle 24 entry added to "Recently closed" with full execution summary (replacing the prior Cycle 23 "(this cycle)" label which is now just plain "Cycle 23"). Active TODOs: replaced "Migrate `live_collector.price_snapshots`" entry with three new entries -- Cycle 24.5 (Phase 5 cleanup), Cycle 25 (smart_money.position_snapshots, with explicit "investigate long-lived-process pattern before Brief" note), and a spike-DB reader audit follow-up. Plus a `yes_bid`/`yes_ask`/`spread` writer-completion follow-up TODO. |
 
 ### Files Created

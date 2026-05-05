@@ -329,7 +329,7 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   out-of-scope; deferred TODO. Spike-DB export divides ms back to
   seconds at write time to preserve `spike_scanner.db`'s seconds
   contract (audit deferred). Phase 0 commit: `b8fa847`. Phases 2-4
-  commit: <TBD>.
+  commit: `6ca1796`.
 - Cycle 23: `order_book_snapshots` migrated to
   Rule 35 via the **first dual-write pilot** in the migration program
   (Phases 0-4; Phase 5 cleanup deferred to Cycle 23.5 after 24-48h

@@ -24,7 +24,7 @@
 | 22 | ohlcv_1m | simple | DONE | 5c1f248 |
 | 23 | order_book_snapshots | dual-write | DONE-PARTIAL | 10724bc |
 | 23.5 | order_book_snapshots Phase 5 cleanup | code-only | pending | -- |
-| 24 | live_collector.price_snapshots | dual-write | DONE-PARTIAL | <TBD> |
+| 24 | live_collector.price_snapshots | dual-write | DONE-PARTIAL | 6ca1796 |
 | 24.5 | price_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 25 | smart_money.position_snapshots | dual-write | pending | -- |
 | 26 | trades | dual-write | pending | -- |
@@ -412,7 +412,7 @@ data. If not, decide between (a) truncating in the writer,
   the live table's PK shape) or be updated in the same commit as the
   cutover. We chose the runtime-adaptive approach for this cycle.
 
-### #8 -- live_collector.price_snapshots (DONE-PARTIAL, Cycle 24, commit <TBD>)
+### #8 -- live_collector.price_snapshots (DONE-PARTIAL, Cycle 24, commit 6ca1796)
 
 - DB: live_collector.db (sidecar)
 - Rows: 351,615 at Brief-write time (growing ~50/min via continuous
