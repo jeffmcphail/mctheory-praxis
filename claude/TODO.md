@@ -350,7 +350,7 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   verify script tolerates +/-1ms on Check 5. Per Cycle 24.1 process
   notes, AC #17 included a HARD-restart-protocol live-MCP exercise
   step (Chat pastes get_collector_health post-restart). Phase 0
-  commit: `36fb44a`. Phases 2-4 commit: `<TBD>`.
+  commit: `36fb44a`. Phases 2-4 commit: `874bf81`.
 - **Cycle 24.1 (2026-05-05)**: `_to_latest_ms` ms-format sidecar
   hotfix -- closed as **retro-only; no code change required**.
   Brief hypothesized a missing `/1000` divide (or missing `"ms"`

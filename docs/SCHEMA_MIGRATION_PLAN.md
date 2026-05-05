@@ -26,7 +26,7 @@
 | 23.5 | order_book_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 24 | live_collector.price_snapshots | dual-write | DONE-PARTIAL | 6ca1796 |
 | 24.5 | price_snapshots Phase 5 cleanup | code-only | pending | -- |
-| 25 | smart_money.position_snapshots | dual-write | DONE-PARTIAL | <TBD> |
+| 25 | smart_money.position_snapshots | dual-write | DONE-PARTIAL | 874bf81 |
 | 25.5 | position_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 26 | trades | dual-write | pending | -- |
 | 27 | _to_latest_ms cleanup | code-only | pending | -- |
@@ -487,7 +487,7 @@ data. If not, decide between (a) truncating in the writer,
   smart_money.position_snapshots -- TWO writer sites and a
   schema-shape change (no INTEGER timestamp column today).
 
-### #9 -- smart_money.position_snapshots (DONE-PARTIAL, Cycle 25, commit <TBD>)
+### #9 -- smart_money.position_snapshots (DONE-PARTIAL, Cycle 25, commit 874bf81)
 
 - DB: smart_money.db (sidecar)
 - Rows at cutover: 68,812
