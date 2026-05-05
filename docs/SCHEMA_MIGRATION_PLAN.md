@@ -26,7 +26,8 @@
 | 23.5 | order_book_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 24 | live_collector.price_snapshots | dual-write | DONE-PARTIAL | 6ca1796 |
 | 24.5 | price_snapshots Phase 5 cleanup | code-only | pending | -- |
-| 25 | smart_money.position_snapshots | dual-write | pending | -- |
+| 25 | smart_money.position_snapshots | dual-write | DONE-PARTIAL | <TBD> |
+| 25.5 | position_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 26 | trades | dual-write | pending | -- |
 | 27 | _to_latest_ms cleanup | code-only | pending | -- |
 
@@ -96,6 +97,21 @@ gotchas; this section is the durable summary.
    AS INTEGER truncates toward zero, producing off-by-1ms errors.
    Cycle 23 hit this on 43,596 of 87,668 backfilled rows; fix was
    a follow-up UPDATE with ROUND-derived ms.
+
+   **Cycle 25 nuance for microsecond-precision sources** (.NNNNNN
+   datetimes): ROUND now introduces a NEW 1ms disagreement -- it
+   rounds the sub-millisecond microseconds to nearest, while the
+   dual-write writer's `int(time.time() * 1000)` truncates them.
+   Result: ~50% rate of +1ms drift on backfilled rows vs the
+   writer convention (whenever microseconds >= 500us). For tables
+   where readers don't key on `timestamp` (e.g. `position_snapshots`
+   keys on `snapshot_id`), this drift is harmless and the verify
+   script should tolerate +/-1ms. For tables where ms-precision
+   matters, consider TRUNC + small epsilon to lift above ULP
+   underflow without misrounding microseconds; or do a
+   ROUND-correction UPDATE to enforce a single convention. Either
+   choice is defensible; consistency across the recipe matters
+   more than the specific choice.
 4. Idempotent: re-running on a fully-backfilled state inserts zero
    rows.
 5. **Add an index on `(asset, datetime)` on both tables** before
@@ -471,21 +487,71 @@ data. If not, decide between (a) truncating in the writer,
   smart_money.position_snapshots -- TWO writer sites and a
   schema-shape change (no INTEGER timestamp column today).
 
-### #9 -- smart_money.position_snapshots
+### #9 -- smart_money.position_snapshots (DONE-PARTIAL, Cycle 25, commit <TBD>)
 
 - DB: smart_money.db (sidecar)
-- Rows: ~4,140 (growing ~hourly)
-- Writers: `engines/smart_money.py:371` AND `engines/smart_money.py:703`
-  (TWO insert sites; both need updating)
-- Reader: `smart_money_alerts.py`
-- Pattern: **DUAL-WRITE** (current `timestamp` is TEXT ISO, no numeric
-  column; this is a schema-shape change not just a unit change)
-- Schema change: ADD `timestamp INTEGER` column, populate from ISO TEXT
-  parse, make it part of the compound PK alongside whatever currently
-  identifies a position snapshot (likely `(wallet, timestamp, market_slug)`
-  per `docs/SCHEMA_NOTES.md`)
-- Note: the most invasive migration -- two writer sites, TEXT-only
-  timestamp today, schema reshape rather than unit conversion.
+- Rows at cutover: 68,812
+- Writers: `engines/smart_money.py` `cmd_snapshot` (L335-379)
+  and `cmd_monitor` (L681-712); both go through the shared
+  `_insert_position_pair` helper added in Phase 0
+- Pattern: **DUAL-WRITE** (third application of the recipe; first
+  with a TEXT-only source timestamp, requiring a schema-shape change
+  rather than a unit conversion)
+- Schema change actually shipped:
+  - Added `timestamp INTEGER NOT NULL` column with ms-since-epoch
+  - Renamed legacy `timestamp TEXT` column to `datetime`
+  - Promoted the existing `UNIQUE(snapshot_id, wallet, market_slug,
+    outcome)` constraint to a compound PK; dropped the synthetic `id`
+    AUTOINCREMENT
+- ZERO reader fixes required. Cross-engine grep confirmed every
+  reader of `position_snapshots` keys on `snapshot_id`, never on
+  `timestamp` -- huge simplification vs Cycle 24's 4 reader fixes
+- MCP `SIDECAR_DBS["smart_money"]["position_snapshots"]
+  ["timestamp_format"]` flipped from `"iso_text"` to `"ms"` in the
+  Phase 4 commit; schema comment block at server.py:74-79 updated
+- Backfill convention: SQLite julianday/ROUND on the legacy
+  microsecond ISO strings. ROUND of microsecond-precision floats
+  produces ~50% rate of +1ms drift vs Python's
+  `int(... .timestamp() * 1000)` (whenever microsecond fraction is
+  >= 500us). Drift is harmless for this table; verify script
+  tolerates +/-1ms on the round-trip check
+- Phase 1 burn-in window: ONE 6h scheduled cycle (the 20:24 UTC
+  invocation that fired ~6h after Phase 0 commit). 3,436 rows
+  written to both sides of the dual-write; sample inspection
+  confirmed natural-key match, byte-identical `datetime`, and 0 ms
+  drift between Python's TRUNC and the writer's
+  `int(time.time() * 1000)`
+- Phase 2 backfill: 65,376 historical rows in 0.273s wall-clock
+  (Brief budgeted "well under 5 seconds")
+- Phase 4 atomic RENAME pair: 0.009s wall-clock
+- Post-cutover dual-write verified via synthetic helper invocation
+  (instead of waiting for the next 6h scheduled run); single
+  `_insert_position_pair` call wrote to both renamed `_legacy`
+  (TEXT timestamp) and live `position_snapshots` (ms+datetime),
+  then synthetic row deleted from both
+- Process pattern: **PraxisSmartMoney is a 6h scheduled task**
+  (not a long-lived process); the next scheduled invocation picks
+  up the new code automatically. No kill-and-relaunch step needed
+  -- asymmetric vs Cycle 24's PraxisLiveCollector
+- Note: third use of the recipe. Cycle 26 will be `trades` (largest
+  remaining migration; already near-conforming since `timestamp`
+  is already INTEGER ms); needs investigation of whether the trades
+  collector is long-lived or scheduled before drafting the Brief.
+
+### #9.5 -- position_snapshots Phase 5 cleanup (Cycle 25.5)
+
+- Run after 24-48h burn-in confirms the post-cutover dual-write
+  writer is stable
+- Two-task cleanup:
+  1. Modify `engines/smart_money.py` `cmd_snapshot` and `cmd_monitor`
+     to single-write to `position_snapshots` only (drop the
+     `_legacy` INSERT branch and the runtime-introspection helper)
+  2. DROP TABLE `position_snapshots_legacy` (and the empty
+     `position_snapshots_v2` artifact left over from
+     `init_db()`'s idempotent CREATE)
+- Plus standard cleanup: doc updates marking row #9 as DONE
+  (no longer DONE-PARTIAL); retro at
+  `claude/retros/RETRO_position_snapshots_phase5_cleanup.md`
 
 ### #10 -- trades (largest, last)
 

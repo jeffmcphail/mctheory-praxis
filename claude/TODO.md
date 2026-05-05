@@ -49,16 +49,35 @@ Priority-grouped, then domain-grouped within each priority.
   Cycle 24 Phase 0.
   *(Source: Cycle 24 retro; deferred per Rule 35.6 Phase 5 pattern.)*
 
-- **Cycle 25: Migrate `smart_money.position_snapshots` per the
-  dual-write recipe.** Sidecar DB (`data/smart_money.db`).
-  Different writer file (`engines/smart_money.py`); known to have
-  TWO writer sites at lines 371 and 703 (per Cycle 16 audit). No
-  INTEGER timestamp column today (only TEXT ISO datetime), so this
-  is a SCHEMA-SHAPE change (add `timestamp INTEGER`, parse from
-  existing `timestamp TEXT` ISO), not just unit conversion. Investigate
-  before Brief whether smart_money also runs as a long-lived process
-  (per Cycle 24 lesson on the kill-and-relaunch step).
-  *(Source: docs/SCHEMA_MIGRATION_PLAN.md row #9)*
+- **Cycle 25.5: position_snapshots Phase 5 cleanup.** Run after
+  24-48h burn-in confirms the post-cutover dual-write writer is
+  stable. Two-task cleanup:
+  1. Modify `engines/smart_money.py` `cmd_snapshot` and `cmd_monitor`
+     to single-write to `position_snapshots` only (drop the
+     `_legacy` INSERT branch and the `_position_snapshots_pre_cutover`
+     introspection helper). Also drop the `position_snapshots_v2`
+     CREATE statement from `init_db()`.
+  2. DROP TABLE `position_snapshots_legacy` AND DROP TABLE
+     `position_snapshots_v2` (the empty v2 artifact left over from
+     init_db's idempotent CREATE post-cutover).
+  Plus standard cleanup: doc updates marking row #9 as DONE
+  (no longer DONE-PARTIAL), retro at
+  `claude/retros/RETRO_position_snapshots_phase5_cleanup.md`. Note
+  the smart_money task is a 6h scheduled task (not long-lived), so
+  the next scheduled invocation picks up the writer change
+  automatically -- no kill-and-relaunch step needed.
+  *(Source: Cycle 25 retro; deferred per Rule 35.6 Phase 5 pattern.)*
+
+- **Cycle 26: Migrate `trades` per the dual-write recipe.** Largest
+  remaining table (~6.5M rows). Already near-conforming -- `timestamp`
+  is already INTEGER ms; primarily needs PK shape change (likely
+  compound on `(asset, trade_id)`) and the `datetime` cosmetic fix
+  (`Z` suffix -> `+00:00`). **Investigate before Brief**: is the
+  trades collector long-lived (PraxisTradesCollector runs continuously
+  per the migration plan) or scheduled? This affects the
+  kill-and-relaunch decision per Cycle 24.1's process notes. If
+  long-lived, plan the writer-restart step into Phase 0.
+  *(Source: docs/SCHEMA_MIGRATION_PLAN.md row #10)*
 
 - **Spike-DB (data/spike_scanner.db) reader audit.** Cycle 24's
   `cmd_export` in `engines/live_collector.py` divides ms back to
@@ -300,6 +319,38 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   Note: prior plan-doc note that ohlcv_4h.datetime was already
   `+00:00` was empirically wrong (it was naive); migration re-derived
   datetime from `timestamp` for defense in depth.
+- **Cycle 25**: `smart_money.position_snapshots` migrated to
+  Rule 35 via the **third use of the dual-write recipe** (Phases
+  0-4; Phase 5 cleanup deferred to Cycle 25.5 after 24-48h
+  burn-in). 68,812 rows preserved at cutover; compound PK on
+  `(snapshot_id, wallet, market_slug, outcome)` (the natural key,
+  promoted from a UNIQUE constraint), dropped `id`. **First
+  schema-shape migration in the recipe**: the legacy `timestamp
+  TEXT` (microsecond ISO) was renamed to `datetime`, and a NEW
+  `timestamp INTEGER` ms column was added derived via
+  julianday/ROUND. Phase 2 backfill: 65,376 rows via pure-SQL
+  INSERT-SELECT in 0.273s wall-clock (Brief budgeted "well under
+  5s"). Phase 4 atomic cutover: 9ms wall-clock. **ZERO reader
+  fixes required** -- cross-engine grep confirmed every reader
+  keys on `snapshot_id`, never on `timestamp` (huge simplification
+  vs Cycle 24's 4 reader fixes). Both writer sites
+  (`cmd_snapshot` L335-379 and `cmd_monitor` L681-712) refactored
+  through a shared `_insert_position_pair` helper using runtime PK
+  introspection (`_position_snapshots_pre_cutover`). MCP
+  `SIDECAR_DBS["smart_money"]["position_snapshots"]
+  ["timestamp_format"]` flipped `"iso_text"` -> `"ms"` in same
+  Phase 4 commit; schema comment block at server.py:74-79 updated.
+  PraxisSmartMoney is a 6h scheduled task (not long-lived), so the
+  next scheduled invocation picked up the new code automatically;
+  no kill-and-relaunch step. **New recipe nuance documented**:
+  ROUND of microsecond-precision floats in SQLite produces ~50%
+  rate of +1ms drift vs Python's `int(... .timestamp() * 1000)`
+  TRUNC convention (whenever microsecond fraction is >= 500us);
+  drift is harmless for this table where readers key on snapshot_id;
+  verify script tolerates +/-1ms on Check 5. Per Cycle 24.1 process
+  notes, AC #17 included a HARD-restart-protocol live-MCP exercise
+  step (Chat pastes get_collector_health post-restart). Phase 0
+  commit: `36fb44a`. Phases 2-4 commit: `<TBD>`.
 - **Cycle 24.1 (2026-05-05)**: `_to_latest_ms` ms-format sidecar
   hotfix -- closed as **retro-only; no code change required**.
   Brief hypothesized a missing `/1000` divide (or missing `"ms"`

@@ -333,15 +333,32 @@ added it to MCP health.
 - 0 rows; populated only when a wallet's position size changes
   between snapshots.
 
-#### Table: position_snapshots (NONCONFORMING)
+#### Table: position_snapshots (CONFORMING (DONE-PARTIAL) -- Cycle 25)
 
-- Columns: `id` PK, `snapshot_id`, `timestamp` (TEXT ISO with
-  `+00:00`), `wallet`, market info, `size`, `avg_price`,
-  `current_price`, `value_usd`, `pnl_usd`.
-- Conformance gaps: TEXT timestamp -- no INTEGER timestamp column;
-  PK shape (want `(wallet, timestamp, market_slug)`).
-- Migration cycle: TBD. Actively-written every 6h; dual-write
-  pattern.
+- Columns: `snapshot_id`, `timestamp` (INTEGER ms UTC), `datetime`
+  (TEXT ISO with `+00:00`, microsecond), `wallet`, `market_slug`,
+  `market_title`, `outcome`, `size`, `avg_price`, `current_price`,
+  `value_usd`, `pnl_usd`. Compound PK on the natural key
+  `(snapshot_id, wallet, market_slug, outcome)` (no synthetic `id`).
+- Writers: `engines/smart_money.py` `cmd_snapshot` (L335) and
+  `cmd_monitor` (L681). Both go through the
+  `_insert_position_pair` dual-write helper.
+- Schema-shape change: Cycle 25 added the INTEGER `timestamp` column
+  and renamed the legacy TEXT `timestamp` column to `datetime`. The
+  natural key was already a `UNIQUE` constraint on the legacy
+  schema; the migration promoted it to PK and dropped the synthetic
+  `id` AUTOINCREMENT.
+- Backfill convention: SQLite julianday/ROUND on the legacy
+  microsecond ISO strings. ROUND of microsecond-precision floats can
+  produce a +1 ms drift vs Python's `int(... * 1000)` for ~50% of
+  rows (whenever the microsecond fraction is >= 500us). Drift is
+  harmless for this table since readers key on `snapshot_id`, not
+  `timestamp`. Documented in `RETRO_position_snapshots_dual_write.md`.
+- Migration cycle: 25 (dual-write Phases 0-4; Phase 5 cleanup
+  deferred to Cycle 25.5 after 24-48h burn-in).
+- Pre-cutover dual-write writer + post-cutover writer both use
+  runtime PK introspection (`_position_snapshots_pre_cutover`) so
+  the same code path handles both states.
 
 #### Table: tracked_wallets (state, NOT temporal-row)
 
@@ -370,7 +387,7 @@ added it to MCP health.
 | live_collector | tracked_markets | N/A | -- | -- | State, not temporal |
 | smart_money | convergence_signals | EMPTY | -- | -- | Defer until populated |
 | smart_money | position_changes | EMPTY | -- | -- | Defer until populated |
-| smart_money | position_snapshots | NONCONFORMING | TBD | dual-write | Active 6h cadence |
+| smart_money | position_snapshots | **CONFORMING (DONE-PARTIAL)** | **25** | dual-write | Phases 0-4 done; Phase 5 cleanup in Cycle 25.5 |
 | smart_money | tracked_wallets | N/A | -- | -- | State, not temporal |
 
 `docs/SCHEMA_MIGRATION_PLAN.md` carries the ordered roadmap and

@@ -74,9 +74,10 @@ SMART_MONEY_DB_PATH = REPO_ROOT / "data" / "smart_money.db"
 # smart_money / position_snapshots:
 #   PraxisSmartMoney runs every 6h via Task Scheduler (smart_money_service
 #   .bat -> python -m engines.smart_money discover + snapshot). Schema
-#   stores `timestamp` as TEXT in ISO format ("2026-04-29 22:25:24.71",
-#   no tz suffix; treat as UTC). Healthy threshold: 28800s (8h = 6h
-#   cadence + 2h slack for slow snapshot completion).
+#   stores `timestamp` as integer Unix milliseconds (Rule 35; Cycle 25
+#   dual-write migration). The legacy ISO TEXT column was renamed to
+#   `datetime` at cutover. Healthy threshold: 28800s (8h = 6h cadence
+#   + 2h slack for slow snapshot completion).
 SIDECAR_DBS = {
     "live_collector": {
         "path": LIVE_DB_PATH,
@@ -94,7 +95,7 @@ SIDECAR_DBS = {
             "position_snapshots": {
                 "threshold_seconds": 28800,
                 "timestamp_column": "timestamp",
-                "timestamp_format": "iso_text",
+                "timestamp_format": "ms",
             },
         },
     },
