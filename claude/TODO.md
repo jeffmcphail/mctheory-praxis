@@ -300,7 +300,35 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   Note: prior plan-doc note that ohlcv_4h.datetime was already
   `+00:00` was empirically wrong (it was naive); migration re-derived
   datetime from `timestamp` for defense in depth.
-- **Cycle 24 (this cycle)**: `live_collector.price_snapshots`
+- **Cycle 24.1 (2026-05-05)**: `_to_latest_ms` ms-format sidecar
+  hotfix -- closed as **retro-only; no code change required**.
+  Brief hypothesized a missing `/1000` divide (or missing `"ms"`
+  branch) inside the sidecar staleness helper, producing a
+  year-58000 OSError(22) on Windows reachable through
+  `get_collector_health.databases.live_collector`. Diagnosis: the
+  on-disk `_to_latest_ms` at `servers/praxis_mcp/tools/meta.py:
+  481-544` already had a correct `"ms"` branch returning
+  `int(latest)` directly (no `datetime.fromtimestamp` call on
+  numeric input, so the OSError path is unreachable from on-disk
+  code). Real root cause: a stale FastMCP stdio subprocess holding
+  the pre-Cycle-24 `SIDECAR_DBS` config and module state in memory;
+  the subprocess survived a normal close-and-reopen of Claude
+  Desktop and was only fully cleared by ending the python.exe MCP
+  children via Task Manager (a "hard" restart). Post-hard-restart
+  verification at 12:20 UTC: `price_snapshots` reports
+  `row_count=374,755`, `latest=2026-05-05T12:19:48.522Z`,
+  `is_stale=false`, `staleness_seconds=37`. Two durable process
+  notes captured in the retro for Cycles 25-26: (a) future
+  dual-write Briefs must include a live-MCP exercise AC where Chat
+  pastes the post-restart `get_collector_health` response, since
+  Cycle 24's AC #20 was claimed-but-not-actually-verified by the
+  same tautology pattern; (b) "restart Claude Desktop" is
+  ambiguous -- replace with "hard restart via Task Manager / End
+  Process on python.exe MCP subprocesses" or, at minimum, verify
+  via `Get-Process python` that the subprocesses are gone before
+  re-exercising. Retro at
+  `claude/retros/RETRO_to_latest_ms_hotfix.md`.
+- **Cycle 24**: `live_collector.price_snapshots`
   migrated to Rule 35 via the **second use of the dual-write recipe**
   established in Cycle 23 (Phases 0-4; Phase 5 cleanup deferred to
   Cycle 24.5 after 24-48h burn-in). 358,715 rows preserved at cutover;
