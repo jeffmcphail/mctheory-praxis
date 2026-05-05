@@ -204,9 +204,13 @@ def get_recent_spikes(conn_live, threshold=SPIKE_THRESHOLD_PCT,
 
     Returns list of spike dicts with market info.
     """
-    now = int(time.time())
-    window_start = now - (window_mins * 60)
-    lookback = now - (TRIGGER_COOLDOWN_MINS * 60)
+    # Cycle 24: live_collector.price_snapshots.timestamp migrated from
+    # integer seconds to integer milliseconds. The window comparison
+    # below must match the column units. `lookback` is currently unused
+    # but shifted to ms for consistency.
+    now = int(time.time() * 1000)
+    window_start = now - (window_mins * 60 * 1000)
+    lookback = now - (TRIGGER_COOLDOWN_MINS * 60 * 1000)
 
     # Get all active markets with recent price data
     markets = conn_live.execute("""

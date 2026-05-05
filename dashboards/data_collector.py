@@ -164,8 +164,14 @@ def get_live_collector_stats():
     last_ts = safe_db_scalar(LIVE_DB, "SELECT MAX(timestamp) FROM price_snapshots")
 
     if first_ts and last_ts and first_ts > 0:
-        stats["first_sample"] = datetime.fromtimestamp(first_ts, tz=timezone.utc)
-        stats["last_sample"] = datetime.fromtimestamp(last_ts, tz=timezone.utc)
+        # Cycle 24: live_collector.price_snapshots.timestamp migrated from
+        # integer seconds to integer milliseconds. Detect by magnitude
+        # (>1e12 -> ms) so the dashboard renders correctly during both the
+        # dual-write phase (live=sec) and post-cutover (live=ms).
+        first_s = first_ts / 1000 if first_ts > 1e12 else first_ts
+        last_s = last_ts / 1000 if last_ts > 1e12 else last_ts
+        stats["first_sample"] = datetime.fromtimestamp(first_s, tz=timezone.utc)
+        stats["last_sample"] = datetime.fromtimestamp(last_s, tz=timezone.utc)
         stats["duration"] = stats["last_sample"] - stats["first_sample"]
         stats["samples_per_hour"] = stats["total_snapshots"] / max(
             stats["duration"].total_seconds() / 3600, 0.01)

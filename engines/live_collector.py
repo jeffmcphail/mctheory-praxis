@@ -79,6 +79,22 @@ def init_db():
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS price_snapshots_v2 (
+            slug TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            datetime TEXT NOT NULL,
+            yes_mid REAL,
+            yes_bid REAL,
+            yes_ask REAL,
+            spread REAL,
+            PRIMARY KEY (slug, timestamp)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_psv2_slug_ts "
+        "ON price_snapshots_v2(slug, timestamp DESC)"
+    )
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS collection_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT,
@@ -261,8 +277,8 @@ def refresh_market_list(conn, top_n=DEFAULT_TOP_N, verbose=True):
 
 def check_for_spikes(conn, slug, question, event_type, window_mins=60, threshold_pct=8.0):
     """Check if a market has spiked recently. Returns spike dict or None."""
-    now = int(time.time())
-    window_start = now - (window_mins * 60)
+    now = int(time.time() * 1000)
+    window_start = now - (window_mins * 60 * 1000)
 
     prices = conn.execute("""
         SELECT timestamp, yes_mid FROM price_snapshots
@@ -303,7 +319,16 @@ def sample_all_markets(conn, verbose=False):
         FROM tracked_markets WHERE active=1
     """).fetchall()
 
-    now = int(time.time())
+    # Runtime PK introspection: pre-cutover the live `price_snapshots` has
+    # an `id` column (legacy AUTOINCREMENT PK); post-cutover it has a
+    # compound (slug, timestamp) PK and no `id`. Same single PRAGMA
+    # pattern as Cycle 23's order_book_snapshots dual-write.
+    pre_cutover = any(
+        c[1] == "id" for c in conn.execute(
+            "PRAGMA table_info(price_snapshots)"
+        ).fetchall()
+    )
+
     samples = 0
     errors = 0
     spikes = []
@@ -315,11 +340,33 @@ def sample_all_markets(conn, verbose=False):
         try:
             mid = get_clob_midpoint(yes_token)
             if mid > 0:
-                conn.execute("""
-                    INSERT OR IGNORE INTO price_snapshots
-                    (slug, timestamp, yes_mid)
-                    VALUES (?, ?, ?)
-                """, (slug, now, mid))
+                now_sec = int(time.time())
+                now_ms = int(time.time() * 1000)
+                dt = datetime.fromtimestamp(
+                    now_ms / 1000, tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                if pre_cutover:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO price_snapshots
+                        (slug, timestamp, yes_mid)
+                        VALUES (?, ?, ?)
+                    """, (slug, now_sec, mid))
+                    conn.execute("""
+                        INSERT OR IGNORE INTO price_snapshots_v2
+                        (slug, timestamp, datetime, yes_mid)
+                        VALUES (?, ?, ?, ?)
+                    """, (slug, now_ms, dt, mid))
+                else:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO price_snapshots
+                        (slug, timestamp, datetime, yes_mid)
+                        VALUES (?, ?, ?, ?)
+                    """, (slug, now_ms, dt, mid))
+                    conn.execute("""
+                        INSERT OR IGNORE INTO price_snapshots_legacy
+                        (slug, timestamp, yes_mid)
+                        VALUES (?, ?, ?)
+                    """, (slug, now_sec, mid))
                 samples += 1
 
                 # Check for spikes
@@ -478,8 +525,14 @@ def cmd_stats(args):
         first = conn.execute("SELECT MIN(timestamp) FROM price_snapshots").fetchone()[0]
         last = conn.execute("SELECT MAX(timestamp) FROM price_snapshots").fetchone()[0]
         if first and last:
-            first_dt = datetime.fromtimestamp(first, tz=timezone.utc)
-            last_dt = datetime.fromtimestamp(last, tz=timezone.utc)
+            # Pre-cutover the live table is seconds (legacy schema); post-
+            # cutover it is milliseconds. Detect by magnitude: ms timestamps
+            # are >1e12, seconds are ~1e9. Same heuristic as the MCP's
+            # _to_latest_ms autodetect mode.
+            first_s = first / 1000 if first > 1e12 else first
+            last_s = last / 1000 if last > 1e12 else last
+            first_dt = datetime.fromtimestamp(first_s, tz=timezone.utc)
+            last_dt = datetime.fromtimestamp(last_s, tz=timezone.utc)
             duration = last_dt - first_dt
             print(f"  Collection period:      {first_dt.strftime('%Y-%m-%d %H:%M')} -> "
                   f"{last_dt.strftime('%Y-%m-%d %H:%M')}")
@@ -542,12 +595,19 @@ def cmd_export(args):
         JOIN tracked_markets tm ON ps.slug = tm.slug
     """).fetchall()
 
+    # spike_scanner.db's price_history.timestamp is intentionally seconds
+    # for compatibility with other readers of that DB (TODO: audit
+    # spike_db readers and decide whether to migrate it in a future cycle).
+    # Pre-cutover the live timestamps are still seconds; post-cutover they
+    # are ms. Detect by magnitude (>1e12 -> ms) and convert ms back to s
+    # at export time so the spike DB contract is preserved.
     exported = 0
     for slug, ts, price in snapshots:
         try:
+            ts_s = ts // 1000 if ts and ts > 1e12 else ts
             spike_conn.execute(
                 "INSERT OR IGNORE INTO price_history (slug, timestamp, price) VALUES (?, ?, ?)",
-                (slug, ts, price))
+                (slug, ts_s, price))
             exported += 1
         except Exception:
             pass
