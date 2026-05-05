@@ -258,13 +258,46 @@ MCP health monitoring as a sidecar.
 - Internal log of collector runs.
 - Migration cycle: TBD.
 
-#### Table: price_snapshots (NONCONFORMING)
+#### Table: price_snapshots (CONFORMING -- Cycle 24, dual-write)
 
-- Columns: `id` PK, `slug` (TEXT NOT NULL), `timestamp` (INTEGER
-  **seconds** UTC), `yes_mid`, `yes_bid`, `yes_ask`, `spread`.
-- Conformance gaps: timestamp units (sec, want ms); PK shape (want
-  `(slug, timestamp)`).
-- Migration cycle: TBD. Actively-written; dual-write pattern.
+- Columns: `slug` (TEXT NOT NULL), `timestamp` (INTEGER **ms** UTC,
+  full sub-second precision for post-Cycle-24 rows;
+  `legacy_ts * 1000` aligned for backfilled rows -- see precision note
+  below), `datetime` (TEXT ISO `YYYY-MM-DDTHH:MM:SS+00:00`, derived),
+  `yes_mid`, `yes_bid`, `yes_ask`, `spread`. PK: `(slug, timestamp)`.
+- Writer: `engines/live_collector.py` `sample_all_markets`
+- Scheduled task: `PraxisLiveCollector` (continuous long-lived
+  process; ~50 markets polled every 60s).
+- 358,715 rows at cutover (legacy live -> renamed); 361,961 rows
+  in new live (`_v2`-renamed; includes the dual-write era's
+  sub-second-ms rows in addition to backfilled sec-aligned rows).
+- Second dual-write cycle in the migration program (Phases 0-4 done;
+  Phase 5 cleanup deferred to Cycle 24.5 after 24-48h burn-in).
+- **Precision note (differs from order_book_snapshots)**: pre-
+  Cycle-24 the source had no sub-second precision -- only an
+  integer-seconds `timestamp` column; no `datetime` column existed.
+  The migration is therefore a clean `legacy_ts * 1000` multiply (no
+  julianday/ROUND), and `datetime` is a new column derived in pure
+  SQL via `strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp,
+  'unixepoch')` for backfilled rows. Sub-second precision is GAINED
+  (not RECOVERED) from Cycle 24 forward; backfilled rows have `.000`
+  ms.
+- **Reserved-but-unwritten columns**: `yes_bid`, `yes_ask`, `spread`
+  are present in the schema but the live writer only populates
+  `yes_mid` (pre-existing behavior preserved across the migration;
+  separate follow-up TODO).
+- **Dual-write window writer** (in effect until Cycle 24.5): same
+  PK-shape introspection pattern as Cycle 23. Pre-cutover writes
+  seconds to live + ms to `_v2`; post-cutover writes ms to live +
+  seconds to `_legacy`. Single PRAGMA per cycle.
+- **Reader fixes shipped atomically with Phase 0** (per Brief, must
+  not split): `engines/live_collector.py` `check_for_spikes`
+  (in-process; runs every cycle) shifted to ms units;
+  `engines/mev_executor.py` `get_recent_spikes` shifted to ms;
+  stats display + dashboard panel use magnitude-detect
+  (`>1e12 -> ms`) so they render correctly during dual-write and
+  post-cutover; `cmd_export` to spike_scanner.db converts ms back to
+  seconds at export time to preserve the spike DB contract.
 
 #### Table: spike_alerts (EMPTY)
 
@@ -332,7 +365,7 @@ added it to MCP health.
 | crypto_data | order_book_snapshots | **CONFORMING (DONE-PARTIAL)** | **23** | dual-write | Phases 0-4 done; Phase 5 cleanup in Cycle 23.5 |
 | crypto_data | trades | NEAR-CONFORMING | TBD | dual-write | timestamp already ms |
 | live_collector | collection_log | NONCONFORMING | TBD | dual-write | TEXT timestamp |
-| live_collector | price_snapshots | NONCONFORMING | TBD | dual-write | Active 60s cadence |
+| live_collector | price_snapshots | **CONFORMING (DONE-PARTIAL)** | **24** | dual-write | Phases 0-4 done; Phase 5 cleanup in Cycle 24.5 |
 | live_collector | spike_alerts | EMPTY | -- | -- | Defer until populated |
 | live_collector | tracked_markets | N/A | -- | -- | State, not temporal |
 | smart_money | convergence_signals | EMPTY | -- | -- | Defer until populated |

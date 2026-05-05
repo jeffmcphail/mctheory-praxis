@@ -31,15 +31,50 @@ Priority-grouped, then domain-grouped within each priority.
   `claude/retros/RETRO_order_book_phase5_cleanup.md`.
   *(Source: Cycle 23 retro; deferred per Rule 35.6 Phase 5 pattern.)*
 
-- **Cycle 24: Migrate `live_collector.price_snapshots` per the
-  dual-write recipe established in Cycle 23.** Sidecar DB
-  (`data/live_collector.db`) -- new wrinkle: writer is in
-  `engines/live_collector.py`, not `crypto_data_collector.py`.
-  ~52k rows, growing ~50/min (continuous polling). Schema change:
-  ADD `datetime` column with `+00:00` (currently no datetime column
-  at all), convert timestamp seconds -> ms. Use the Cycle 23 retro's
-  lessons-learned section as the operational checklist.
-  *(Source: docs/SCHEMA_MIGRATION_PLAN.md row #8)*
+- **Cycle 24.5: price_snapshots Phase 5 cleanup.** Run after 24-48h
+  burn-in confirms the post-cutover dual-write writer is stable.
+  Two-task cleanup:
+  1. Modify `engines/live_collector.py` `sample_all_markets` to
+     single-write to `price_snapshots` only (drop the `_legacy`
+     INSERT and the runtime PK-introspection branch added in
+     Cycle 24). Could also collapse the `>1e12 -> ms` magnitude
+     branches in stats display + dashboard once legacy is gone, but
+     keep them for safety.
+  2. DROP TABLE `price_snapshots_legacy`.
+  Plus standard cleanup: doc updates marking row #8 as DONE
+  (no longer DONE-PARTIAL), retro at
+  `claude/retros/RETRO_price_snapshots_phase5_cleanup.md`. Note
+  that the live_collector process is long-lived and won't pick up
+  the writer change until killed -- same kill-and-relaunch step as
+  Cycle 24 Phase 0.
+  *(Source: Cycle 24 retro; deferred per Rule 35.6 Phase 5 pattern.)*
+
+- **Cycle 25: Migrate `smart_money.position_snapshots` per the
+  dual-write recipe.** Sidecar DB (`data/smart_money.db`).
+  Different writer file (`engines/smart_money.py`); known to have
+  TWO writer sites at lines 371 and 703 (per Cycle 16 audit). No
+  INTEGER timestamp column today (only TEXT ISO datetime), so this
+  is a SCHEMA-SHAPE change (add `timestamp INTEGER`, parse from
+  existing `timestamp TEXT` ISO), not just unit conversion. Investigate
+  before Brief whether smart_money also runs as a long-lived process
+  (per Cycle 24 lesson on the kill-and-relaunch step).
+  *(Source: docs/SCHEMA_MIGRATION_PLAN.md row #9)*
+
+- **Spike-DB (data/spike_scanner.db) reader audit.** Cycle 24's
+  `cmd_export` in `engines/live_collector.py` divides ms back to
+  seconds at export to preserve the spike DB's seconds contract.
+  Audit other readers/writers of `spike_scanner.db.price_history`
+  and decide whether to migrate that DB to ms in a future cycle.
+  *(Source: Cycle 24 retro)*
+
+- **`engines/live_collector.py` `yes_bid`/`yes_ask`/`spread` writer
+  completion.** The `price_snapshots` schema reserves these columns
+  but the writer only populates `yes_mid`. Pre-existing incomplete
+  writer; preserved across Cycle 24's migration unchanged. Either
+  populate them from `get_clob_prices` (already implemented but
+  unused in `sample_all_markets`) or formally drop them from the
+  schema in a future cycle.
+  *(Source: Cycle 24 retro)*
 
 - **Run `services/register_market_data_task.ps1` from elevated
   PowerShell** (one-shot admin step). Files in place; manual first-run
@@ -265,7 +300,37 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   Note: prior plan-doc note that ohlcv_4h.datetime was already
   `+00:00` was empirically wrong (it was naive); migration re-derived
   datetime from `timestamp` for defense in depth.
-- **Cycle 23 (this cycle)**: `order_book_snapshots` migrated to
+- **Cycle 24 (this cycle)**: `live_collector.price_snapshots`
+  migrated to Rule 35 via the **second use of the dual-write recipe**
+  established in Cycle 23 (Phases 0-4; Phase 5 cleanup deferred to
+  Cycle 24.5 after 24-48h burn-in). 358,715 rows preserved at cutover;
+  compound PK on `(slug, timestamp)`, dropped `id`, timestamp seconds
+  -> ms via clean `legacy_ts * 1000` multiply (no julianday/ROUND --
+  legacy data had no sub-second precision to recover). NEW `datetime
+  TEXT` column derived from `timestamp` via SQLite
+  `strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp, 'unixepoch')` for
+  backfill. Phase 2 backfill: 358,661 rows via pure-SQL INSERT-SELECT
+  in 2.243s wall-clock (Brief budgeted ~30s; integer multiply beats
+  Cycle 23's julianday/ROUND by ~3x even with 4x rows). Phase 4
+  atomic cutover: 4ms wall-clock. **Long-lived-process gotcha**:
+  PraxisLiveCollector launches python once and runs indefinitely;
+  file changes do NOT auto-pick-up (different from
+  PraxisOrderBookCollector's hourly restart pattern). Phase 0 commit
+  was paired with an explicit kill-and-relaunch step. Three Brief-
+  named reader fixes shipped atomically with the writer change in
+  Phase 0 (`check_for_spikes` in-process, `mev_executor.py` window
+  query, stats display); a fourth (`dashboards/data_collector.py`)
+  surfaced during the cross-engine audit and was added to the same
+  commit. Plus a fifth touch point caught at Phase 4: MCP
+  `SIDECAR_DBS.price_snapshots.timestamp_format` was hardcoded `"s"`
+  (Brief implied autodetect would handle it); changed to `"ms"` in
+  the cutover commit. Pre-existing incomplete writer
+  (`yes_bid`/`yes_ask`/`spread` reserved but unwritten) preserved as
+  out-of-scope; deferred TODO. Spike-DB export divides ms back to
+  seconds at write time to preserve `spike_scanner.db`'s seconds
+  contract (audit deferred). Phase 0 commit: `b8fa847`. Phases 2-4
+  commit: <TBD>.
+- Cycle 23: `order_book_snapshots` migrated to
   Rule 35 via the **first dual-write pilot** in the migration program
   (Phases 0-4; Phase 5 cleanup deferred to Cycle 23.5 after 24-48h
   burn-in). 88,894 rows preserved (BTC + ETH); compound PK on

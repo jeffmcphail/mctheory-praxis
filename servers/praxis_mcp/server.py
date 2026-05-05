@@ -66,9 +66,10 @@ SMART_MONEY_DB_PATH = REPO_ROOT / "data" / "smart_money.db"
 #   PraxisLiveCollector samples top 50 Polymarket markets every 60s in a
 #   continuous loop (live_collector_service.bat -> python -m
 #   engines.live_collector start --top 50 --interval 60). Schema stores
-#   `timestamp` as integer Unix seconds. Healthy threshold: 180s (3x
-#   cadence). Anything older means the loop crashed or the auto-restart
-#   hit the 30s back-off and is mid-cycle.
+#   `timestamp` as integer Unix milliseconds (Rule 35; Cycle 24 dual-write
+#   migration). Healthy threshold: 180s (3x cadence). Anything older
+#   means the loop crashed or the auto-restart hit the 30s back-off and
+#   is mid-cycle.
 #
 # smart_money / position_snapshots:
 #   PraxisSmartMoney runs every 6h via Task Scheduler (smart_money_service
@@ -83,7 +84,7 @@ SIDECAR_DBS = {
             "price_snapshots": {
                 "threshold_seconds": 180,
                 "timestamp_column": "timestamp",
-                "timestamp_format": "s",
+                "timestamp_format": "ms",
             },
         },
     },

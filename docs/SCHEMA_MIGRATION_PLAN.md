@@ -24,7 +24,8 @@
 | 22 | ohlcv_1m | simple | DONE | 5c1f248 |
 | 23 | order_book_snapshots | dual-write | DONE-PARTIAL | 10724bc |
 | 23.5 | order_book_snapshots Phase 5 cleanup | code-only | pending | -- |
-| 24 | live_collector.price_snapshots | dual-write | pending | -- |
+| 24 | live_collector.price_snapshots | dual-write | DONE-PARTIAL | <TBD> |
+| 24.5 | price_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 25 | smart_money.position_snapshots | dual-write | pending | -- |
 | 26 | trades | dual-write | pending | -- |
 | 27 | _to_latest_ms cleanup | code-only | pending | -- |
@@ -411,18 +412,64 @@ data. If not, decide between (a) truncating in the writer,
   the live table's PK shape) or be updated in the same commit as the
   cutover. We chose the runtime-adaptive approach for this cycle.
 
-### #8 -- live_collector.price_snapshots
+### #8 -- live_collector.price_snapshots (DONE-PARTIAL, Cycle 24, commit <TBD>)
 
 - DB: live_collector.db (sidecar)
-- Rows: ~52,600 (growing ~50/min)
-- Writer: `engines/live_collector.py:319`, scheduled as
-  PraxisLiveCollector running continuously
-- Reader: convergence detection
-- Pattern: **DUAL-WRITE** (proven in #7 first)
-- Schema change: convert timestamp seconds -> ms; ADD `datetime` column
-  with `+00:00` (currently no datetime column at all)
-- Note: this is the live-collector sidecar; migration touches the
-  sidecar DB independently per the Cycle 16 meta-docs convention.
+- Rows: 351,615 at Brief-write time (growing ~50/min via continuous
+  60s polling of ~50 active Polymarket markets)
+- Writer: `engines/live_collector.py` `sample_all_markets`,
+  scheduled as PraxisLiveCollector (continuous long-lived process;
+  no hourly restart -- different from PraxisOrderBookCollector's
+  hourly invocation pattern)
+- Readers (FOUR raw-SQL readers found via cross-engine audit; the
+  Brief named three):
+  - `engines/live_collector.py:264` `check_for_spikes` -- in-process,
+    runs every collector cycle; ms shift atomic with writer (Brief)
+  - `engines/mev_executor.py:207-209` `get_recent_spikes` -- separate
+    process, ms shift in same Phase 0 commit (Brief)
+  - `engines/live_collector.py:484` stats display -- magnitude-detect
+    (`>1e12 -> ms`) so it renders correctly during dual-write and
+    post-cutover (Brief)
+  - `dashboards/data_collector.py:163-168` -- same pattern as the
+    stats display; surfaced during the cross-engine audit and added
+    to the Phase 0 commit. Not in the original Brief.
+- Pattern: **DUAL-WRITE** (second use of the recipe; first was #7)
+- Schema change: convert timestamp seconds -> ms (clean
+  `legacy_ts * 1000` multiply, no julianday/ROUND -- legacy data has
+  NO sub-second precision to recover); compound PK on
+  `(slug, timestamp)`, drop `id`; ADD `datetime TEXT NOT NULL`
+  derived from `timestamp` via SQLite
+  `strftime('%Y-%m-%dT%H:%M:%S+00:00', timestamp, 'unixepoch')` for
+  backfill, Python-side `datetime.fromtimestamp(ms/1000,
+  tz=timezone.utc).strftime(...)` for new writes.
+- **Precision note**: unlike Cycle 23 where Binance carried ms
+  precision in `datetime` even when the legacy `timestamp` was
+  truncated to seconds, this cycle has no historical sub-second info
+  at all. Backfilled rows are `.000`-aligned ms. The new writer
+  captures fresh `time.time()` per insert so post-Cycle-24 rows have
+  true sub-second precision (verified empirically in Phase 1).
+- **Long-lived-process gotcha**: PraxisLiveCollector launches Python
+  once and runs indefinitely; file changes do NOT auto-pick-up. The
+  Phase 0 commit was paired with an explicit "kill the process so
+  Task Scheduler relaunches it" step. v2 row growth confirmed
+  almost immediately (first v2 row at 03:04:28 UTC; Task Scheduler
+  had picked up the edits from disk before the remote commit
+  landed). Documented in retro for Cycles 25-26 reference.
+- **Reserved-but-unwritten columns** (`yes_bid`, `yes_ask`, `spread`)
+  preserved across the migration -- pre-existing incomplete writer;
+  separate follow-up TODO.
+- **Spike-DB export contract**: `cmd_export` copies rows to
+  `spike_scanner.db.price_history` whose `timestamp` was historically
+  seconds. The export function divides ms by 1000 at export time so
+  the spike DB contract is preserved. Audit of spike_scanner.db
+  readers and decision whether to migrate it queued as a TODO.
+- Performance datapoints:
+  - Phase 2 backfill (358,661 rows, pure-SQL INSERT-SELECT with
+    `legacy_ts * 1000`): 2.243s wall-clock (Brief budgeted ~30s)
+  - Phase 4 atomic RENAME pair: 0.004s wall-clock
+- Note: second time the recipe has been applied. Cycle 25 will be
+  smart_money.position_snapshots -- TWO writer sites and a
+  schema-shape change (no INTEGER timestamp column today).
 
 ### #9 -- smart_money.position_snapshots
 
