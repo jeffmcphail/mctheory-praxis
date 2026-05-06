@@ -249,7 +249,8 @@ final scoreboard and per-cycle details.
   --assets BTC ETH` inserted exactly 2,000 rows (1,000 per asset),
   growing 8,830,907 -> 8,832,907; latest advanced to
   2026-05-06T22:24:49 UTC. **Closes the migration program**:
-  10/10 tables conforming. Commit: `<CYCLE_26_HASH>`.
+  10/10 tables conforming. Commits: `a1c1638` (step 1 init_db)
+  + `39720bb` (step 2 rebuild + doc trio).
 
 Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
 

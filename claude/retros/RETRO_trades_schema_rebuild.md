@@ -141,7 +141,7 @@ healthy.
   approach.
 - `docs/SCHEMA_MIGRATION_PLAN.md`: row #10 (trades) updated from
   `NEAR-CONFORMING | TBD | dual-write | timestamp already ms`
-  to `CONFORMING | 26 | one-shot rebuild | <CYCLE_26_HASH>`.
+  to `CONFORMING | 26 | one-shot rebuild | 39720bb`.
   Per-cycle prose section #10 written from scratch (this is the
   first one-shot rebuild in the program).
 - `claude/TODO.md`: Cycle 26 added to "Recently closed".

@@ -28,7 +28,7 @@
 | 24.5 | price_snapshots Phase 5 cleanup | code-only | DONE | `1016ea5` |
 | 25 | smart_money.position_snapshots | dual-write | DONE | `9339221` |
 | 25.5 | position_snapshots Phase 5 cleanup | code-only | DONE | `9339221` |
-| 26 | trades | one-shot rebuild | DONE | `<CYCLE_26_HASH>` |
+| 26 | trades | one-shot rebuild | DONE | `39720bb` |
 | 27 | _to_latest_ms cleanup | code-only | pending | -- |
 
 Order rationale: small / re-fetchable / batch-cadence tables migrate
@@ -584,7 +584,7 @@ Executed in Cycle 25.5 (see #9 above for the full Phase 5
 write-up). Doc trio updated to mark #9 DONE; retro at
 `claude/retros/RETRO_position_snapshots_phase5_cleanup.md`.
 
-### #10 -- trades (DONE, Cycle 26, commit `<CYCLE_26_HASH>`)
+### #10 -- trades (DONE, Cycle 26, commits `a1c1638` (init_db) + `39720bb` (rebuild + doc trio))
 
 - DB: crypto_data.db
 - Rows: 8,830,907 at rebuild time (preserved 1:1 across the
