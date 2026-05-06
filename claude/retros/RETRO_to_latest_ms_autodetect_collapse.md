@@ -67,7 +67,7 @@ Clean.
 
 ### Step 3: Commit + push
 
-Commit `<CYCLE_27_HASH>` on origin/master.
+Commit `5d1162f` on origin/master.
 
 ### Step 4: Verification
 
