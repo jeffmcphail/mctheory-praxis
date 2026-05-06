@@ -253,7 +253,7 @@ MCP health monitoring as a sidecar.
 - Internal log of collector runs.
 - Migration cycle: TBD.
 
-#### Table: price_snapshots (CONFORMING -- Cycle 24, dual-write)
+#### Table: price_snapshots (CONFORMING -- Cycles 24 + 24.5, dual-write)
 
 - Columns: `slug` (TEXT NOT NULL), `timestamp` (INTEGER **ms** UTC,
   full sub-second precision for post-Cycle-24 rows;
@@ -266,8 +266,10 @@ MCP health monitoring as a sidecar.
 - 358,715 rows at cutover (legacy live -> renamed); 361,961 rows
   in new live (`_v2`-renamed; includes the dual-write era's
   sub-second-ms rows in addition to backfilled sec-aligned rows).
-- Second dual-write cycle in the migration program (Phases 0-4 done;
-  Phase 5 cleanup deferred to Cycle 24.5 after 24-48h burn-in).
+- **Second dual-write cycle in the migration program**. Phases 0-4
+  executed in Cycle 24; Phase 5 (drop `_legacy`, single-write
+  collapse, drop `_v2` CREATE in `init_db()`) executed in
+  Cycle 24.5 after ~30h burn-in.
 - **Precision note (differs from order_book_snapshots)**: pre-
   Cycle-24 the source had no sub-second precision -- only an
   integer-seconds `timestamp` column; no `datetime` column existed.
@@ -281,10 +283,6 @@ MCP health monitoring as a sidecar.
   are present in the schema but the live writer only populates
   `yes_mid` (pre-existing behavior preserved across the migration;
   separate follow-up TODO).
-- **Dual-write window writer** (in effect until Cycle 24.5): same
-  PK-shape introspection pattern as Cycle 23. Pre-cutover writes
-  seconds to live + ms to `_v2`; post-cutover writes ms to live +
-  seconds to `_legacy`. Single PRAGMA per cycle.
 - **Reader fixes shipped atomically with Phase 0** (per Brief, must
   not split): `engines/live_collector.py` `check_for_spikes`
   (in-process; runs every cycle) shifted to ms units;
@@ -377,7 +375,7 @@ added it to MCP health.
 | crypto_data | order_book_snapshots | **CONFORMING** | **23 + 23.5** | dual-write | Phases 0-4 in 23; Phase 5 cleanup done in 23.5 |
 | crypto_data | trades | NEAR-CONFORMING | TBD | dual-write | timestamp already ms |
 | live_collector | collection_log | NONCONFORMING | TBD | dual-write | TEXT timestamp |
-| live_collector | price_snapshots | **CONFORMING (DONE-PARTIAL)** | **24** | dual-write | Phases 0-4 done; Phase 5 cleanup in Cycle 24.5 |
+| live_collector | price_snapshots | **CONFORMING** | **24 + 24.5** | dual-write | Phases 0-4 in 24; Phase 5 cleanup done in 24.5 |
 | live_collector | spike_alerts | EMPTY | -- | -- | Defer until populated |
 | live_collector | tracked_markets | N/A | -- | -- | State, not temporal |
 | smart_money | convergence_signals | EMPTY | -- | -- | Defer until populated |

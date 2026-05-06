@@ -18,24 +18,6 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **Cycle 24.5: price_snapshots Phase 5 cleanup.** Run after 24-48h
-  burn-in confirms the post-cutover dual-write writer is stable.
-  Two-task cleanup:
-  1. Modify `engines/live_collector.py` `sample_all_markets` to
-     single-write to `price_snapshots` only (drop the `_legacy`
-     INSERT and the runtime PK-introspection branch added in
-     Cycle 24). Could also collapse the `>1e12 -> ms` magnitude
-     branches in stats display + dashboard once legacy is gone, but
-     keep them for safety.
-  2. DROP TABLE `price_snapshots_legacy`.
-  Plus standard cleanup: doc updates marking row #8 as DONE
-  (no longer DONE-PARTIAL), retro at
-  `claude/retros/RETRO_price_snapshots_phase5_cleanup.md`. Note
-  that the live_collector process is long-lived and won't pick up
-  the writer change until killed -- same kill-and-relaunch step as
-  Cycle 24 Phase 0.
-  *(Source: Cycle 24 retro; deferred per Rule 35.6 Phase 5 pattern.)*
-
 - **Cycle 25.5: position_snapshots Phase 5 cleanup.** Run after
   24-48h burn-in confirms the post-cutover dual-write writer is
   stable. Two-task cleanup:
@@ -396,6 +378,26 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   seconds at write time to preserve `spike_scanner.db`'s seconds
   contract (audit deferred). Phase 0 commit: `b8fa847`. Phases 2-4
   commit: `6ca1796`.
+- **Cycle 24.5**: `live_collector.price_snapshots` Phase 5 cleanup
+  (commit `<CYCLE_24_5_HASH>`). Dropped `_legacy` (448,941 rows) +
+  empty `_v2` stub via
+  `scripts/migrations/cycle24_5_price_snapshots_cleanup.py`
+  (legacy/live ratio at drop = 99.25%; `_v2` had been empty since
+  Cycle 24's cutover). Collapsed `sample_all_markets` to
+  single-write (removed runtime PK introspection, dual-INSERT
+  branch, and the `_v2` CREATE block in `init_db()`). Row #8 of
+  `SCHEMA_MIGRATION_PLAN.md` flipped DONE-PARTIAL -> DONE.
+  Post-cleanup live-MCP state: row_count=452,387, staleness=5.5s,
+  `is_stale=false`; `live_collector.unmonitored` now contains only
+  `["collection_log", "spike_alerts", "tracked_markets"]` (legacy
+  and v2 gone). **First cycle to apply the corrected ordering**
+  surfaced by the Cycle 23.5 retro: writer-collapse-FIRST, then
+  kill the long-lived PraxisLiveCollector process, then run the
+  cleanup script. The cleanup script's pre-flight #4 (refuses to
+  drop `_legacy` if it was written within 60s) is the load-bearing
+  prevention against the Cycle 23.5 cascade pattern; legacy's last
+  write at run time was 260s old, well past the threshold. Second
+  hybrid-workflow cycle.
 - Cycle 23.5: `order_book_snapshots` Phase 5 cleanup (commit
   `c21a679`). Dropped `_legacy` (104,776 rows) +
   empty `_v2` stub via `scripts/migrations/cycle23_5_order_book_cleanup.py`

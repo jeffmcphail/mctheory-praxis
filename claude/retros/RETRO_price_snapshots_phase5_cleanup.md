@@ -15,7 +15,7 @@ post-cutover operation, the `_legacy` and `_v2` artifacts were
 removed:
 
 - `price_snapshots_legacy` dropped (was receiving dual-writes
-  via the runtime-introspection writer; <ROW_COUNT> rows at drop
+  via the runtime-introspection writer; 448,941 rows at drop
   time).
 - `price_snapshots_v2` dropped (empty stub recreated each
   collector startup by `init_db()`'s `CREATE TABLE IF NOT EXISTS`
@@ -23,7 +23,7 @@ removed:
 - Writer in `engines/live_collector.py` collapsed to single-write:
   removed runtime PK introspection, removed dual-INSERT logic,
   removed the `price_snapshots_v2` CREATE in `init_db()`. Net:
-  ~<LINES_REMOVED> lines removed.
+  49 deletions / 5 insertions (44 lines net).
 
 No data loss; the live `price_snapshots` (post-cutover ms schema)
 is unchanged and remains the only `price_snapshots*` table in
@@ -50,12 +50,12 @@ The reverse ordering here prevents that failure mode.
 Code edited `engines/live_collector.py` per the hybrid brief:
 
 - `init_db()`: removed `CREATE TABLE price_snapshots_v2` block
-  + index. <LINES_REMOVED_INIT_DB> lines.
+  + index. 16 lines.
 - Price-write path: replaced runtime-introspection + dual-INSERT
   block with single INSERT into the live table.
-  <LINES_REMOVED_WRITER> lines net change.
+  33 deletions / 5 insertions (28 net) for the writer block alone.
 
-py_compile clean. Committed.
+py_compile clean. Committed as `88e5d8d` (Cycle 24.5 step 1).
 
 ### Step 2: Kill long-lived process
 
@@ -79,24 +79,30 @@ Ran `scripts/migrations/cycle24_5_price_snapshots_cleanup.py`.
 Pre-flight checks PASSED:
 - Live table has post-cutover schema (ms timestamps confirmed via
   `MAX(timestamp) > 1e12`).
-- Legacy row count: <LEGACY_COUNT>; live: <LIVE_COUNT>; ratio:
-  <RATIO>%.
+- Legacy row count: 448,941; live: 452,337; ratio: 99.25%.
 - `_v2` stub was empty.
 - **Pre-flight #4** (Cycle 24.5-specific guard): legacy's most
-  recent write was <AGE_SECONDS>s ago, well over the 60s threshold,
+  recent write was 260s ago, well over the 60s threshold,
   confirming the writer collapse took effect and no rogue process
-  is still hitting `_legacy`.
+  is still hitting `_legacy`. **This pre-flight is the load-bearing
+  prevention against the Cycle 23.5 cascade pattern**: it refuses to
+  drop `_legacy` while a stale in-memory writer might still be
+  hitting it, which is exactly what triggered the multi-collector
+  outage in Cycle 23.5. Defense-in-depth on top of the corrected
+  step ordering.
 
 DROP transaction wall-clock: sub-second.
 
 ### Step 4: Verification
 
 `get_collector_health` reports `price_snapshots` clean:
-- row_count: <POST_ROW_COUNT> (growing normally)
-- staleness_seconds: <STALENESS> (well below 180s threshold)
+- row_count: 452,387 (growing normally; +50 over the cleanup window)
+- staleness_seconds: 5.5 (well below 180s threshold)
 - is_stale: false
-- `databases.live_collector.unmonitored` no longer contains
-  `price_snapshots_legacy` or `price_snapshots_v2`.
+- `databases.live_collector.unmonitored` is now
+  `["collection_log", "spike_alerts", "tracked_markets"]` --
+  `price_snapshots_legacy` and `price_snapshots_v2` are gone.
+- No `__error__` artifacts; other DBs healthy.
 
 No regressions: other collectors still healthy.
 

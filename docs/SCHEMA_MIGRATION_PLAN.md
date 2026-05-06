@@ -24,8 +24,8 @@
 | 22 | ohlcv_1m | simple | DONE | 5c1f248 |
 | 23 | order_book_snapshots | dual-write | DONE | `c21a679` |
 | 23.5 | order_book_snapshots Phase 5 cleanup | code-only | DONE | `c21a679` |
-| 24 | live_collector.price_snapshots | dual-write | DONE-PARTIAL | 6ca1796 |
-| 24.5 | price_snapshots Phase 5 cleanup | code-only | pending | -- |
+| 24 | live_collector.price_snapshots | dual-write | DONE | `<CYCLE_24_5_HASH>` |
+| 24.5 | price_snapshots Phase 5 cleanup | code-only | DONE | `<CYCLE_24_5_HASH>` |
 | 25 | smart_money.position_snapshots | dual-write | DONE-PARTIAL | 874bf81 |
 | 25.5 | position_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 26 | trades | dual-write | pending | -- |
@@ -430,7 +430,7 @@ data. If not, decide between (a) truncating in the writer,
   the live table's PK shape) or be updated in the same commit as the
   cutover. We chose the runtime-adaptive approach for this cycle.
 
-### #8 -- live_collector.price_snapshots (DONE-PARTIAL, Cycle 24, commit 6ca1796)
+### #8 -- live_collector.price_snapshots (DONE, Cycles 24 + 24.5, commits 6ca1796 + `<CYCLE_24_5_HASH>`)
 
 - DB: live_collector.db (sidecar)
 - Rows: 351,615 at Brief-write time (growing ~50/min via continuous
@@ -485,6 +485,24 @@ data. If not, decide between (a) truncating in the writer,
   - Phase 2 backfill (358,661 rows, pure-SQL INSERT-SELECT with
     `legacy_ts * 1000`): 2.243s wall-clock (Brief budgeted ~30s)
   - Phase 4 atomic RENAME pair: 0.004s wall-clock
+- **Phase 5 (cleanup) executed in Cycle 24.5** (`<CYCLE_24_5_HASH>`)
+  after ~30h burn-in: dropped `_legacy` (448,941 rows; legacy/live
+  ratio at drop = 99.25%) + `_v2` empty stub via
+  `scripts/migrations/cycle24_5_price_snapshots_cleanup.py`;
+  collapsed writer to single-write (removed runtime PK
+  introspection + dual-INSERT branch + `_v2` CREATE in
+  `init_db()`). **First cycle to apply the corrected ordering**
+  surfaced by the Cycle 23.5 retro: writer-collapse-FIRST, then
+  kill the long-lived process, then run the cleanup script.
+  Cycle 23.5 ran cleanup-first and cascaded into a multi-collector
+  outage when an in-memory writer kept hitting the dropped
+  `_legacy` and triggered SQLite write-lock contention. The cleanup
+  script's pre-flight #4 (refuses to drop `_legacy` if it was
+  written to within 60s) is the load-bearing prevention against a
+  recurrence: at run time legacy's last write was 260s old, well
+  past the threshold, confirming the writer collapse had taken
+  effect before the script touched the DB. Post-cleanup live state:
+  452,387 rows, staleness 5.5s, `is_stale=false`.
 - Note: second time the recipe has been applied. Cycle 25 will be
   smart_money.position_snapshots -- TWO writer sites and a
   schema-shape change (no INTEGER timestamp column today).
