@@ -96,13 +96,13 @@ Expected post-deploy via `get_collector_health`:
   Per-table prose: removed the dual-write-window writer paragraph
   (no longer applies).
 - `docs/SCHEMA_MIGRATION_PLAN.md`: row #7 updated from
-  `DONE-PARTIAL | 10724bc` to `DONE | <CYCLE_23_5_HASH>`. Row 23.5
-  marked as DONE. Per-cycle prose section #7 header upgraded
-  to `(DONE, Cycles 23 + 23.5, ...)` and Phase 5 bullet rewritten
+  `DONE-PARTIAL | 10724bc` to `DONE | c21a679`. Row 23.5 marked
+  as DONE. Per-cycle prose section #7 header upgraded to
+  `(DONE, Cycles 23 + 23.5, ...)` and Phase 5 bullet rewritten
   from "deferred to Cycle 23.5" to "executed in Cycle 23.5".
-  (`<CYCLE_23_5_HASH>` placeholders to be replaced via a follow-up
-  commit once the hash is known, matching the Cycle 25 pattern at
-  commit `4e47659`.)
+  (Hash inserted via the standard follow-up commit once
+  `c21a679` was pushed, matching the Cycle 25 pattern at commit
+  `4e47659`.)
 - `claude/TODO.md`: Cycle 23.5 added to "Recently closed".
 
 ---

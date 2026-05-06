@@ -397,7 +397,7 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   contract (audit deferred). Phase 0 commit: `b8fa847`. Phases 2-4
   commit: `6ca1796`.
 - Cycle 23.5: `order_book_snapshots` Phase 5 cleanup (commit
-  `<CYCLE_23_5_HASH>`). Dropped `_legacy` (104,776 rows) +
+  `c21a679`). Dropped `_legacy` (104,776 rows) +
   empty `_v2` stub via `scripts/migrations/cycle23_5_order_book_cleanup.py`
   (legacy/live ratio at drop = 99.99%). Collapsed
   `collect_order_book_snapshot` to single-write (removed runtime

@@ -22,8 +22,8 @@
 | 20 | ohlcv_4h | simple | DONE | ca316e3 |
 | 21 | funding_rates | simple | DONE | b977cd3 |
 | 22 | ohlcv_1m | simple | DONE | 5c1f248 |
-| 23 | order_book_snapshots | dual-write | DONE | `<CYCLE_23_5_HASH>` |
-| 23.5 | order_book_snapshots Phase 5 cleanup | code-only | DONE | `<CYCLE_23_5_HASH>` |
+| 23 | order_book_snapshots | dual-write | DONE | `c21a679` |
+| 23.5 | order_book_snapshots Phase 5 cleanup | code-only | DONE | `c21a679` |
 | 24 | live_collector.price_snapshots | dual-write | DONE-PARTIAL | 6ca1796 |
 | 24.5 | price_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 25 | smart_money.position_snapshots | dual-write | DONE-PARTIAL | 874bf81 |
@@ -381,7 +381,7 @@ data. If not, decide between (a) truncating in the writer,
   endpoints like `fetch_funding_rate_history` carry reporting
   jitter that requires writer-side truncation.
 
-### #7 -- order_book_snapshots (DONE, Cycles 23 + 23.5, commits 10724bc + `<CYCLE_23_5_HASH>`)
+### #7 -- order_book_snapshots (DONE, Cycles 23 + 23.5, commits 10724bc + `c21a679`)
 
 - DB: crypto_data.db
 - Rows: 88,894 at cutover (BTC + ETH; growing ~12 rows/min via 10s
@@ -406,7 +406,7 @@ data. If not, decide between (a) truncating in the writer,
   via `ts_ms // 1000` while the matching `datetime` retained sub-second
   precision. The migration recovers ms by parsing `datetime` (the
   "real" precision) -- not by `legacy_ts * 1000`.
-- **Phase 5 (cleanup) executed in Cycle 23.5** (`<CYCLE_23_5_HASH>`):
+- **Phase 5 (cleanup) executed in Cycle 23.5** (`c21a679`):
   dropped `_legacy` (104,776 rows) + empty `_v2` stub via
   `scripts/migrations/cycle23_5_order_book_cleanup.py`; collapsed
   writer to single-write (removed runtime PK introspection + dual-
