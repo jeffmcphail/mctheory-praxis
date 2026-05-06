@@ -258,6 +258,29 @@ def collect_ohlcv_daily(asset, days, conn):
     conn.commit()
     print(f"    Stored {stored} daily candles")
 
+    # Cycle 29: explicit status return so main() can exit non-zero
+    # when a transient error caused us to write 0 rows.
+    fetched = len(all_candles)
+    if fetched == 0:
+        return {
+            "status": "error",
+            "reason": "CCXT daily OHLCV fetch returned 0 candles (network/API failure)",
+            "fetched": 0,
+            "stored": 0,
+        }
+    if stored == 0:
+        return {
+            "status": "error",
+            "reason": f"Fetched {fetched} candles but stored 0 (DB write failure)",
+            "fetched": fetched,
+            "stored": 0,
+        }
+    return {
+        "status": "ok",
+        "fetched": fetched,
+        "stored": stored,
+    }
+
 
 def collect_ohlcv_4h(asset, days, conn):
     """Collect 4-hour OHLCV for higher-resolution features."""
@@ -308,6 +331,29 @@ def collect_ohlcv_4h(asset, days, conn):
 
     conn.commit()
     print(f"    Stored {stored} 4h candles")
+
+    # Cycle 29: explicit status return so main() can exit non-zero
+    # when a transient error caused us to write 0 rows.
+    fetched = len(all_candles)
+    if fetched == 0:
+        return {
+            "status": "error",
+            "reason": "CCXT 4h OHLCV fetch returned 0 candles (network/API failure)",
+            "fetched": 0,
+            "stored": 0,
+        }
+    if stored == 0:
+        return {
+            "status": "error",
+            "reason": f"Fetched {fetched} candles but stored 0 (DB write failure)",
+            "fetched": fetched,
+            "stored": 0,
+        }
+    return {
+        "status": "ok",
+        "fetched": fetched,
+        "stored": stored,
+    }
 
 
 def collect_ohlcv_1m(asset, days, conn):
@@ -407,13 +453,14 @@ def collect_fear_greed(days, conn):
     """Collect historical Fear & Greed Index."""
     print(f"\n  Collecting Fear & Greed Index ({days} days)...")
 
+    data = []
+    stored = 0
     try:
         r = requests.get(f"https://api.alternative.me/fng/",
                          params={"limit": days, "format": "json"},
                          timeout=15)
         data = r.json().get("data", [])
 
-        stored = 0
         for d in data:
             ts = int(d.get("timestamp", 0)) * 1000
             date = datetime.fromtimestamp(ts // 1000, tz=timezone.utc).strftime("%Y-%m-%d")
@@ -436,6 +483,29 @@ def collect_fear_greed(days, conn):
 
     except Exception as e:
         print(f"    Error: {e}")
+
+    # Cycle 29: explicit status return so main() can exit non-zero
+    # when a transient error caused us to write 0 rows.
+    fetched = len(data)
+    if fetched == 0:
+        return {
+            "status": "error",
+            "reason": "Fear & Greed API returned 0 records (network/API failure)",
+            "fetched": 0,
+            "stored": 0,
+        }
+    if stored == 0:
+        return {
+            "status": "error",
+            "reason": f"Fetched {fetched} records but stored 0 (DB write failure)",
+            "fetched": fetched,
+            "stored": 0,
+        }
+    return {
+        "status": "ok",
+        "fetched": fetched,
+        "stored": stored,
+    }
 
 
 def collect_funding_rates(asset, days, conn):
@@ -492,6 +562,29 @@ def collect_funding_rates(asset, days, conn):
 
     conn.commit()
     print(f"    Stored {stored} funding rate observations")
+
+    # Cycle 29: explicit status return so main() can exit non-zero
+    # when a transient error caused us to write 0 rows.
+    fetched = len(all_rates)
+    if fetched == 0:
+        return {
+            "status": "error",
+            "reason": "CCXT funding rate fetch returned 0 records (network/API failure)",
+            "fetched": 0,
+            "stored": 0,
+        }
+    if stored == 0:
+        return {
+            "status": "error",
+            "reason": f"Fetched {fetched} records but stored 0 (DB write failure)",
+            "fetched": fetched,
+            "stored": 0,
+        }
+    return {
+        "status": "ok",
+        "fetched": fetched,
+        "stored": stored,
+    }
 
 
 def collect_onchain_btc(days, conn):
@@ -557,6 +650,32 @@ def collect_onchain_btc(days, conn):
 
     conn.commit()
     print(f"    Stored {stored} days of on-chain data")
+
+    # Cycle 29: explicit status return so main() can exit non-zero
+    # when a transient error caused us to write 0 rows. `fetched` here
+    # is the number of distinct dates we got at least one metric for
+    # across all six blockchain.info endpoints; if every endpoint
+    # failed, all_data is empty.
+    fetched = len(all_data)
+    if fetched == 0:
+        return {
+            "status": "error",
+            "reason": "Onchain BTC API returned 0 records across all metrics (network/API failure)",
+            "fetched": 0,
+            "stored": 0,
+        }
+    if stored == 0:
+        return {
+            "status": "error",
+            "reason": f"Fetched {fetched} dates but stored 0 (DB write failure)",
+            "fetched": fetched,
+            "stored": 0,
+        }
+    return {
+        "status": "ok",
+        "fetched": fetched,
+        "stored": stored,
+    }
 
 
 def _fetch_btc_dominance():
