@@ -377,6 +377,31 @@ def collect_ohlcv_1m(asset, days, conn):
     days_covered = len(all_candles) / 1440 if all_candles else 0
     print(f"    Stored {stored} 1m candles ({days_covered:.1f} days)")
 
+    # Cycle 28: explicit status return so main() can exit non-zero
+    # when a transient error caused us to write 0 rows. Task Scheduler
+    # uses LastTaskResult to surface failures; without an explicit
+    # non-zero exit on real failures, silent gaps accumulate.
+    fetched = len(all_candles)
+    if fetched == 0:
+        return {
+            "status": "error",
+            "reason": "CCXT fetch returned 0 candles (network/API failure)",
+            "fetched": 0,
+            "stored": 0,
+        }
+    if stored == 0:
+        return {
+            "status": "error",
+            "reason": f"Fetched {fetched} candles but stored 0 (DB write failure -- check for lock contention)",
+            "fetched": fetched,
+            "stored": 0,
+        }
+    return {
+        "status": "ok",
+        "fetched": fetched,
+        "stored": stored,
+    }
+
 
 def collect_fear_greed(days, conn):
     """Collect historical Fear & Greed Index."""
@@ -1178,7 +1203,18 @@ def main():
     }
 
     if args.command in dispatch:
-        dispatch[args.command](args)
+        result = dispatch[args.command](args)
+        # Cycle 28: commands MAY return a status dict; if they do
+        # and report error, exit non-zero so Task Scheduler surfaces
+        # the failure. Commands that return None (most of them, for
+        # now) are treated as success (preserves pre-Cycle-28
+        # behavior for unmodified commands).
+        if isinstance(result, dict) and result.get("status") == "error":
+            print(
+                f"\n[FAIL] {args.command}: {result.get('reason', 'unknown')}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     else:
         parser.print_help()
 
