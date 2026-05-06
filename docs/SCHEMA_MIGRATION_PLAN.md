@@ -28,7 +28,7 @@
 | 24.5 | price_snapshots Phase 5 cleanup | code-only | DONE | `1016ea5` |
 | 25 | smart_money.position_snapshots | dual-write | DONE | `9339221` |
 | 25.5 | position_snapshots Phase 5 cleanup | code-only | DONE | `9339221` |
-| 26 | trades | dual-write | pending | -- |
+| 26 | trades | one-shot rebuild | DONE | `<CYCLE_26_HASH>` |
 | 27 | _to_latest_ms cleanup | code-only | pending | -- |
 
 Order rationale: small / re-fetchable / batch-cadence tables migrate
@@ -584,20 +584,141 @@ Executed in Cycle 25.5 (see #9 above for the full Phase 5
 write-up). Doc trio updated to mark #9 DONE; retro at
 `claude/retros/RETRO_position_snapshots_phase5_cleanup.md`.
 
-### #10 -- trades (largest, last)
+### #10 -- trades (DONE, Cycle 26, commit `<CYCLE_26_HASH>`)
 
 - DB: crypto_data.db
-- Rows: 1.3M+ (growing ~120/sec via WebSocket)
-- Writer: `engines/crypto_data_collector.py:802`, scheduled as
-  PraxisTradesCollector running continuously
-- Reader: trade flow analytics
-- Pattern: **DUAL-WRITE**, biggest stakes
-- Schema change: timestamp ALREADY in ms (the only nearly-conforming
-  table today). Just needs PK shape change (compound on
-  (asset, trade_id) probably -- trade_id is the natural unique key per
-  asset) and `datetime` cosmetic (`Z` suffix -> `+00:00`).
-- Verify whether the new PK should include `trade_id` (almost certainly
-  yes; trade_id is what dedups) or just (asset, timestamp).
+- Rows: 8,830,907 at rebuild time (preserved 1:1 across the
+  rebuild; manual fire validation grew to 8,832,907 = +2,000)
+- Writer: `engines/crypto_data_collector.py` `collect_recent_trades`
+  (does NOT specify `id` in INSERTs, so removing the column required
+  no writer change beyond the `init_db()` CREATE TABLE block)
+- Reader: trade flow analytics; raw_query via MCP for ad-hoc
+- Pattern: **ONE-SHOT REBUILD** during a maintenance window with
+  PraxisTradesCollector disabled and all long-lived
+  `collect-trades-loop` processes killed. **First one-shot rebuild
+  in the migration program** -- deliberately departed from the
+  Cycle 23-25 dual-write recipe.
+- Why one-shot rather than dual-write: column types were already
+  Rule 35 compliant (`timestamp INTEGER` ms, `datetime TEXT` ISO
+  with `+00:00`); the only non-conforming aspect was the synthetic
+  `id INTEGER PRIMARY KEY AUTOINCREMENT`; rows copy 1:1 minus `id`
+  with no data semantic transformation. The dual-write recipe's
+  value-add is data-correctness validation across a unit/format
+  conversion (Cycles 23-25's seconds-to-ms or TEXT-to-INTEGER
+  changes); for a pure structural change with no transformation,
+  dual-write is overkill and uses ~2x the storage during burn-in.
+- Schema change actually shipped:
+  - Removed synthetic `id INTEGER PRIMARY KEY AUTOINCREMENT`
+  - Promoted existing `UNIQUE(asset, trade_id)` constraint to
+    `PRIMARY KEY (asset, trade_id)`
+  - Preserved `idx_trades_asset_timestamp` on
+    `(asset, timestamp DESC)` (recreated post-rename per the v2
+    script reordering)
+- Step 1 (init_db update + commit `a1c1638`): edited
+  `engines/crypto_data_collector.py` `init_db()` -- 6 deletions /
+  1 insertion in the CREATE TABLE block (-5 net). Standalone
+  commit so a fresh process at any future point picks up the new
+  schema definition; existing DB went through the rebuild script
+  in step 2.
+- Step 2 (rebuild script):
+  `scripts/migrations/cycle26_trades_schema_rebuild.py` ran during
+  the maintenance window and copied 8,830,907 rows in 11.4s
+  (775,877 rows/s). Total transaction wall-clock 25.4s including
+  CREATE trades_v2, bulk INSERT-SELECT, DROP trades, RENAME
+  trades_v2 -> trades, and CREATE INDEX on the renamed table.
+  Slowest single transaction in the migration program.
+- **Script v1 / v2 note** (lessons-learned): v1 of the script
+  aborted at step 3 due to a CREATE INDEX namespace collision --
+  it tried to CREATE INDEX `idx_trades_asset_timestamp` on
+  `trades_v2` while the same-named index still existed on the
+  old `trades` table. SQLite indexes are namespaced per-database,
+  not per-table, so the CREATE failed with
+  `sqlite3.OperationalError`. v1's BEGIN/ROLLBACK restored
+  pre-script state cleanly (no partial state, no data loss). v2
+  reorders steps to do DROP old trades (which drops its index
+  automatically) -> RENAME trades_v2 -> trades -> CREATE INDEX
+  on the renamed table. Generalizable rule for any future
+  schema-rebuild migration: when rebuilding under the same
+  table name and preserving an indexed column, the OLD table's
+  index must be dropped before the new index can be created
+  (under the same name) on the new table.
+- **Maintenance window prerequisite gotcha**: PraxisTradesCollector
+  has a hybrid pattern -- a scheduled trigger every 2h that spawns
+  a long-lived `collect-trades-loop` process with `--duration 3550`.
+  The loop runs continuously polling Binance every 30s for ~59 min
+  before exiting naturally. **Disabling the scheduled task does NOT
+  kill an in-flight loop process**; it only prevents new ones from
+  starting at the next 2h boundary. The Brief initially mis-described
+  the collector as "scheduled, every 60s" (like Cycle 25.5's
+  PraxisSmartMoney pattern); the script's pre-flight #4 (legacy age
+  guard from Cycle 24.5) caught the symptom on the first rebuild
+  attempt -- "latest trade was 23s ago" forced the user to
+  Stop-Process the loop process manually before re-running. Pre-flight
+  passed on the second attempt at age 940s (~15.7 min after the
+  loop kill), well past the 60s threshold.
+- Performance datapoints:
+  - CREATE trades_v2: ~0s (instant, not measured)
+  - INSERT-SELECT (8,830,907 rows): 11.4s (775,877 rows/s)
+  - DROP trades: ~0s (instant, not measured)
+  - RENAME trades_v2 -> trades: ~0s (instant, not measured)
+  - CREATE INDEX idx_trades_asset_timestamp: ~0s (instant,
+    not measured)
+  - TOTAL transaction wall-clock: 25.4s (the 14s gap between
+    11.4s copy and 25.4s total reflects SQLite's commit
+    overhead at the 8.8M-row scale -- write-ahead log flush,
+    fsync, page cache writes for the new table + index)
+- Post-rebuild validation: live-MCP `praxis:list_tables`
+  confirmed compound PK on `(asset, trade_id)` and no `id`
+  column. Manual fire of `collect-trades --assets BTC ETH`
+  inserted exactly 2,000 rows (1,000 per asset), confirming the
+  writer code paths against the new schema. Row count grew
+  8,830,907 -> 8,832,907; latest advanced to
+  2026-05-06T22:24:49 UTC.
+
+### MIGRATION PROGRAM SCOREBOARD -- 10/10 COMPLETE
+
+The Rule 35 schema migration program closes with Cycle 26.
+All 10 temporal-row tables across the 3 Praxis SQLite databases
+now conform to the standard (INTEGER ms-since-epoch UTC
+`timestamp`, primary key, optional ISO `+00:00` datetime cache).
+
+| # | Cycle | Table | DB | Pattern | Rows at migration |
+|---|---|---|---|---|---|
+| 1 | 17 | fear_greed | crypto_data | simple | 901 |
+| 2 | 18 | ohlcv_daily | crypto_data | simple | 1,802 |
+| 3 | 19 | market_data | crypto_data | schema-only | 3 (forward only) |
+| 4 | 20 | ohlcv_4h | crypto_data | simple | 10,830 |
+| 5 | 21 | funding_rates | crypto_data | simple (+21.5 hotfix) | 2,212 |
+| 6 | 22 | ohlcv_1m | crypto_data | simple | 530,836 |
+| 7 | 23 (+23.5) | order_book_snapshots | crypto_data | dual-write pilot | 88,894 |
+| 8 | 24 (+24.5) | price_snapshots | live_collector | dual-write | 358,715 |
+| 9 | 25 (+25.5) | position_snapshots | smart_money | dual-write | 68,812 |
+| 10 | 26 | trades | crypto_data | one-shot rebuild | 8,830,907 |
+
+Recipes proven by the program:
+- **Simple stop-migrate-start** (Cycles 17-22): for re-fetchable
+  sources at hourly-or-slower cadence. Single transaction
+  INSERT-SELECT.
+- **Dual-write** (Cycles 23-25 + their .5 cleanups): for
+  high-frequency writers where a stop-the-world gap would lose
+  data. Six-phase recipe (Build _v2 + dual-write writer ->
+  burn-in -> backfill -> verify -> atomic cutover -> drop
+  legacy + collapse writer).
+- **One-shot rebuild during maintenance window** (Cycle 26):
+  for pure structural changes with no data semantic
+  transformation, where the writer doesn't reference the
+  changing column. Atomic transaction; no burn-in needed
+  because there's nothing to validate beyond row count and
+  schema shape.
+
+Followups from the program (not migrations themselves):
+- Cycle 24.1: `_to_latest_ms` ms-format sidecar staleness
+  hotfix (closed retro-only; root cause was stale FastMCP
+  subprocess, not on-disk code).
+- Cycle 27: `_to_latest_ms` autodetect heuristic collapse to
+  strict ms-only handling (closed; commit `5d1162f`).
+- Cycle 28 + 29: collector exit-code observability hardening
+  (closed).
 
 ---
 

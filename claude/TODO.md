@@ -18,17 +18,6 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **Cycle 26: Migrate `trades` per the dual-write recipe.** Largest
-  remaining table (~6.5M rows). Already near-conforming -- `timestamp`
-  is already INTEGER ms; primarily needs PK shape change (likely
-  compound on `(asset, trade_id)`) and the `datetime` cosmetic fix
-  (`Z` suffix -> `+00:00`). **Investigate before Brief**: is the
-  trades collector long-lived (PraxisTradesCollector runs continuously
-  per the migration plan) or scheduled? This affects the
-  kill-and-relaunch decision per Cycle 24.1's process notes. If
-  long-lived, plan the writer-restart step into Phase 0.
-  *(Source: docs/SCHEMA_MIGRATION_PLAN.md row #10)*
-
 - **Spike-DB (data/spike_scanner.db) reader audit.** Cycle 24's
   `cmd_export` in `engines/live_collector.py` divides ms back to
   seconds at export to preserve the spike DB's seconds contract.
@@ -215,6 +204,52 @@ techniques in this list show up across multiple TODOs.
 
 For context on what just shipped, see `docs/praxis_main_series_transcript.md`
 and the recent `claude/retros/RETRO_*.md` files.
+
+**SCHEMA MIGRATION PROGRAM: COMPLETE** (Cycle 26 closed it). All
+10 temporal-row tables across the 3 Praxis SQLite databases now
+conform to Rule 35. See `docs/SCHEMA_MIGRATION_PLAN.md` for the
+final scoreboard and per-cycle details.
+
+- **Cycle 26**: `trades` migrated to Rule 35 via the **first
+  one-shot rebuild in the migration program** (deliberately
+  departed from the Cycle 23-25 dual-write recipe). 8,830,907
+  rows preserved 1:1 across the rebuild; removed synthetic `id
+  INTEGER PRIMARY KEY AUTOINCREMENT` and promoted existing
+  `UNIQUE(asset, trade_id)` constraint to compound `PRIMARY KEY
+  (asset, trade_id)`; preserved `idx_trades_asset_timestamp`.
+  Why one-shot: column types were already Rule 35 compliant
+  (`timestamp INTEGER` ms, `datetime TEXT` ISO `+00:00`); only
+  the synthetic `id` PK needed dropping; the writer doesn't
+  reference `id` (no writer change beyond `init_db()` CREATE
+  TABLE); rows copy 1:1 with no data semantic transformation, so
+  dual-write's burn-in validation adds no value. Step 1 (init_db
+  update + commit `a1c1638`): -5 net lines. Step 2 (rebuild
+  script): 8.8M rows copied in 11.4s (775,877 rows/s); total
+  transaction wall-clock 25.4s -- slowest single transaction in
+  the program. **Script v1 / v2 lessons-learned**: v1 aborted
+  at step 3 due to CREATE INDEX namespace collision (SQLite
+  indexes are namespaced per-DB, not per-table; v1 tried to
+  create `idx_trades_asset_timestamp` on `trades_v2` while the
+  same-named index still existed on the old `trades`); v1's
+  BEGIN/ROLLBACK restored pre-script state cleanly; v2 reorders
+  to do DROP+RENAME before CREATE INDEX. **Process pattern
+  correction** (also captured as a memory entry): the Brief
+  initially mis-described PraxisTradesCollector as
+  "scheduled-not-long-lived" (like Cycle 25.5's PraxisSmartMoney);
+  the actual pattern is BOTH -- a scheduled trigger every 2h that
+  spawns a long-lived `collect-trades-loop` process with
+  `--duration 3550` that runs continuously polling Binance every
+  30s for ~59 min before exiting naturally. Disabling the
+  scheduled task does NOT kill an in-flight loop process. The
+  script's pre-flight #4 (legacy age guard from Cycle 24.5)
+  caught the symptom on the first attempt and forced the user to
+  Stop-Process the loop processes manually before re-running
+  successfully. Post-rebuild validation: live-MCP confirmed
+  compound PK and no `id` column; manual fire of `collect-trades
+  --assets BTC ETH` inserted exactly 2,000 rows (1,000 per asset),
+  growing 8,830,907 -> 8,832,907; latest advanced to
+  2026-05-06T22:24:49 UTC. **Closes the migration program**:
+  10/10 tables conforming. Commit: `<CYCLE_26_HASH>`.
 
 Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
 

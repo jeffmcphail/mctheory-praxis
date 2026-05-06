@@ -225,19 +225,41 @@ server, all engines, and analysis scripts.
   `ABS(timestamp - at_timestamp_ms)` math also becomes meaningful
   post-migration.
 
-#### Table: trades (NEAR-CONFORMING)
+#### Table: trades (CONFORMING -- Cycle 26)
 
-- Columns: `id` PK, `asset`, `trade_id`, `timestamp` (INTEGER **ms**
-  UTC -- already conforms), `datetime` (TEXT ISO with `Z` suffix --
-  near-conforming, want `+00:00`), `price`, `amount`, `quote_amount`,
-  `is_buyer_maker`, `side`.
-- Writer: `engines/trades_collector.py`
-- Scheduled task: `PraxisTradesCollector` (hourly back-to-back,
-  3550s windowed, 30s cadence).
-- Conformance gaps: `id` PK instead of `(asset, timestamp, trade_id)`
-  PK; `datetime` text uses `Z` instead of `+00:00`.
-- Migration cycle: TBD. Cosmetic-ish migration; dual-write still
-  recommended given write rate.
+- Columns: `asset` (TEXT NOT NULL), `trade_id` (INTEGER NOT NULL),
+  `timestamp` (INTEGER **ms** UTC), `datetime` (TEXT ISO),
+  `price`, `amount`, `quote_amount`, `is_buyer_maker`, `side`.
+  PK: `(asset, trade_id)`. Index: `idx_trades_asset_timestamp`
+  on `(asset, timestamp DESC)` preserved across the rebuild.
+- Writer: `engines/crypto_data_collector.py` `collect_recent_trades`
+  (does not specify `id`, so the PK shape change required no writer
+  change beyond the `init_db()` CREATE TABLE block).
+- Scheduled task: `PraxisTradesCollector` (every 2h, spawns a
+  long-lived `collect-trades-loop` process with `--duration 3550`
+  that runs continuously polling Binance every 30s for ~59 min
+  before exiting naturally).
+- 8,830,907 rows preserved across the rebuild (1:1 column copy
+  minus `id`).
+- **Migration approach**: one-shot rebuild during a maintenance
+  window (NOT dual-write). Rationale captured in
+  `claude/retros/RETRO_trades_schema_rebuild.md`: column types
+  were already Rule 35 compliant; only the synthetic `id` PK
+  needed dropping; the writer doesn't reference `id`; and the
+  rebuild script copied 8.8M rows in 11.4s with total transaction
+  wall-clock 25.4s. Sets the precedent that pure structural
+  changes with no data semantic transformation can skip the
+  dual-write recipe in favor of a brief maintenance window.
+- **Maintenance window prerequisite**: disabling the scheduled
+  task is NOT sufficient -- the long-lived `collect-trades-loop`
+  processes survive the disable until their `--duration` expires
+  (~59 min). Both the scheduled task disable AND
+  `Stop-Process` on every in-flight loop process are required
+  before the rebuild script will pass its pre-flight age guard
+  (Cycle 24.5's "<60s last write" check, retained as
+  defense-in-depth).
+- Migration cycle: 26 (one-shot rebuild). Closes the migration
+  program: 10 of 10 tables conforming.
 
 ### live_collector.db (sidecar)
 
@@ -373,7 +395,7 @@ added it to MCP health.
 | crypto_data | ohlcv_daily | **CONFORMING** | **18** | stop-migrate-start | Done |
 | crypto_data | onchain_btc | NONCONFORMING | TBD | stop-migrate-start | No active collector |
 | crypto_data | order_book_snapshots | **CONFORMING** | **23 + 23.5** | dual-write | Phases 0-4 in 23; Phase 5 cleanup done in 23.5 |
-| crypto_data | trades | NEAR-CONFORMING | TBD | dual-write | timestamp already ms |
+| crypto_data | trades | **CONFORMING** | **26** | one-shot rebuild | 8.8M rows copied 1:1 in 11.4s; total tx 25.4s |
 | live_collector | collection_log | NONCONFORMING | TBD | dual-write | TEXT timestamp |
 | live_collector | price_snapshots | **CONFORMING** | **24 + 24.5** | dual-write | Phases 0-4 in 24; Phase 5 cleanup done in 24.5 |
 | live_collector | spike_alerts | EMPTY | -- | -- | Defer until populated |

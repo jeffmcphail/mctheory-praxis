@@ -1,64 +1,60 @@
 """
 Cycle 26 -- trades schema rebuild (one-shot, NOT dual-write).
 
+v2 (2026-05-06): fixes the CREATE INDEX namespace collision that
+caused v1 to abort mid-transaction. SQLite indexes are namespaced
+per-database, not per-table -- v1 tried to CREATE INDEX
+idx_trades_asset_timestamp on trades_v2 while the old trades
+table's index of the same name still existed, causing
+sqlite3.OperationalError. v2 reorders: DROP old trades (which
+drops its associated index too), ALTER RENAME _v2 -> trades, THEN
+CREATE INDEX on the renamed table.
+
+v1 transaction structure (broken):
+  CREATE trades_v2 -> INSERT _v2 SELECT FROM trades ->
+  CREATE INDEX on _v2 [FAILS: name collision] -> ROLLBACK
+
+v2 transaction structure:
+  CREATE trades_v2 -> INSERT _v2 SELECT FROM trades ->
+  DROP trades [also drops its index] ->
+  ALTER trades_v2 RENAME TO trades ->
+  CREATE INDEX idx_trades_asset_timestamp ON trades
+
+Both versions wrap everything in BEGIN/COMMIT so any failure
+rolls back atomically. v1's rollback was confirmed to work
+(post-failure schema was unchanged from pre-script).
+
 Removes the synthetic `id INTEGER PRIMARY KEY AUTOINCREMENT` column
 from `trades` and promotes the existing `UNIQUE(asset, trade_id)`
 constraint to be the compound PRIMARY KEY. No data transformation;
 this is a structure-only change.
 
-Why one-shot instead of dual-write (which Cycles 23-25 used):
-
-1. The trades table is ALREADY Rule 35 compliant for column types:
-   `timestamp INTEGER NOT NULL` (ms), `datetime TEXT NOT NULL`. The
-   ONLY non-conforming aspect is the synthetic `id` PK. No data
-   transformation is needed -- rows copy 1:1 minus the id.
-
-2. The writer (collect_recent_trades) doesn't specify `id` in its
-   INSERT. Removing the id column requires NO writer change (only
-   the init_db() CREATE TABLE statement needs updating).
-
-3. PraxisTradesCollector is a scheduled task (every 60s, NOT long-
-   lived). We can briefly disable it, rebuild atomically, and
-   re-enable. No dual-write window is needed because there is no
-   data semantic gap between old and new shapes.
-
-This script is the "Phase 4" equivalent for a structure-only
-change: one atomic transaction that creates the new table,
-copies all rows, drops old, renames new. The CREATE TABLE in
-init_db() (separate writer-collapse commit) updates the
-on-disk schema definition to match.
-
 PRE-CONDITION (required before running):
 
 1. PraxisTradesCollector must be DISABLED (Disable-ScheduledTask)
-   so no writes happen during the rebuild. The script does NOT
-   automate this -- the user runs it manually before invoking
-   this script and re-enables after verification.
+   AND the long-lived collect-trades-loop processes must be killed
+   (Stop-Process). Disabling the scheduled task alone is NOT
+   sufficient -- the long-lived loop processes survive the disable
+   until their --duration expires. Verify both via:
+       Get-Process python | where CommandLine -like "*collect-trades*"
+   should return zero results.
 
-2. The trades writer's init_db() CREATE TABLE must have been
-   updated separately and committed (so a fresh process picks up
-   the new schema definition). The init_db() is idempotent: if it
-   sees a table named `trades` already exists, it doesn't try to
-   re-create it. So the on-disk init_db() change is purely for
-   future fresh-DB initializations -- existing DBs go through this
-   migration script.
+2. The trades writer's init_db() CREATE TABLE has been updated
+   separately and committed in step 1 (a1c1638).
 
-PERFORMANCE EXPECTATION (8.7M rows):
+PERFORMANCE EXPECTATION (8.8M rows):
 
-- INSERT INTO trades_v2 SELECT FROM trades: ~30-60s (SQLite pure-
-  SQL bulk insert is fast, but constructing PK + index entries is
-  the bottleneck).
-- DROP trades + ALTER RENAME: instant.
-- Re-CREATE INDEX statements on trades_v2: applies BEFORE the
-  rename, in the same transaction, so they cover the new table
-  immediately.
+- v1 measurement: 19.8s for the bulk INSERT, ~447k rows/sec
+- v2 has the same INSERT step; total wall-clock should be under
+  25s for the full transaction.
 
-Rollback: if anything in the transaction fails, BEGIN/ROLLBACK
-restores everything to pre-script state. The script is idempotent:
-re-running on a fully-rebuilt state detects the already-converted
-schema and exits cleanly.
+Rollback: BEGIN/ROLLBACK in either version. Idempotent: detects
+already-rebuilt state via "no `id` column" and exits cleanly. Also
+detects a v1-style mid-transaction rollback leftover (no _v2 in
+state because the rollback successfully cleaned up).
 
-Run from the repo root (with PraxisTradesCollector disabled):
+Run from the repo root (with PraxisTradesCollector disabled AND
+loop processes killed):
 
     python scripts/migrations/cycle26_trades_schema_rebuild.py
 """
@@ -138,10 +134,6 @@ def main() -> int:
         # ---------------------------------------------------------
         # Pre-flight 3: writer is not actively writing
         # ---------------------------------------------------------
-        # Sample latest trade timestamp; if it's <60s old, the writer
-        # is still active. The user is supposed to have disabled
-        # PraxisTradesCollector before running this; this guard
-        # catches forgotten disables.
         latest_ts = conn.execute(
             "SELECT MAX(timestamp) FROM trades"
         ).fetchone()[0]
@@ -151,11 +143,13 @@ def main() -> int:
             if age_s < 60:
                 print(
                     f"[rebuild] ABORT: latest trade was {age_s:.0f}s ago. "
-                    f"PraxisTradesCollector appears to still be active. "
-                    f"Disable it (Disable-ScheduledTask -TaskName "
-                    f"'PraxisTradesCollector') before running this "
-                    f"script. The script needs an exclusive write window "
-                    f"to rebuild the table atomically.",
+                    f"PraxisTradesCollector or a collect-trades-loop "
+                    f"process appears to still be active. Disable the "
+                    f"scheduled task AND kill all long-lived loop "
+                    f"processes (Stop-Process), then verify via:\n"
+                    f"  Get-Process python | where CommandLine -like "
+                    f"\"*collect-trades*\"\n"
+                    f"returns zero results before re-running.",
                     file=sys.stderr,
                 )
                 return 4
@@ -177,17 +171,19 @@ def main() -> int:
               f"will become PRIMARY KEY")
 
         # ---------------------------------------------------------
-        # The rebuild transaction
+        # The rebuild transaction (v2: index after rename)
         # ---------------------------------------------------------
         print()
-        print("[rebuild] Starting atomic rebuild transaction...")
+        print("[rebuild] Starting atomic rebuild transaction (v2)...")
         t_start = time.time()
 
         conn.execute("BEGIN")
         try:
-            # 1. Create new table with the post-Cycle-26 schema:
-            #    no `id`, compound PK on (asset, trade_id).
-            print("  [1/4] Creating trades_v2 with new schema...")
+            # 1. Create new table with the post-Cycle-26 schema.
+            #    NOTE: no index on _v2 yet -- index name would
+            #    collide with the existing one on `trades`. We
+            #    create the index AFTER the DROP+RENAME below.
+            print("  [1/5] Creating trades_v2 with new schema...")
             conn.execute("""
                 CREATE TABLE trades_v2 (
                     asset TEXT NOT NULL,
@@ -204,8 +200,8 @@ def main() -> int:
             """)
 
             # 2. Copy all rows (omitting `id`).
-            print(f"  [2/4] Copying {live_count:,} rows from trades to "
-                  f"trades_v2 (this is the slow step; ~30-60s)...")
+            print(f"  [2/5] Copying {live_count:,} rows from trades to "
+                  f"trades_v2 (typically ~20s)...")
             t_copy_start = time.time()
             conn.execute("""
                 INSERT INTO trades_v2 (
@@ -230,25 +226,23 @@ def main() -> int:
                     f"trades_v2 has {v2_count} -- aborting"
                 )
 
-            # 3. Add the same indexes that exist on the old table.
-            #    The compound PK (asset, trade_id) covers the
-            #    idx_trades_asset_tradeid index (asset DESC ordering
-            #    is irrelevant for PK presence). Keep idx_trades_
-            #    asset_timestamp explicitly since it's a different
-            #    column ordering.
-            print("  [3/4] Adding idx_trades_asset_timestamp on "
-                  "trades_v2...")
+            # 3. Drop old trades (drops its index automatically too).
+            print("  [3/5] Dropping old trades (and its index)...")
+            conn.execute("DROP TABLE trades")
+
+            # 4. Rename _v2 to trades.
+            print("  [4/5] Renaming trades_v2 -> trades...")
+            conn.execute("ALTER TABLE trades_v2 RENAME TO trades")
+
+            # 5. Create the index on the now-renamed table. The name
+            #    is now free because the old table (with its index)
+            #    is gone.
+            print("  [5/5] Creating idx_trades_asset_timestamp on "
+                  "trades...")
             conn.execute("""
                 CREATE INDEX idx_trades_asset_timestamp
-                    ON trades_v2(asset, timestamp DESC)
+                    ON trades(asset, timestamp DESC)
             """)
-
-            # 4. Drop old + rename new. ALTER RENAME is atomic in
-            #    SQLite within a transaction.
-            print("  [4/4] Dropping old trades and renaming "
-                  "trades_v2 -> trades...")
-            conn.execute("DROP TABLE trades")
-            conn.execute("ALTER TABLE trades_v2 RENAME TO trades")
 
             conn.execute("COMMIT")
         except Exception:
@@ -297,13 +291,29 @@ def main() -> int:
             )
             return 7
 
+        # Verify the index landed
+        idx_exists = bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='index' AND name='idx_trades_asset_timestamp'"
+            ).fetchone()
+        )
+        if not idx_exists:
+            print(
+                "[rebuild] WARN: idx_trades_asset_timestamp index missing "
+                "post-rebuild. Schema is OK but query performance for "
+                "(asset, timestamp DESC) range queries will be poor "
+                "until the index is recreated manually.",
+                file=sys.stderr,
+            )
+
         print()
         print("=" * 60)
-        print("[rebuild] CYCLE 26 SCHEMA REBUILD COMPLETE")
+        print("[rebuild] CYCLE 26 SCHEMA REBUILD COMPLETE (v2)")
         print(f"  trades: {live_count:,} -> {post_count:,} rows "
               f"(unchanged)")
         print(f"  schema: id PK -> compound (asset, trade_id) PK")
-        print(f"  indexes: idx_trades_asset_timestamp restored")
+        print(f"  indexes: idx_trades_asset_timestamp created")
         print(f"  total time: {t_total_s:.1f}s")
         print("=" * 60)
         print()
