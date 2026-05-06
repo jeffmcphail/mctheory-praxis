@@ -79,22 +79,6 @@ def init_db():
         )
     """)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS price_snapshots_v2 (
-            slug TEXT NOT NULL,
-            timestamp INTEGER NOT NULL,
-            datetime TEXT NOT NULL,
-            yes_mid REAL,
-            yes_bid REAL,
-            yes_ask REAL,
-            spread REAL,
-            PRIMARY KEY (slug, timestamp)
-        )
-    """)
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_psv2_slug_ts "
-        "ON price_snapshots_v2(slug, timestamp DESC)"
-    )
-    conn.execute("""
         CREATE TABLE IF NOT EXISTS collection_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT,
@@ -319,16 +303,6 @@ def sample_all_markets(conn, verbose=False):
         FROM tracked_markets WHERE active=1
     """).fetchall()
 
-    # Runtime PK introspection: pre-cutover the live `price_snapshots` has
-    # an `id` column (legacy AUTOINCREMENT PK); post-cutover it has a
-    # compound (slug, timestamp) PK and no `id`. Same single PRAGMA
-    # pattern as Cycle 23's order_book_snapshots dual-write.
-    pre_cutover = any(
-        c[1] == "id" for c in conn.execute(
-            "PRAGMA table_info(price_snapshots)"
-        ).fetchall()
-    )
-
     samples = 0
     errors = 0
     spikes = []
@@ -340,33 +314,15 @@ def sample_all_markets(conn, verbose=False):
         try:
             mid = get_clob_midpoint(yes_token)
             if mid > 0:
-                now_sec = int(time.time())
                 now_ms = int(time.time() * 1000)
                 dt = datetime.fromtimestamp(
                     now_ms / 1000, tz=timezone.utc
                 ).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-                if pre_cutover:
-                    conn.execute("""
-                        INSERT OR IGNORE INTO price_snapshots
-                        (slug, timestamp, yes_mid)
-                        VALUES (?, ?, ?)
-                    """, (slug, now_sec, mid))
-                    conn.execute("""
-                        INSERT OR IGNORE INTO price_snapshots_v2
-                        (slug, timestamp, datetime, yes_mid)
-                        VALUES (?, ?, ?, ?)
-                    """, (slug, now_ms, dt, mid))
-                else:
-                    conn.execute("""
-                        INSERT OR IGNORE INTO price_snapshots
-                        (slug, timestamp, datetime, yes_mid)
-                        VALUES (?, ?, ?, ?)
-                    """, (slug, now_ms, dt, mid))
-                    conn.execute("""
-                        INSERT OR IGNORE INTO price_snapshots_legacy
-                        (slug, timestamp, yes_mid)
-                        VALUES (?, ?, ?)
-                    """, (slug, now_sec, mid))
+                conn.execute("""
+                    INSERT OR IGNORE INTO price_snapshots
+                    (slug, timestamp, datetime, yes_mid)
+                    VALUES (?, ?, ?, ?)
+                """, (slug, now_ms, dt, mid))
                 samples += 1
 
                 # Check for spikes
