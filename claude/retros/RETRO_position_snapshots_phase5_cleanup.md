@@ -126,7 +126,7 @@ DROP transaction wall-clock: sub-second.
   Per-table prose: removed dual-write writer paragraph.
 - `docs/SCHEMA_MIGRATION_PLAN.md`: row #9 (position_snapshots)
   updated from `DONE-PARTIAL | 874bf81` to
-  `DONE | <CYCLE_25_5_HASH>`. Row 25.5 marked DONE. Per-cycle
+  `DONE | 9339221`. Row 25.5 marked DONE. Per-cycle
   prose section #9 gained a Phase 5 paragraph noting the
   100.00% ratio + the scheduled-vs-long-lived process contrast.
 - `claude/TODO.md`: Cycle 25.5 added to "Recently closed".

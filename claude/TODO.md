@@ -360,7 +360,7 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   contract (audit deferred). Phase 0 commit: `b8fa847`. Phases 2-4
   commit: `6ca1796`.
 - **Cycle 25.5**: `smart_money.position_snapshots` Phase 5 cleanup
-  (commit `<CYCLE_25_5_HASH>`). Dropped `_legacy` (79,076 rows) +
+  (commit `9339221`). Dropped `_legacy` (79,076 rows) +
   empty `_v2` stub via
   `scripts/migrations/cycle25_5_position_snapshots_cleanup.py`.
   **Cleanest cutover in the migration program**: legacy/live ratio

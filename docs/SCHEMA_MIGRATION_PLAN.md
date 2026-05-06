@@ -26,8 +26,8 @@
 | 23.5 | order_book_snapshots Phase 5 cleanup | code-only | DONE | `c21a679` |
 | 24 | live_collector.price_snapshots | dual-write | DONE | `1016ea5` |
 | 24.5 | price_snapshots Phase 5 cleanup | code-only | DONE | `1016ea5` |
-| 25 | smart_money.position_snapshots | dual-write | DONE | `<CYCLE_25_5_HASH>` |
-| 25.5 | position_snapshots Phase 5 cleanup | code-only | DONE | `<CYCLE_25_5_HASH>` |
+| 25 | smart_money.position_snapshots | dual-write | DONE | `9339221` |
+| 25.5 | position_snapshots Phase 5 cleanup | code-only | DONE | `9339221` |
 | 26 | trades | dual-write | pending | -- |
 | 27 | _to_latest_ms cleanup | code-only | pending | -- |
 
@@ -507,7 +507,7 @@ data. If not, decide between (a) truncating in the writer,
   smart_money.position_snapshots -- TWO writer sites and a
   schema-shape change (no INTEGER timestamp column today).
 
-### #9 -- smart_money.position_snapshots (DONE, Cycles 25 + 25.5, commits 874bf81 + `<CYCLE_25_5_HASH>`)
+### #9 -- smart_money.position_snapshots (DONE, Cycles 25 + 25.5, commits 874bf81 + `9339221`)
 
 - DB: smart_money.db (sidecar)
 - Rows at cutover: 68,812
@@ -553,7 +553,7 @@ data. If not, decide between (a) truncating in the writer,
   (not a long-lived process); the next scheduled invocation picks
   up the new code automatically. No kill-and-relaunch step needed
   -- asymmetric vs Cycle 24's PraxisLiveCollector
-- **Phase 5 (cleanup) executed in Cycle 25.5** (`<CYCLE_25_5_HASH>`)
+- **Phase 5 (cleanup) executed in Cycle 25.5** (`9339221`)
   after ~38h burn-in: dropped `_legacy` (79,076 rows) + `_v2` empty
   stub via `scripts/migrations/cycle25_5_position_snapshots_cleanup.py`;
   collapsed both writer sites (`cmd_snapshot` + `cmd_monitor`) to
@@ -578,7 +578,7 @@ data. If not, decide between (a) truncating in the writer,
   is already INTEGER ms); needs investigation of whether the trades
   collector is long-lived or scheduled before drafting the Brief.
 
-### #9.5 -- position_snapshots Phase 5 cleanup (DONE, Cycle 25.5, commit `<CYCLE_25_5_HASH>`)
+### #9.5 -- position_snapshots Phase 5 cleanup (DONE, Cycle 25.5, commit `9339221`)
 
 Executed in Cycle 25.5 (see #9 above for the full Phase 5
 write-up). Doc trio updated to mark #9 DONE; retro at
