@@ -178,7 +178,6 @@ def init_db():
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             asset TEXT NOT NULL,
             trade_id INTEGER NOT NULL,
             timestamp INTEGER NOT NULL,
@@ -188,16 +187,12 @@ def init_db():
             quote_amount REAL NOT NULL,
             is_buyer_maker INTEGER NOT NULL,
             side TEXT NOT NULL,
-            UNIQUE(asset, trade_id)
+            PRIMARY KEY (asset, trade_id)
         )
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_trades_asset_timestamp
             ON trades(asset, timestamp DESC)
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_trades_asset_tradeid
-            ON trades(asset, trade_id DESC)
     """)
 
     conn.commit()
