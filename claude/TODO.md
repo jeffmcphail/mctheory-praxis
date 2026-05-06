@@ -18,19 +18,6 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **Cycle 23.5: order_book_snapshots Phase 5 cleanup.** Run after
-  24-48h burn-in confirms the post-cutover dual-write writer is
-  stable. Two-task cleanup:
-  1. Modify `engines/crypto_data_collector.py`
-     `collect_order_book_snapshot` to single-write to
-     `order_book_snapshots` only (drop the `_legacy` INSERT and the
-     runtime PK-introspection branch added in Cycle 23).
-  2. DROP TABLE `order_book_snapshots_legacy`.
-  Plus standard cleanup: doc updates marking row #7 as DONE
-  (no longer DONE-PARTIAL), retro at
-  `claude/retros/RETRO_order_book_phase5_cleanup.md`.
-  *(Source: Cycle 23 retro; deferred per Rule 35.6 Phase 5 pattern.)*
-
 - **Cycle 24.5: price_snapshots Phase 5 cleanup.** Run after 24-48h
   burn-in confirms the post-cutover dual-write writer is stable.
   Two-task cleanup:
@@ -409,6 +396,16 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   seconds at write time to preserve `spike_scanner.db`'s seconds
   contract (audit deferred). Phase 0 commit: `b8fa847`. Phases 2-4
   commit: `6ca1796`.
+- Cycle 23.5: `order_book_snapshots` Phase 5 cleanup (commit
+  `<CYCLE_23_5_HASH>`). Dropped `_legacy` (104,776 rows) +
+  empty `_v2` stub via `scripts/migrations/cycle23_5_order_book_cleanup.py`
+  (legacy/live ratio at drop = 99.99%). Collapsed
+  `collect_order_book_snapshot` to single-write (removed runtime
+  PK introspection, dual-INSERT branch, and the `_v2` CREATE
+  block in `init_db()`). Row #7 of `SCHEMA_MIGRATION_PLAN.md`
+  flipped from DONE-PARTIAL to DONE; first hybrid-workflow cycle
+  (Claude drafted the cleanup script + writer-collapse brief,
+  Code applied the on-disk edit).
 - Cycle 23: `order_book_snapshots` migrated to
   Rule 35 via the **first dual-write pilot** in the migration program
   (Phases 0-4; Phase 5 cleanup deferred to Cycle 23.5 after 24-48h

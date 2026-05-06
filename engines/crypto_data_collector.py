@@ -176,53 +176,6 @@ def init_db():
             ON order_book_snapshots(asset, timestamp DESC)
     """)
 
-    # Cycle 23 dual-write target (Rule 35). Created alongside the legacy
-    # table for the dual-write window; will become the live `order_book_snapshots`
-    # at Phase 4 cutover (RENAME pair). Schema differences from legacy:
-    #   * no `id` AUTOINCREMENT; compound `PRIMARY KEY (asset, timestamp)`
-    #   * `timestamp` stored as Binance API ms (no `// 1000` truncation)
-    # Datetime column unchanged (already ISO with microsecond precision).
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS order_book_snapshots_v2 (
-            asset TEXT NOT NULL,
-            timestamp INTEGER NOT NULL,
-            datetime TEXT NOT NULL,
-            mid_price REAL NOT NULL,
-            best_bid REAL NOT NULL,
-            best_ask REAL NOT NULL,
-            spread REAL NOT NULL,
-            spread_bps REAL NOT NULL,
-            bid_price_1 REAL, bid_vol_1 REAL,
-            bid_price_2 REAL, bid_vol_2 REAL,
-            bid_price_3 REAL, bid_vol_3 REAL,
-            bid_price_4 REAL, bid_vol_4 REAL,
-            bid_price_5 REAL, bid_vol_5 REAL,
-            bid_price_6 REAL, bid_vol_6 REAL,
-            bid_price_7 REAL, bid_vol_7 REAL,
-            bid_price_8 REAL, bid_vol_8 REAL,
-            bid_price_9 REAL, bid_vol_9 REAL,
-            bid_price_10 REAL, bid_vol_10 REAL,
-            ask_price_1 REAL, ask_vol_1 REAL,
-            ask_price_2 REAL, ask_vol_2 REAL,
-            ask_price_3 REAL, ask_vol_3 REAL,
-            ask_price_4 REAL, ask_vol_4 REAL,
-            ask_price_5 REAL, ask_vol_5 REAL,
-            ask_price_6 REAL, ask_vol_6 REAL,
-            ask_price_7 REAL, ask_vol_7 REAL,
-            ask_price_8 REAL, ask_vol_8 REAL,
-            ask_price_9 REAL, ask_vol_9 REAL,
-            ask_price_10 REAL, ask_vol_10 REAL,
-            bid_volume_top10 REAL NOT NULL,
-            ask_volume_top10 REAL NOT NULL,
-            order_imbalance_top10 REAL NOT NULL,
-            PRIMARY KEY (asset, timestamp)
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ob_v2_asset_timestamp
-            ON order_book_snapshots_v2(asset, timestamp DESC)
-    """)
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -707,34 +660,9 @@ def collect_order_book_snapshot(asset, exchange, conn):
     bid_flat = [v for b in bids for v in b]
     ask_flat = [v for a in asks for v in a]
 
-    # Cycle 23 dual-write. The writer adapts to whichever phase the table
-    # rename is in (Phase 0-3 vs Phase 4+ post-cutover):
-    #   * Pre-cutover: live name "order_book_snapshots" is the OLD seconds-
-    #     format table; "order_book_snapshots_v2" is the NEW ms-format
-    #     table. Insert seconds-truncated ts into the live name; ms into v2.
-    #   * Post-cutover: live name "order_book_snapshots" is the NEW
-    #     ms-format table (was v2, renamed); "order_book_snapshots_legacy"
-    #     is the OLD seconds-format table (was the live name, renamed).
-    #     Insert ms ts into the live name; seconds into legacy.
-    # Detect by introspecting the live table's PK shape: if it has an
-    # `id` column, we're pre-cutover; otherwise we're post-cutover.
-    # This dual-write window is removed by Cycle 23.5 (drop _legacy +
-    # single-write to live only). Until then the writer keeps both
-    # representations in sync for any pre-Cycle-23 reader.
-    cursor = conn.cursor()
-    pre_cutover = any(
-        c[1] == "id" for c in cursor.execute(
-            "PRAGMA table_info(order_book_snapshots)"
-        ).fetchall()
-    )
-    if pre_cutover:
-        live_table = "order_book_snapshots"   # OLD schema (seconds, with id)
-        ms_table = "order_book_snapshots_v2"  # NEW schema (ms, no id)
-    else:
-        live_table = "order_book_snapshots"           # NEW schema (ms, no id)
-        ms_table = None                               # live is already ms
-        legacy_table = "order_book_snapshots_legacy"  # OLD schema (seconds)
-
+    # Single-write to the post-Cycle-23-cutover order_book_snapshots
+    # table (Rule 35: ms timestamp, datetime ISO with +00:00 microsecond
+    # precision, compound PK on (asset, timestamp), no `id`).
     cols_sql = (
         "asset, timestamp, datetime, mid_price, best_bid, best_ask, "
         "spread, spread_bps, "
@@ -749,41 +677,20 @@ def collect_order_book_snapshot(asset, exchange, conn):
         "bid_volume_top10, ask_volume_top10, order_imbalance_top10"
     )
     placeholders = ", ".join(["?"] * 51)
-    common_tail = [
-        dt, mid, best_bid, best_ask, spread, spread_bps,
+    values = [
+        asset, ts_ms, dt, mid, best_bid, best_ask, spread, spread_bps,
         *bid_flat, *ask_flat,
         bid_top10, ask_top10, imbalance,
     ]
-    sec_values = [asset, ts_ms // 1000] + common_tail
-    ms_values = [asset, ts_ms] + common_tail
-
     try:
-        if pre_cutover:
-            cursor.execute(
-                f"INSERT OR IGNORE INTO {live_table} ({cols_sql}) "
-                f"VALUES ({placeholders})",
-                sec_values,
-            )
-            primary_inserted = cursor.rowcount
-            cursor.execute(
-                f"INSERT OR IGNORE INTO {ms_table} ({cols_sql}) "
-                f"VALUES ({placeholders})",
-                ms_values,
-            )
-        else:
-            cursor.execute(
-                f"INSERT OR IGNORE INTO {live_table} ({cols_sql}) "
-                f"VALUES ({placeholders})",
-                ms_values,
-            )
-            primary_inserted = cursor.rowcount
-            cursor.execute(
-                f"INSERT OR IGNORE INTO {legacy_table} ({cols_sql}) "
-                f"VALUES ({placeholders})",
-                sec_values,
-            )
+        cursor = conn.cursor()
+        cursor.execute(
+            f"INSERT OR IGNORE INTO order_book_snapshots ({cols_sql}) "
+            f"VALUES ({placeholders})",
+            values,
+        )
         conn.commit()
-        return (primary_inserted, None)
+        return (cursor.rowcount, None)
     except Exception as e:
         return (0, f"insert: {type(e).__name__}: {e}")
 

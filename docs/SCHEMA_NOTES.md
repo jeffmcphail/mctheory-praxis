@@ -197,7 +197,7 @@ server, all engines, and analysis scripts.
   tables" below).
 - Migration cycle: TBD.
 
-#### Table: order_book_snapshots (CONFORMING -- Cycle 23, dual-write pilot)
+#### Table: order_book_snapshots (CONFORMING -- Cycles 23 + 23.5, dual-write pilot)
 
 - Columns: `asset`, `timestamp` (INTEGER **ms** UTC, full Binance API
   precision incl. sub-second tail), `datetime` (TEXT ISO with
@@ -207,9 +207,10 @@ server, all engines, and analysis scripts.
 - Scheduled task: `PraxisOrderBookCollector` (hourly back-to-back,
   3550s windowed, 10s cadence).
 - 88,894 rows at cutover (BTC + ETH growing ~12 rows/min).
-- **First dual-write cycle in the migration program**. Phase 0-4
-  executed in this cycle; Phase 5 (drop `_legacy`, single-write
-  collapse) deferred to Cycle 23.5 after 24-48h burn-in.
+- **First dual-write cycle in the migration program**. Phases 0-4
+  executed in Cycle 23; Phase 5 (drop `_legacy`, single-write
+  collapse, drop `_v2` CREATE in `init_db()`) executed in
+  Cycle 23.5 after 24h burn-in.
 - **Precision recovery**: pre-Cycle-23 the writer truncated Binance's
   ms `fundingTime` to seconds via `ts_ms // 1000` while the matching
   `datetime` field preserved sub-second precision; the migration
@@ -223,12 +224,6 @@ server, all engines, and analysis scripts.
   migration repairs this without code change. `get_order_book_snapshot`'s
   `ABS(timestamp - at_timestamp_ms)` math also becomes meaningful
   post-migration.
-- **Dual-write window writer** (in effect until Cycle 23.5):
-  introspects the live table's PK shape on every iteration. If `id`
-  column present (pre-cutover state), writes seconds-truncated ts to
-  live + ms to `_v2`. If no `id` (post-cutover state), writes ms to
-  live + seconds-truncated ts to `_legacy`. The runtime adaptation
-  prevents the writer from breaking across the cutover RENAME.
 
 #### Table: trades (NEAR-CONFORMING)
 
@@ -379,7 +374,7 @@ added it to MCP health.
 | crypto_data | ohlcv_4h | **CONFORMING** | **20** | stop-migrate-start | Done |
 | crypto_data | ohlcv_daily | **CONFORMING** | **18** | stop-migrate-start | Done |
 | crypto_data | onchain_btc | NONCONFORMING | TBD | stop-migrate-start | No active collector |
-| crypto_data | order_book_snapshots | **CONFORMING (DONE-PARTIAL)** | **23** | dual-write | Phases 0-4 done; Phase 5 cleanup in Cycle 23.5 |
+| crypto_data | order_book_snapshots | **CONFORMING** | **23 + 23.5** | dual-write | Phases 0-4 in 23; Phase 5 cleanup done in 23.5 |
 | crypto_data | trades | NEAR-CONFORMING | TBD | dual-write | timestamp already ms |
 | live_collector | collection_log | NONCONFORMING | TBD | dual-write | TEXT timestamp |
 | live_collector | price_snapshots | **CONFORMING (DONE-PARTIAL)** | **24** | dual-write | Phases 0-4 done; Phase 5 cleanup in Cycle 24.5 |
