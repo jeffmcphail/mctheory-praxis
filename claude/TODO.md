@@ -379,7 +379,7 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   contract (audit deferred). Phase 0 commit: `b8fa847`. Phases 2-4
   commit: `6ca1796`.
 - **Cycle 24.5**: `live_collector.price_snapshots` Phase 5 cleanup
-  (commit `<CYCLE_24_5_HASH>`). Dropped `_legacy` (448,941 rows) +
+  (commit `1016ea5`). Dropped `_legacy` (448,941 rows) +
   empty `_v2` stub via
   `scripts/migrations/cycle24_5_price_snapshots_cleanup.py`
   (legacy/live ratio at drop = 99.25%; `_v2` had been empty since

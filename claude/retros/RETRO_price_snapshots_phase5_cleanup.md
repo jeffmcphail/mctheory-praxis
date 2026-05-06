@@ -112,7 +112,7 @@ No regressions: other collectors still healthy.
   `CONFORMING (DONE-PARTIAL) | 24` to `CONFORMING | 24 + 24.5`.
   Per-table prose: removed dual-write writer paragraph.
 - `docs/SCHEMA_MIGRATION_PLAN.md`: row updated from
-  `DONE-PARTIAL | 6ca1796` to `DONE | <CYCLE_24_5_HASH>`.
+  `DONE-PARTIAL | 6ca1796` to `DONE | 1016ea5`.
 - `claude/TODO.md`: Cycle 24.5 added to "Recently closed".
 
 ---

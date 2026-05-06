@@ -24,8 +24,8 @@
 | 22 | ohlcv_1m | simple | DONE | 5c1f248 |
 | 23 | order_book_snapshots | dual-write | DONE | `c21a679` |
 | 23.5 | order_book_snapshots Phase 5 cleanup | code-only | DONE | `c21a679` |
-| 24 | live_collector.price_snapshots | dual-write | DONE | `<CYCLE_24_5_HASH>` |
-| 24.5 | price_snapshots Phase 5 cleanup | code-only | DONE | `<CYCLE_24_5_HASH>` |
+| 24 | live_collector.price_snapshots | dual-write | DONE | `1016ea5` |
+| 24.5 | price_snapshots Phase 5 cleanup | code-only | DONE | `1016ea5` |
 | 25 | smart_money.position_snapshots | dual-write | DONE-PARTIAL | 874bf81 |
 | 25.5 | position_snapshots Phase 5 cleanup | code-only | pending | -- |
 | 26 | trades | dual-write | pending | -- |
@@ -430,7 +430,7 @@ data. If not, decide between (a) truncating in the writer,
   the live table's PK shape) or be updated in the same commit as the
   cutover. We chose the runtime-adaptive approach for this cycle.
 
-### #8 -- live_collector.price_snapshots (DONE, Cycles 24 + 24.5, commits 6ca1796 + `<CYCLE_24_5_HASH>`)
+### #8 -- live_collector.price_snapshots (DONE, Cycles 24 + 24.5, commits 6ca1796 + `1016ea5`)
 
 - DB: live_collector.db (sidecar)
 - Rows: 351,615 at Brief-write time (growing ~50/min via continuous
@@ -485,7 +485,7 @@ data. If not, decide between (a) truncating in the writer,
   - Phase 2 backfill (358,661 rows, pure-SQL INSERT-SELECT with
     `legacy_ts * 1000`): 2.243s wall-clock (Brief budgeted ~30s)
   - Phase 4 atomic RENAME pair: 0.004s wall-clock
-- **Phase 5 (cleanup) executed in Cycle 24.5** (`<CYCLE_24_5_HASH>`)
+- **Phase 5 (cleanup) executed in Cycle 24.5** (`1016ea5`)
   after ~30h burn-in: dropped `_legacy` (448,941 rows; legacy/live
   ratio at drop = 99.25%) + `_v2` empty stub via
   `scripts/migrations/cycle24_5_price_snapshots_cleanup.py`;
