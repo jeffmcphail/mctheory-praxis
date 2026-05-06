@@ -15,16 +15,18 @@ post-cutover operation, the `_legacy` and `_v2` artifacts were
 removed:
 
 - `position_snapshots_legacy` dropped (was receiving dual-writes
-  via the runtime-introspection writer; <ROW_COUNT> rows at drop
+  via the runtime-introspection writer; 79,076 rows at drop
   time).
 - `position_snapshots_v2` dropped (empty stub recreated each
   PraxisSmartMoney fire by `init_db()`'s `CREATE TABLE IF NOT
   EXISTS` from Cycle 25 Phase 0).
 - Two writer sites in `engines/smart_money.py` (`cmd_snapshot`
-  and `cmd_loop`) both collapsed to single-write; removed
-  runtime PK introspection, dual-INSERT logic, and the
+  and `cmd_monitor` -- the brief's "cmd_loop" was a memory-
+  reconstruction error; the actual function name is `cmd_monitor`)
+  both collapsed to single-write; removed runtime PK
+  introspection, dual-INSERT logic, and the
   `position_snapshots_v2` CREATE in `init_db()`. Net:
-  ~<LINES_REMOVED> lines removed.
+  91 deletions / 20 insertions (-71 net).
 
 No data loss; the live `position_snapshots` (post-cutover ms +
 datetime schema, compound PK on `(snapshot_id, wallet,
@@ -58,15 +60,27 @@ naturally between fires.
 
 Code edited `engines/smart_money.py` per the hybrid brief:
 
-- `init_db()`: removed `CREATE TABLE position_snapshots_v2`
-  block + index. <LINES_REMOVED_INIT_DB> lines.
-- `cmd_snapshot()` writer (line <LINE_SNAPSHOT>): replaced
-  runtime-introspection + dual-INSERT block with single
-  INSERT into the live table.
-- `cmd_loop()` writer (line <LINE_LOOP>): same collapse.
-- Net: <LINES_REMOVED> deletions / <LINES_INSERTED> insertions.
+- `init_db()` (line 58): removed `CREATE TABLE
+  position_snapshots_v2` block + its preceding Cycle-25 comment.
+  23 lines removed (no separate index existed for v2 in this
+  cycle, unlike Cycles 23/24).
+- `cmd_snapshot()` writer (line 342 post-collapse; was 411
+  pre-collapse): replaced runtime-introspection + dual-INSERT
+  block with single INSERT into the live table via the shared
+  helper.
+- `cmd_monitor()` writer (line 666 post-collapse; was 736
+  pre-collapse -- and note the brief said "cmd_loop" but the
+  actual function name is `cmd_monitor`): same collapse via the
+  same helper.
+- **DID extract a shared helper** `_insert_position_row` (line
+  139 post-collapse) -- Code took the optional DRY refactor
+  named in the brief. Replaces the prior `_insert_position_pair`
+  helper (which now had no reason to exist as "pair" implied
+  legacy + new). Also removed `_position_snapshots_pre_cutover`
+  introspection helper entirely.
+- Net: 91 deletions / 20 insertions (-71 net).
 
-py_compile clean. Committed as `<CYCLE_25_5_HASH_STEP_1>`.
+py_compile clean. Committed as `83ce624` (Cycle 25.5 step 1).
 
 ### Step 2: Cleanup migration script
 
@@ -76,21 +90,28 @@ Pre-flight checks PASSED:
 - Live table has post-cutover schema (compound PK without `id`,
   has `datetime` column, `MAX(timestamp) > 1e12` confirms ms
   format).
-- Legacy row count: <LEGACY_COUNT>; live: <LIVE_COUNT>; ratio:
-  <RATIO>%.
+- Legacy row count: 79,076; live: 79,076; ratio: 100.00% exactly.
+  **Cleanest cutover in the migration program** -- compare
+  Cycle 23.5 (99.99%, 8-row gap from OrderBook in-flight) and
+  Cycle 24.5 (99.25%, 3,396-row gap from LiveCollector
+  kill-mid-write). The perfect ratio here is a direct consequence
+  of the scheduled-not-long-lived process pattern: PraxisSmartMoney
+  exits cleanly between fires, so there are zero in-flight writes
+  to be lost during the Phase 4 RENAME pair. Future Phase 5 cycles
+  on scheduled collectors should expect to see this pattern.
 - `_v2` stub was empty.
 - Pre-flight #4 (legacy age guard): legacy's most recent write
-  was <AGE_SECONDS>s ago, far past the 60s threshold (next
-  scheduled fire is hours away).
+  was 7,777s ago, far past the 60s threshold (next scheduled
+  fire is hours away).
 
 DROP transaction wall-clock: sub-second.
 
 ### Step 3: Verification
 
 `get_collector_health` reports `position_snapshots` clean:
-- row_count: <POST_ROW_COUNT> (unchanged from drop time;
-  PraxisSmartMoney won't fire again until <NEXT_FIRE> UTC)
-- staleness_seconds: <STALENESS> (well below 28,800s threshold)
+- row_count: 79,076 (unchanged from drop time; PraxisSmartMoney
+  won't fire again until 20:24 UTC)
+- staleness_seconds: 7,869 (well below 28,800s threshold)
 - is_stale: false
 - `databases.smart_money.unmonitored` is now
   `["convergence_signals", "position_changes", "tracked_wallets"]`
@@ -105,7 +126,9 @@ DROP transaction wall-clock: sub-second.
   Per-table prose: removed dual-write writer paragraph.
 - `docs/SCHEMA_MIGRATION_PLAN.md`: row #9 (position_snapshots)
   updated from `DONE-PARTIAL | 874bf81` to
-  `DONE | <CYCLE_25_5_HASH>`. Row 25.5 marked DONE.
+  `DONE | <CYCLE_25_5_HASH>`. Row 25.5 marked DONE. Per-cycle
+  prose section #9 gained a Phase 5 paragraph noting the
+  100.00% ratio + the scheduled-vs-long-lived process contrast.
 - `claude/TODO.md`: Cycle 25.5 added to "Recently closed".
 
 ---
@@ -123,10 +146,17 @@ write this retro skeleton.
 
 Cycle 25 was the first cycle in the migration program with
 TWO writer sites for the same table (`cmd_snapshot` for the
-production scheduled path, `cmd_loop` for ad-hoc continuous
-mode). Both needed the same dual-write treatment in Cycle 25
-and both need the same collapse here. Code <DID|DID NOT>
-extract a shared helper -- noted in the diff stat.
+production scheduled path, `cmd_monitor` for ad-hoc continuous
+mode -- the brief's "cmd_loop" was a memory-reconstruction
+mistake; the actual function is named `cmd_monitor`). Both
+needed the same dual-write treatment in Cycle 25 and both got
+the same collapse here. **Code DID extract a shared helper**
+(`_insert_position_row`) per the optional DRY refactor named
+in the brief -- a clean replacement for the prior
+`_insert_position_pair` (the "pair" name no longer made sense
+once there was only one row to write). Both call sites are
+now ~5 lines vs the previous ~10-line introspection-plus-call
+shape.
 
 ### The natural ordering
 

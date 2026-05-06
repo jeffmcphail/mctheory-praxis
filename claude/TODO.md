@@ -18,25 +18,6 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### High priority -- short and high-leverage
 
-- **Cycle 25.5: position_snapshots Phase 5 cleanup.** Run after
-  24-48h burn-in confirms the post-cutover dual-write writer is
-  stable. Two-task cleanup:
-  1. Modify `engines/smart_money.py` `cmd_snapshot` and `cmd_monitor`
-     to single-write to `position_snapshots` only (drop the
-     `_legacy` INSERT branch and the `_position_snapshots_pre_cutover`
-     introspection helper). Also drop the `position_snapshots_v2`
-     CREATE statement from `init_db()`.
-  2. DROP TABLE `position_snapshots_legacy` AND DROP TABLE
-     `position_snapshots_v2` (the empty v2 artifact left over from
-     init_db's idempotent CREATE post-cutover).
-  Plus standard cleanup: doc updates marking row #9 as DONE
-  (no longer DONE-PARTIAL), retro at
-  `claude/retros/RETRO_position_snapshots_phase5_cleanup.md`. Note
-  the smart_money task is a 6h scheduled task (not long-lived), so
-  the next scheduled invocation picks up the writer change
-  automatically -- no kill-and-relaunch step needed.
-  *(Source: Cycle 25 retro; deferred per Rule 35.6 Phase 5 pattern.)*
-
 - **Cycle 26: Migrate `trades` per the dual-write recipe.** Largest
   remaining table (~6.5M rows). Already near-conforming -- `timestamp`
   is already INTEGER ms; primarily needs PK shape change (likely
@@ -378,6 +359,35 @@ Highlights of the recovery + post-recovery sequence (2026-04-29 / 30):
   seconds at write time to preserve `spike_scanner.db`'s seconds
   contract (audit deferred). Phase 0 commit: `b8fa847`. Phases 2-4
   commit: `6ca1796`.
+- **Cycle 25.5**: `smart_money.position_snapshots` Phase 5 cleanup
+  (commit `<CYCLE_25_5_HASH>`). Dropped `_legacy` (79,076 rows) +
+  empty `_v2` stub via
+  `scripts/migrations/cycle25_5_position_snapshots_cleanup.py`.
+  **Cleanest cutover in the migration program**: legacy/live ratio
+  at drop = 100.00% exactly (79,076 = 79,076), because
+  PraxisSmartMoney is scheduled (not long-lived) so no in-flight
+  writes were lost to the cutover transaction window. Compare
+  Cycle 23.5 (99.99%, 8-row gap from OrderBook in-flight) and
+  Cycle 24.5 (99.25%, 3,396-row gap from LiveCollector
+  kill-mid-write). Collapsed both writer sites (`cmd_snapshot` +
+  `cmd_monitor`) to single-write through a shared
+  `_insert_position_row` helper (Code took the optional DRY
+  refactor from the brief); removed
+  `_position_snapshots_pre_cutover` introspection helper and
+  the `_v2` CREATE block in `init_db()`. Row #9 of
+  `SCHEMA_MIGRATION_PLAN.md` flipped DONE-PARTIAL -> DONE.
+  Post-cleanup live-MCP state: row_count=79,076 (unchanged --
+  next 6h fire 20:24 UTC), staleness within threshold,
+  `is_stale=false`; `smart_money.unmonitored` now contains only
+  `["convergence_signals", "position_changes",
+  "tracked_wallets"]`. **Confirmed the natural ordering for
+  scheduled-task collectors**: writer-collapse-commit ->
+  cleanup-script -> next-scheduled-fire-auto-uses-new-code, no
+  kill step needed; pre-flight #4 (legacy age guard) trivially
+  passed (legacy last write 7,777s ago). Fourth hybrid-workflow
+  cycle (after 23.5 / 24.5 / 28). Migration program now 9-of-10
+  tables done; only Cycle 26 (trades) and Cycle 27 (`_to_latest_ms`
+  cleanup) remain.
 - **Cycle 24.5**: `live_collector.price_snapshots` Phase 5 cleanup
   (commit `1016ea5`). Dropped `_legacy` (448,941 rows) +
   empty `_v2` stub via

@@ -26,8 +26,8 @@
 | 23.5 | order_book_snapshots Phase 5 cleanup | code-only | DONE | `c21a679` |
 | 24 | live_collector.price_snapshots | dual-write | DONE | `1016ea5` |
 | 24.5 | price_snapshots Phase 5 cleanup | code-only | DONE | `1016ea5` |
-| 25 | smart_money.position_snapshots | dual-write | DONE-PARTIAL | 874bf81 |
-| 25.5 | position_snapshots Phase 5 cleanup | code-only | pending | -- |
+| 25 | smart_money.position_snapshots | dual-write | DONE | `<CYCLE_25_5_HASH>` |
+| 25.5 | position_snapshots Phase 5 cleanup | code-only | DONE | `<CYCLE_25_5_HASH>` |
 | 26 | trades | dual-write | pending | -- |
 | 27 | _to_latest_ms cleanup | code-only | pending | -- |
 
@@ -507,7 +507,7 @@ data. If not, decide between (a) truncating in the writer,
   smart_money.position_snapshots -- TWO writer sites and a
   schema-shape change (no INTEGER timestamp column today).
 
-### #9 -- smart_money.position_snapshots (DONE-PARTIAL, Cycle 25, commit 874bf81)
+### #9 -- smart_money.position_snapshots (DONE, Cycles 25 + 25.5, commits 874bf81 + `<CYCLE_25_5_HASH>`)
 
 - DB: smart_money.db (sidecar)
 - Rows at cutover: 68,812
@@ -553,25 +553,36 @@ data. If not, decide between (a) truncating in the writer,
   (not a long-lived process); the next scheduled invocation picks
   up the new code automatically. No kill-and-relaunch step needed
   -- asymmetric vs Cycle 24's PraxisLiveCollector
+- **Phase 5 (cleanup) executed in Cycle 25.5** (`<CYCLE_25_5_HASH>`)
+  after ~38h burn-in: dropped `_legacy` (79,076 rows) + `_v2` empty
+  stub via `scripts/migrations/cycle25_5_position_snapshots_cleanup.py`;
+  collapsed both writer sites (`cmd_snapshot` + `cmd_monitor`) to
+  single-write through a shared `_insert_position_row` helper
+  (Code took the optional DRY refactor from the Brief); removed
+  `_position_snapshots_pre_cutover` introspection helper and the
+  `_v2` CREATE in `init_db()`. **Cleanest cutover in the migration
+  program**: legacy/live ratio at drop = 100.00% exactly
+  (79,076 = 79,076), because PraxisSmartMoney is scheduled (not
+  long-lived) so there are no in-flight writes lost to the
+  cutover transaction window. Compare Cycle 23.5's 99.99% (8-row
+  gap from OrderBook in-flight) and Cycle 24.5's 99.25% (3,396-row
+  gap from LiveCollector kill-mid-write). The natural ordering
+  for scheduled-task collectors (writer-collapse-commit ->
+  cleanup-script -> next-scheduled-fire-auto-uses-new-code) is
+  simpler than the long-lived ordering required by Cycles 23.5
+  and 24.5; pre-flight #4 (legacy age guard) was retained as
+  defense-in-depth and trivially passed (legacy last write
+  7,777s ago).
 - Note: third use of the recipe. Cycle 26 will be `trades` (largest
   remaining migration; already near-conforming since `timestamp`
   is already INTEGER ms); needs investigation of whether the trades
   collector is long-lived or scheduled before drafting the Brief.
 
-### #9.5 -- position_snapshots Phase 5 cleanup (Cycle 25.5)
+### #9.5 -- position_snapshots Phase 5 cleanup (DONE, Cycle 25.5, commit `<CYCLE_25_5_HASH>`)
 
-- Run after 24-48h burn-in confirms the post-cutover dual-write
-  writer is stable
-- Two-task cleanup:
-  1. Modify `engines/smart_money.py` `cmd_snapshot` and `cmd_monitor`
-     to single-write to `position_snapshots` only (drop the
-     `_legacy` INSERT branch and the runtime-introspection helper)
-  2. DROP TABLE `position_snapshots_legacy` (and the empty
-     `position_snapshots_v2` artifact left over from
-     `init_db()`'s idempotent CREATE)
-- Plus standard cleanup: doc updates marking row #9 as DONE
-  (no longer DONE-PARTIAL); retro at
-  `claude/retros/RETRO_position_snapshots_phase5_cleanup.md`
+Executed in Cycle 25.5 (see #9 above for the full Phase 5
+write-up). Doc trio updated to mark #9 DONE; retro at
+`claude/retros/RETRO_position_snapshots_phase5_cleanup.md`.
 
 ### #10 -- trades (largest, last)
 

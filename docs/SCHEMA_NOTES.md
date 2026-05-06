@@ -326,16 +326,17 @@ added it to MCP health.
 - 0 rows; populated only when a wallet's position size changes
   between snapshots.
 
-#### Table: position_snapshots (CONFORMING (DONE-PARTIAL) -- Cycle 25)
+#### Table: position_snapshots (CONFORMING -- Cycles 25 + 25.5, dual-write)
 
 - Columns: `snapshot_id`, `timestamp` (INTEGER ms UTC), `datetime`
   (TEXT ISO with `+00:00`, microsecond), `wallet`, `market_slug`,
   `market_title`, `outcome`, `size`, `avg_price`, `current_price`,
   `value_usd`, `pnl_usd`. Compound PK on the natural key
   `(snapshot_id, wallet, market_slug, outcome)` (no synthetic `id`).
-- Writers: `engines/smart_money.py` `cmd_snapshot` (L335) and
-  `cmd_monitor` (L681). Both go through the
-  `_insert_position_pair` dual-write helper.
+- Writers: `engines/smart_money.py` `cmd_snapshot` and `cmd_monitor`
+  both go through the `_insert_position_row` single-write helper
+  (collapsed in Cycle 25.5; was a `_insert_position_pair` dual-write
+  helper during the 25 -> 25.5 burn-in window).
 - Schema-shape change: Cycle 25 added the INTEGER `timestamp` column
   and renamed the legacy TEXT `timestamp` column to `datetime`. The
   natural key was already a `UNIQUE` constraint on the legacy
@@ -347,11 +348,10 @@ added it to MCP health.
   rows (whenever the microsecond fraction is >= 500us). Drift is
   harmless for this table since readers key on `snapshot_id`, not
   `timestamp`. Documented in `RETRO_position_snapshots_dual_write.md`.
-- Migration cycle: 25 (dual-write Phases 0-4; Phase 5 cleanup
-  deferred to Cycle 25.5 after 24-48h burn-in).
-- Pre-cutover dual-write writer + post-cutover writer both use
-  runtime PK introspection (`_position_snapshots_pre_cutover`) so
-  the same code path handles both states.
+- **Third dual-write cycle in the migration program**. Phases 0-4
+  executed in Cycle 25; Phase 5 (drop `_legacy`, single-write
+  collapse, drop `_v2` CREATE in `init_db()`) executed in
+  Cycle 25.5 after ~38h burn-in.
 
 #### Table: tracked_wallets (state, NOT temporal-row)
 
@@ -380,7 +380,7 @@ added it to MCP health.
 | live_collector | tracked_markets | N/A | -- | -- | State, not temporal |
 | smart_money | convergence_signals | EMPTY | -- | -- | Defer until populated |
 | smart_money | position_changes | EMPTY | -- | -- | Defer until populated |
-| smart_money | position_snapshots | **CONFORMING (DONE-PARTIAL)** | **25** | dual-write | Phases 0-4 done; Phase 5 cleanup in Cycle 25.5 |
+| smart_money | position_snapshots | **CONFORMING** | **25 + 25.5** | dual-write | Phases 0-4 in 25; Phase 5 cleanup done in 25.5 |
 | smart_money | tracked_wallets | N/A | -- | -- | State, not temporal |
 
 `docs/SCHEMA_MIGRATION_PLAN.md` carries the ordered roadmap and
