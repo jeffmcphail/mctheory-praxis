@@ -482,8 +482,6 @@ def _to_latest_ms(latest, fmt: str):
     """Convert a `latest` timestamp value to Unix milliseconds.
 
     fmt:
-      "auto"     -- numeric: detect ms vs s by magnitude (>1e12 -> ms,
-                    >1e9 -> s); else None.
       "ms"       -- numeric milliseconds since epoch.
       "s"        -- numeric seconds since epoch.
       "iso_text" -- ISO 8601 string (e.g. "2026-04-29 22:25:24.71" or
@@ -491,7 +489,11 @@ def _to_latest_ms(latest, fmt: str):
                     handles both space and T separators in Python 3.11+.
       "date"     -- "YYYY-MM-DD" string treated as UTC midnight.
 
-    Returns int (ms) or None if unparseable.
+    Returns int (ms) or None if unparseable. Cycle 27 removed the
+    "auto" magnitude-classification branch: every monitored sidecar
+    declares an explicit timestamp_format, so an unrecognized fmt
+    now returns None instead of being silently classified by
+    magnitude.
     """
     if latest is None:
         return None
@@ -535,10 +537,5 @@ def _to_latest_ms(latest, fmt: str):
     if fmt == "ms":
         return int(latest)
     if fmt == "s":
-        return int(latest * 1000)
-    # "auto"
-    if latest > 1e12:
-        return int(latest)
-    if latest > 1e9:
         return int(latest * 1000)
     return None
