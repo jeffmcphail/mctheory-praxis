@@ -98,7 +98,7 @@ Clean.
 
 ### Step 3: Commit + push
 
-Commit `<CYCLE_29_HASH>` on origin/master.
+Commit `2a38848` on origin/master.
 
 ### Step 4: Verification
 
