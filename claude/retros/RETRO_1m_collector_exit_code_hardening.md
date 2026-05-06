@@ -82,7 +82,7 @@ Clean.
 
 ### Step 3: Commit + push
 
-Commit `<CYCLE_28_HASH>` on origin/master.
+Commit `4fa6941` on origin/master.
 
 ### Step 4: Verification
 
