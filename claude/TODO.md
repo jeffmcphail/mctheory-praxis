@@ -40,19 +40,6 @@ Priority-grouped, then domain-grouped within each priority.
   needs registering so it picks up daily at 00:35 going forward.
   *(Source: Cycle 19 -- session lacked admin privileges)*
 
-- **TRADING_ATLAS.md count reconciliation**: 15 numbered headings vs 17
-  prose-claimed. Either find the two missing experiments or fix the prose.
-  Atlas search would benefit from accuracy. ~30-45 min Code time including
-  atlas_sync re-run. *(Source: Cycle 12 retro section 3 / Cycle 12 commit)*
-
-- **Experiment 10 addendum parser fix**: Cycle 12 parser stops Exp 10 at
-  the next `## ` divider, losing the "leverage runaway, not strategy
-  failure" final conclusion. Two paths: (a) extend parser to fold orphan
-  addendums by experiment-number reference, or (b) move addendum text into
-  Exp 10's body in the markdown. (b) is much simpler and keeps
-  markdown-as-source rule clean. ~30 min Code time. *(Source: Cycle 12
-  retro section 7.1)*
-
 ### Mid priority -- structural improvements
 
 - **`phase3_models.joblib` retrain**: funding_rates ground truth is back
@@ -172,6 +159,53 @@ Priority-grouped, then domain-grouped within each priority.
   to Polymarket crypto markets. (Now unblocked since funding_rates ground
   truth is restored post-recovery.)
 
+### LSTM v2 upgrade plan: info bars + triple-barrier labeling
+
+The v1 LSTM (`engines/lstm_predictor.py`, 1069 lines, 7
+features x 60 timesteps with close/high/low/volume/FearGreed/
+funding/Hurst) is built but not yet trained or validated. The
+**v2 upgrade** plans to integrate two techniques from the
+Financial Innovation (Feb 2025) paper, "Algorithmic crypto
+trading using information-driven bars, triple barrier labeling
+and deep learning":
+
+1. **Information-driven bars** (replacing time bars): dollar
+   bars, volume bars, or volume-imbalance bars per Lopez de
+   Prado. Each bar represents equal economic activity (or
+   equal directional conviction) rather than equal wall-clock
+   time, which makes the LSTM's input distribution more
+   stationary across regimes. Implementation comes in Cycle 34
+   ("Info Bars v0.1").
+
+2. **Triple-barrier labeling**: each training sample's label
+   is determined by which of three barriers (TP, SL, time) is
+   hit first within a lookforward window, rather than fixed
+   N-step-ahead returns. This is the same labeling discipline
+   used by intrabar confluence v8.1 (XGBoost) but applied to
+   the LSTM. Aligns features and labels in bar-index space (not
+   wall-clock space), which matters for event bars.
+
+3. **Deep learning architecture refresh**: the paper documents
+   architecture changes -- bidirectional layers, attention,
+   regime-aware embedding -- that explain why "new" LSTMs
+   work where v1-style architectures didn't.
+
+**Pre-requisite**: Cycle 34 ships info bars (dollar +
+volume-imbalance + volume run, per Lopez AFML Ch. 2). The LSTM
+v2 cycle (Cycle 35+) consumes those bars and applies
+triple-barrier labels in bar-index space.
+
+**Data already collected** (from v1 prep): 1800 daily OHLCV,
+2160 4h candles, 900 Fear & Greed, 2190 funding rates, 365
+on-chain. For info bars, the 8.83M trades in
+`crypto_data.trades` (post-Cycle-26 schema) provide the raw
+trade tape needed to construct dollar/volume/imbalance bars at
+arbitrary thresholds.
+
+**Source paper**: search for "Algorithmic crypto trading using
+information-driven bars, triple barrier labeling and deep
+learning" -- Financial Innovation, February 2025.
+
 ---
 
 ## Reading queue
@@ -194,6 +228,52 @@ techniques in this list show up across multiple TODOs.
 
 For context on what just shipped, see `docs/praxis_main_series_transcript.md`
 and the recent `claude/retros/RETRO_*.md` files.
+
+**PRE-CYCLE-17 CLEANUP QUEUE: CLOSED** (Cycle 32). The four
+high-priority hygiene items in the 2026-04-30 morning snapshot
+(commit `6e8e00d`) are now all closed: SCHEMA_NOTES.md timestamp
+heterogeneity doc was absorbed by Cycle 17; onchain_btc MCP
+monitoring was absorbed by Cycles 17 + 30 + 31; TRADING_ATLAS.md
+count reconciliation closed by Cycle 32; Experiment 10 addendum
+parser fix validated already-resolved by Cycle 32 (atlas_get(8)
+shows the leverage-runaway verdict captured).
+
+- **Cycle 32**: Atlas hygiene closeout + LSTM v2 TODO refresh
+  (commit `<CYCLE_32_HASH>`). Content-only edits to
+  `TRADING_ATLAS.md` and `claude/TODO.md`; no Python or DB
+  schema changes. **Three closures**: (1) TRADING_ATLAS.md count
+  reconciliation -- prose claimed "17 complete" experiments;
+  actual is 15 (numbered 1-4, 7-17, with intentional gaps at
+  5/6 from earlier renumbering when MOMENTUM and MICROSTRUCTURE
+  placeholders became Exps 8 and 13). Two count locations
+  corrected (lines 235 + 768) plus a breakdown re-tally from the
+  Atlas DB: NEGATIVE 7, INCONCLUSIVE 3, PARTIAL 4, POSITIVE 1
+  (Funding Rate Carry × Crypto). (2) Pending experiments
+  placeholder section refreshed -- previously listed 6 items
+  3-8; items 3-6 had since landed as Exps 3, 4, 8, 13. Section
+  reduced to FUNDAMENTAL × FX_G10 (carry) and ALTERNATIVE ×
+  CRYPTO (on-chain) -- the two genuinely-pending experiments --
+  plus a historical note explaining the renumbering.
+  (3) Experiment 10 addendum parser fix -- validated as already-
+  resolved; `atlas_get(8)` confirmed the parser captures the
+  "leverage runaway, not strategy failure" verdict in the
+  Exp 10 record (post-Cycle-12 markdown edits + atlas_sync
+  re-run absorbed the addendum into the experiment body).
+  **Plus one strategic doc addition**: LSTM v2 upgrade plan
+  added to State/context section, capturing the planned
+  integration of (a) information-driven bars from Lopez de
+  Prado AFML Ch. 2 (Cycle 34 deliverable), (b) triple-barrier
+  labeling per intrabar v8.1's XGBoost discipline applied to
+  the LSTM, (c) deep-learning architecture refresh per the
+  Financial Innovation (Feb 2025) paper. Placement: alongside
+  the LSTM v1 BUILT entry, since v2 is a multi-cycle plan
+  (Cycles 34 + 35+) not a single TODO item. atlas_sync re-run
+  after edits: 0 experiments added/changed/removed (structural
+  changes only; the 15 numbered experiments untouched).
+  **Numbering gap (5, 6) preserved intentionally** -- renumbering
+  7-17 to 5-15 would force a full atlas re-embed (every
+  md_hash changes), break historical citations, and provide
+  zero structural benefit.
 
 **MONITORING COVERAGE: COMPLETE** (Cycle 30 closed it). All 11
 monitored tables across all 3 Praxis SQLite databases now report

@@ -153,37 +153,29 @@ z-score warmup (60% of configs produced zero trades). Both are now fixed.
 
 ---
 
-## Pending experiments
+## Pending experiments (legitimate; not yet run)
 
-### 3. TA_STANDARD × FUTURES_INDEX
-- **Status**: Framework ready, needs data pipeline (could use Polygon futures or CCXT)
-- **Hypothesis**: Futures have clearer trend/mean-reversion regimes than crypto, lower noise
-- **Expected finding**: Similar to crypto (TA is TA regardless of asset class)
+### FUNDAMENTAL × FX_G10 (carry)
+- **Signal type**: Interest rate differential carry
+- **Hypothesis**: Carry has documented risk premium; CPO may
+  optimize timing. Originally listed as Exp 7 in earlier
+  planning; not yet run as a standalone CPO experiment.
 
-### 4. TA_STANDARD × FX_G10
-- **Status**: Framework ready, needs data pipeline
-- **Hypothesis**: FX has longest history and most stable microstructure
-- **Expected finding**: If TA works anywhere, it works here — but probably doesn't
+### ALTERNATIVE × CRYPTO (on-chain)
+- **Signal type**: Active addresses, exchange flows, whale
+  movements, hash rate trends.
+- **Hypothesis**: Alpha from information edge rather than
+  pattern edge. Originally listed as Exp 8 in earlier
+  planning; data pipeline now in place via `onchain_btc`
+  collector (Cycle 30 + Cycle 31), but no CPO experiment yet
+  built.
 
-### 5. MOMENTUM × CRYPTO
-- **Signal type**: Time-series momentum (past N-hour returns predict next N hours)
-- **Why different**: Momentum is a documented risk premium, not a technical pattern
-- **Hypothesis**: Crypto momentum may persist due to retail-dominated order flow
-
-### 6. MICROSTRUCTURE × CRYPTO
-- **Signal type**: Funding rate, order book imbalance, liquidation cascades
-- **Why different**: Structural/mechanical signals rather than price-pattern signals
-- **Hypothesis**: Best candidate for genuine persistent edge in crypto
-
-### 7. FUNDAMENTAL × FX_G10
-- **Signal type**: Carry (interest rate differential), PPP, current account
-- **Why different**: Macro factors, not technical patterns
-- **Hypothesis**: Carry has documented risk premium; CPO may optimize timing
-
-### 8. ALTERNATIVE × CRYPTO
-- **Signal type**: On-chain metrics (active addresses, exchange flows, whale movements)
-- **Why different**: Information not derivable from price alone
-- **Hypothesis**: Alpha from information edge rather than pattern edge
+> Historical note: this section previously listed pending
+> experiments numbered 3-8. Items 3, 4 (TA_STANDARD × FUTURES,
+> TA_STANDARD × FX_G10) became experiments 3 and 4. Items 5, 6
+> (MOMENTUM, MICROSTRUCTURE) were renumbered to experiments 8
+> and 13 when implemented. Items 7, 8 (FUNDAMENTAL FX, ALT
+> CRYPTO) above remain genuinely pending.
 
 ---
 
@@ -232,7 +224,7 @@ z-score warmup (60% of configs produced zero trades). Both are now fixed.
 | Framework version | CPO v6 |
 | Code location | engines/cpo_core.py, engines/*_strategy.py |
 | Data sources | Polygon.io (equities), CCXT/Binance (crypto) |
-| Total experiments | 17 complete |
+| Total experiments | 15 complete |
 
 ---
 
@@ -765,11 +757,13 @@ Findings:
 | FUNDAMENTAL | — | — | — | **TODO** (carry) | — |
 | ALTERNATIVE | **TODO** | — | — | — | — |
 
-**Total experiments: 17 complete**
-- ❌ No edge: 9 (TA crypto, TA FX, mean-reversion, MCb CPO, pairs TC, TA futures regime fluke, grid bot, DEX arb, momentum)
-- ⚠️ Weak positive: 2 (momentum ETH/SOL triple barrier, MCb GUI)
-- ✅ Confirmed: **1 — Funding Rate Carry × Crypto**
-- ⚠️ Blocked: 1 (VRP — needs real IV data)
+**Total experiments: 15 complete**
+- NEGATIVE (no edge): 7 — mean-reversion equity (Exp 1), TA crypto (2), TA futures regime-dependent (3), TA FX (4), grid bot (14), DEX spatial arb (16), 1-min momentum (17)
+- INCONCLUSIVE / BLOCKED: 3 — TA crypto triple-barrier re-run (10), TA FX triple-barrier re-run (12), VRP × BTC/ETH blocked on real-IV data (15)
+- PARTIAL (weak positive): 4 — MCb CPO (7), TSMOM 4h+daily (8), momentum ETH/SOL triple-barrier re-run (9), TA futures triple-barrier re-run (11)
+- POSITIVE (confirmed edge): 1 — Funding Rate Carry × Crypto (13)
+
+Numbering preserves historical IDs; the gap at experiments 5-6 is intentional (those were original placeholders that got renumbered into Exps 8 and 13 when implemented).
 
 **Atlas principle on microstructure:**
 > Structural/mechanical signals with clear economic mechanisms (funding rate carry) are categorically different from pattern-based signals (TA, momentum). The carry has a non-zero-sum basis: perp traders pay for leverage, market makers collect it. This payment does not arbitrage away because the demand for leverage is persistent. CPO correctly identifies which days/regimes make the carry favorable (high sustained rate, stable basis, high pct_positive), filtering out the noise trades that destroy returns at the strategy level.
