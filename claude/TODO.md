@@ -239,7 +239,7 @@ parser fix validated already-resolved by Cycle 32 (atlas_get(8)
 shows the leverage-runaway verdict captured).
 
 - **Cycle 32**: Atlas hygiene closeout + LSTM v2 TODO refresh
-  (commit `<CYCLE_32_HASH>`). Content-only edits to
+  (commit `2c98a22`). Content-only edits to
   `TRADING_ATLAS.md` and `claude/TODO.md`; no Python or DB
   schema changes. **Three closures**: (1) TRADING_ATLAS.md count
   reconciliation -- prose claimed "17 complete" experiments;

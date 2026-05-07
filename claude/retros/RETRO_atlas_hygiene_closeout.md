@@ -121,7 +121,7 @@ the remaining unfilled slots.
 
 **Items moved to Recently closed:**
 - Line 43 entry: TRADING_ATLAS.md count reconciliation -> closed
-  by Cycle 32 commit `<CYCLE_32_HASH>`
+  by Cycle 32 commit `2c98a22`
 - Line 48 entry: Experiment 10 addendum parser fix -> closed by
   validation (already-resolved); see this retro for context
 
