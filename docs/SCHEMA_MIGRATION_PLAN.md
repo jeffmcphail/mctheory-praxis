@@ -30,7 +30,7 @@
 | 25.5 | position_snapshots Phase 5 cleanup | code-only | DONE | `9339221` |
 | 26 | trades | one-shot rebuild | DONE | `39720bb` |
 | 27 | _to_latest_ms cleanup | code-only | DONE | `5d1162f` |
-| 31 | onchain_btc | one-shot rebuild | DONE | `<CYCLE_31_HASH>` |
+| 31 | onchain_btc | one-shot rebuild | DONE | `4cab1af` |
 
 Order rationale: small / re-fetchable / batch-cadence tables migrate
 first using the simple stop-migrate-start pattern. The dual-write
@@ -676,7 +676,7 @@ write-up). Doc trio updated to mark #9 DONE; retro at
   8,830,907 -> 8,832,907; latest advanced to
   2026-05-06T22:24:49 UTC.
 
-### #11 -- onchain_btc (DONE, Cycle 31, commits `e595eb8` (init_db + writer) + `<CYCLE_31_HASH>` (rebuild + doc trio))
+### #11 -- onchain_btc (DONE, Cycle 31, commits `e595eb8` (init_db + writer) + `4cab1af` (rebuild + doc trio))
 
 - DB: crypto_data.db
 - Rows: 370 (preserved 1:1 across the rebuild)
@@ -834,7 +834,7 @@ Followups from the program (not migrations themselves):
   corrects this -- the program at end-of-Cycle-30 was actually
   10/11, not 10/10.
 - Cycle 31: `onchain_btc` schema rebuild to full Rule 35
-  conformance (closed; commits `e595eb8` step 1 + `<CYCLE_31_HASH>`
+  conformance (closed; commits `e595eb8` step 1 + `4cab1af`
   step 2). Promoted to row #11 of the migration program scoreboard.
   See per-cycle prose section #11 above for full details. Closes
   the migration program at 11/11 with no exceptions.

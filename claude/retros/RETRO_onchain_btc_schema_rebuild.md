@@ -152,7 +152,7 @@ program is 11/11 conforming with no exceptions.
   with ohlcv_daily.
 - `docs/SCHEMA_MIGRATION_PLAN.md`: row #11 added marking
   onchain_btc as DONE | Cycle 31 | one-shot rebuild |
-  `<CYCLE_31_HASH>`. Migration program scoreboard updated to
+  `4cab1af`. Migration program scoreboard updated to
   **11/11 COMPLETE; no exceptions for daily-grain**, with an
   explicit reframing note acknowledging that Cycle 26's
   "10/10 with deferred onchain_btc" framing was incorrect (the

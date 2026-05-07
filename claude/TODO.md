@@ -269,7 +269,7 @@ final scoreboard and per-cycle details.
   latent risk (a JOIN author later doesn't know which tables
   lack the column). Better to enforce universally even at
   small per-table cost. Commits: `e595eb8` (step 1 init_db +
-  writer) + `<CYCLE_31_HASH>` (step 2 rebuild + doc trio).
+  writer) + `4cab1af` (step 2 rebuild + doc trio).
 
 - **Cycle 26**: `trades` migrated to Rule 35 via the **first
   one-shot rebuild in the migration program** (deliberately
