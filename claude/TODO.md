@@ -198,7 +198,8 @@ and the recent `claude/retros/RETRO_*.md` files.
 **MONITORING COVERAGE: COMPLETE** (Cycle 30 closed it). All 11
 monitored tables across all 3 Praxis SQLite databases now report
 `is_stale=false`. First time this has been true since `onchain_btc`
-went stale on 2026-04-28.
+went stale on 2026-04-28. As of Cycle 31, all 11 tables also
+conform to Rule 35 (no asterisks).
 
 - **Cycle 30**: registered `PraxisOnchainCollector` as a Windows
   Scheduled Task running daily at 00:45 local Toronto time. Closes
@@ -222,16 +223,53 @@ went stale on 2026-04-28.
   latest=2026-05-06T00:00:00 UTC, staleness=142,548s (39.6h vs
   172,800s threshold), `is_stale=false`. **All 11 monitored tables
   across the 3 databases now report `is_stale=false`** (first time
-  since 2026-04-28). Note: `onchain_btc` remains schema-NONCONFORMING
-  (no INTEGER `timestamp` column; keyed by `date` TEXT). A future
-  Rule 35 migration cycle could change that if/when desired -- not
-  blocking, since `_to_latest_ms` handles the `date` column via the
-  `date` timestamp_format branch.
+  since 2026-04-28). Note: `onchain_btc` remained schema-
+  NONCONFORMING at end of Cycle 30 (no INTEGER `timestamp`
+  column; keyed by `date` TEXT). Cycle 31 closed this gap --
+  see Cycle 31 entry above.
 
-**SCHEMA MIGRATION PROGRAM: COMPLETE** (Cycle 26 closed it). All
-10 temporal-row tables across the 3 Praxis SQLite databases now
+**SCHEMA MIGRATION PROGRAM: COMPLETE** (Cycle 31 closed it
+definitively at 11/11; Cycle 26's "10/10" framing was incorrect
+-- Cycle 31's reframe corrects the scoreboard). All 11
+temporal-row tables across the 3 Praxis SQLite databases now
 conform to Rule 35. See `docs/SCHEMA_MIGRATION_PLAN.md` for the
 final scoreboard and per-cycle details.
+
+- **Cycle 31**: `onchain_btc` brought into full Rule 35
+  conformance via the **second one-shot rebuild in the
+  migration program** (Cycle 26 was the first). 370 rows
+  preserved 1:1 across the rebuild. Schema change: added
+  `timestamp INTEGER NOT NULL` (UTC midnight ms of `date`,
+  matches `ohlcv_daily` convention) + `datetime TEXT NOT NULL`
+  (ISO `+00:00`); promoted `UNIQUE(date)` to `PRIMARY KEY (date)`;
+  removed synthetic `id INTEGER PRIMARY KEY AUTOINCREMENT`;
+  preserved `total_btc` legacy column. Why one-shot:
+  `PraxisOnchainCollector` is a daily scheduled task (not
+  long-lived), so disabling it is sufficient -- no kill step;
+  derived columns computed from the existing `date` column with
+  no external API fetch (no semantic transformation to
+  validate, so dual-write's burn-in adds zero value). Step 1
+  (`e595eb8`): `init_db()` 4-/4+, `collect_onchain_btc` writer
+  4-/12+. Step 2 (rebuild): 370 rows copied in 0.006s; total
+  transaction wall-clock 0.010s -- fastest single transaction
+  in the program. **JOIN verification with ohlcv_daily**:
+  10-row sample from 2026-04-25 through 2026-05-06; every row's
+  `timestamp` matched byte-identically between `onchain_btc`
+  and `ohlcv_daily` (e.g., 2026-05-06 -> 1778025600000 in
+  both). Manual `collect-onchain --days 7` post-re-enable
+  confirmed writer against new schema (6 days stored; 0 NULL
+  ts/dt across all 370 rows). **Rule-35-as-contract reframe**:
+  Cycles 26 and 30 both framed onchain_btc's continued non-
+  conformance as a "deferred TODO" outside the program.
+  That was wrong -- Rule 35 has no exception for daily-grain
+  tables; the program at end-of-Cycle-30 was actually 10/11.
+  Cycle 31 closes it at 11/11 with no asterisks. The
+  generalizable lesson: when a program's scoring allows for
+  "almost compliant" exceptions, those exceptions become
+  latent risk (a JOIN author later doesn't know which tables
+  lack the column). Better to enforce universally even at
+  small per-table cost. Commits: `e595eb8` (step 1 init_db +
+  writer) + `<CYCLE_31_HASH>` (step 2 rebuild + doc trio).
 
 - **Cycle 26**: `trades` migrated to Rule 35 via the **first
   one-shot rebuild in the migration program** (deliberately

@@ -29,7 +29,8 @@
 | 25 | smart_money.position_snapshots | dual-write | DONE | `9339221` |
 | 25.5 | position_snapshots Phase 5 cleanup | code-only | DONE | `9339221` |
 | 26 | trades | one-shot rebuild | DONE | `39720bb` |
-| 27 | _to_latest_ms cleanup | code-only | pending | -- |
+| 27 | _to_latest_ms cleanup | code-only | DONE | `5d1162f` |
+| 31 | onchain_btc | one-shot rebuild | DONE | `<CYCLE_31_HASH>` |
 
 Order rationale: small / re-fetchable / batch-cadence tables migrate
 first using the simple stop-migrate-start pattern. The dual-write
@@ -675,12 +676,107 @@ write-up). Doc trio updated to mark #9 DONE; retro at
   8,830,907 -> 8,832,907; latest advanced to
   2026-05-06T22:24:49 UTC.
 
-### MIGRATION PROGRAM SCOREBOARD -- 10/10 COMPLETE
+### #11 -- onchain_btc (DONE, Cycle 31, commits `e595eb8` (init_db + writer) + `<CYCLE_31_HASH>` (rebuild + doc trio))
 
-The Rule 35 schema migration program closes with Cycle 26.
-All 10 temporal-row tables across the 3 Praxis SQLite databases
+- DB: crypto_data.db
+- Rows: 370 (preserved 1:1 across the rebuild)
+- Writer: `engines/crypto_data_collector.py` `collect_onchain_btc`
+  (CLI subcommand `collect-onchain`); 4 deletions / 12 insertions
+  in the writer to derive `ts_ms` and `dt_iso` from the source
+  `date` and add them to the INSERT column list and values tuple.
+  Writer does not reference `id` (no writer change required for
+  the PK swap beyond the `init_db()` CREATE TABLE block).
+- Reader: none external; consumed via raw_query / MCP tools.
+  Cross-engine grep confirmed no readers key on `id`.
+- Pattern: **ONE-SHOT REBUILD** during a brief maintenance
+  window with `PraxisOnchainCollector` disabled. Second use of
+  the one-shot rebuild pattern in the program (Cycle 26 was the
+  first); reuses the recipe verbatim.
+- Why one-shot rather than dual-write: `PraxisOnchainCollector`
+  is a daily scheduled task (not a long-lived process), so
+  disabling the task is sufficient to guarantee no in-flight
+  writes -- no kill-and-relaunch step needed. Pure structural
+  change with derived-column population (no fetch from the
+  source API; the new `timestamp` and `datetime` columns are
+  computed from the existing `date` column). Dual-write's
+  burn-in validation adds zero value when there's no semantic
+  conversion to validate.
+- Schema change actually shipped:
+  - Added `timestamp INTEGER NOT NULL` (UTC midnight ms of
+    `date`; matches `ohlcv_daily.timestamp` convention)
+  - Added `datetime TEXT NOT NULL` (ISO 8601 with `+00:00`
+    offset, e.g. `2026-05-06T00:00:00+00:00`)
+  - Removed synthetic `id INTEGER PRIMARY KEY AUTOINCREMENT`
+  - Promoted existing `UNIQUE(date)` constraint to
+    `PRIMARY KEY (date)`
+  - Preserved `total_btc` column (legacy; moved to end of
+    column list for cleanliness)
+- Step 1 (init_db + writer update + commit `e595eb8`): edited
+  `engines/crypto_data_collector.py` -- 4 deletions / 4
+  insertions in `init_db()` CREATE TABLE block; 4 deletions /
+  12 insertions in `collect_onchain_btc` writer. Standalone
+  commit so a fresh process at any future point picks up the
+  new schema definition. py_compile clean.
+- Step 2 (rebuild script):
+  `scripts/migrations/cycle31_onchain_btc_schema_rebuild.py`
+  ran during the maintenance window. Pre-flight checks
+  validated the expected pre-rebuild schema (`id` PK +
+  `UNIQUE(date)` + 7 metric columns + `total_btc`), absence of
+  any leftover `onchain_btc_v2` from prior attempts, write-lock
+  acquisition via `BEGIN IMMEDIATE`, and clean parse of all 370
+  date strings. Bulk INSERT-SELECT copied 370 rows in 0.006s
+  (61,667 rows/s). Total transaction wall-clock: 0.010s --
+  fastest single transaction in the program by an order of
+  magnitude (Cycle 25's 0.273s held the prior record).
+- Verification:
+  - PRAGMA table_info confirmed compound new schema (no `id`,
+    PK on `date`, presence of `timestamp INTEGER NOT NULL` +
+    `datetime TEXT NOT NULL`).
+  - **JOIN verification with ohlcv_daily**: 10-row sample of
+    overlapping dates from 2026-04-25 through 2026-05-06; every
+    row's `timestamp` matched byte-identically between
+    `onchain_btc` and `ohlcv_daily` (e.g., 2026-05-06 ->
+    1778025600000 in both tables). All 10 rows match=1. Cycle
+    31's rebuild script implements this verification in-line as
+    the load-bearing post-rebuild check, since the entire point
+    of bringing onchain_btc into Rule 35 conformance is to make
+    cross-table temporal JOINs work.
+  - Coverage check: 370 rows, 0 NULL timestamps, 0 NULL
+    datetimes, range 2025-04-30 through 2026-05-06.
+- Post-rebuild writer validation: re-enabled
+  `PraxisOnchainCollector` and ran manual `collect-onchain
+  --days 7`. 6 days of on-chain data stored against the new
+  schema; INSERT OR REPLACE semantics preserved; new rows have
+  populated `timestamp` + `datetime` columns (verified via
+  raw_query: 0 NULL ts, 0 NULL dt across all 370 rows after
+  the manual fire).
+- Live-MCP verification: `praxis:list_tables` confirmed correct
+  schema; `get_collector_health` reports all 11 monitored
+  tables across 3 databases as `is_stale=false` (first time the
+  migration program is 11/11 conforming with no exceptions).
+
+### MIGRATION PROGRAM SCOREBOARD -- 11/11 COMPLETE; no exceptions for daily-grain
+
+The Rule 35 schema migration program closes with Cycle 31.
+All 11 temporal-row tables across the 3 Praxis SQLite databases
 now conform to the standard (INTEGER ms-since-epoch UTC
 `timestamp`, primary key, optional ISO `+00:00` datetime cache).
+
+**Reframing of Cycle 26's "10/10" claim**: Cycle 26's
+write-up framed the program as "10 of 10 tables conforming"
+with `onchain_btc` listed as a "deferred TODO" with no
+scheduled migration cycle. That framing was incorrect. Rule 35
+has no exception for daily-grain tables; a table is either
+compliant or it is not. The migration program at end-of-Cycle-26
+was actually 10/11, with `onchain_btc` non-conforming.
+Cycle 30's "10/10 with deferred onchain_btc" framing inherited
+the same error. Cycle 31 closes the program at 11/11 with no
+asterisks: every temporal-row table across the 3 Praxis SQLite
+databases has the canonical INTEGER ms `timestamp` column, a
+primary key on it (alone or compound), and an ISO `+00:00`
+datetime cache. The lesson for future programs: when scoring
+allows for "almost compliant" exceptions, those exceptions
+become latent risk and the scoreboard misleads its readers.
 
 | # | Cycle | Table | DB | Pattern | Rows at migration |
 |---|---|---|---|---|---|
@@ -694,6 +790,7 @@ now conform to the standard (INTEGER ms-since-epoch UTC
 | 8 | 24 (+24.5) | price_snapshots | live_collector | dual-write | 358,715 |
 | 9 | 25 (+25.5) | position_snapshots | smart_money | dual-write | 68,812 |
 | 10 | 26 | trades | crypto_data | one-shot rebuild | 8,830,907 |
+| 11 | 31 | onchain_btc | crypto_data | one-shot rebuild | 370 |
 
 Recipes proven by the program:
 - **Simple stop-migrate-start** (Cycles 17-22): for re-fetchable
@@ -704,12 +801,16 @@ Recipes proven by the program:
   data. Six-phase recipe (Build _v2 + dual-write writer ->
   burn-in -> backfill -> verify -> atomic cutover -> drop
   legacy + collapse writer).
-- **One-shot rebuild during maintenance window** (Cycle 26):
-  for pure structural changes with no data semantic
+- **One-shot rebuild during maintenance window** (Cycles 26
+  and 31): for pure structural changes with no data semantic
   transformation, where the writer doesn't reference the
   changing column. Atomic transaction; no burn-in needed
   because there's nothing to validate beyond row count and
-  schema shape.
+  schema shape. Cycle 31 (onchain_btc) extended the pattern
+  to also cover derived-column population from an existing
+  source column (computed `timestamp` ms + `datetime` ISO
+  from the legacy `date` text), still with no external API
+  fetch -- so still no semantic transformation to validate.
 
 Followups from the program (not migrations themselves):
 - Cycle 24.1: `_to_latest_ms` ms-format sidecar staleness
@@ -727,10 +828,16 @@ Followups from the program (not migrations themselves):
   threshold but no collector was registered. Daily 00:45 local
   Toronto, idempotent 7-day overlap. Post-registration, all 11
   monitored tables across the 3 databases report `is_stale=false`
-  for the first time since 2026-04-28. Note: `onchain_btc` itself
-  remains schema-NONCONFORMING (no INTEGER `timestamp`); a future
-  Rule 35 migration cycle could change that, but health monitoring
-  works fine via the `date` `timestamp_format` branch.
+  for the first time since 2026-04-28. Cycle 30's write-up
+  framed `onchain_btc`'s schema non-conformance as a "deferred
+  TODO" outside the migration program; Cycle 31's reframe
+  corrects this -- the program at end-of-Cycle-30 was actually
+  10/11, not 10/10.
+- Cycle 31: `onchain_btc` schema rebuild to full Rule 35
+  conformance (closed; commits `e595eb8` step 1 + `<CYCLE_31_HASH>`
+  step 2). Promoted to row #11 of the migration program scoreboard.
+  See per-cycle prose section #11 above for full details. Closes
+  the migration program at 11/11 with no exceptions.
 
 ---
 

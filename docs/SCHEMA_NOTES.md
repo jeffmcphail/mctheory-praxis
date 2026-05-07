@@ -182,30 +182,49 @@ server, all engines, and analysis scripts.
   `engines/lstm_predictor.py:68` queries by `date` (unaffected by the
   migration).
 
-#### Table: onchain_btc (NONCONFORMING -- monitored as of Cycle 17, scheduled as of Cycle 30)
+#### Table: onchain_btc (CONFORMING -- Cycle 31)
 
-- Columns: `id` PK, `date` (TEXT `YYYY-MM-DD`), `active_addresses`,
+- Columns: `date` (TEXT `YYYY-MM-DD`, PK), `timestamp` (INTEGER
+  NOT NULL, ms UTC midnight derived from `date`), `datetime` (TEXT
+  NOT NULL, ISO `YYYY-MM-DDTHH:MM:SS+00:00`), `active_addresses`,
   `transaction_count`, `hash_rate`, `difficulty`, `block_size`,
-  `total_btc`, `market_cap`. **No `timestamp` column.**
+  `market_cap`, `total_btc` (legacy column preserved at end of
+  column list). PK: `date`.
 - Writer: `engines/crypto_data_collector.py` `collect_onchain`
   (subcommand `collect-onchain`; the Python function name is
   `collect_onchain_btc`).
 - Scheduled task: `PraxisOnchainCollector` (daily 00:45 local
   Toronto, registered Cycle 30). Pulls last 7 days each run for
-  safety overlap; idempotent via `INSERT OR IGNORE` on the `date`
-  PK.
-- Conformance gaps: missing INTEGER `timestamp` entirely;
-  `date`-only. Health monitoring keys on `date` via the `date`
-  `timestamp_format` branch in `_to_latest_ms`.
+  safety overlap; idempotent via `INSERT OR REPLACE` on the `date`
+  PK (post-Cycle-31 INSERT path now populates `timestamp` +
+  `datetime` per row).
+- **JOIN compatibility with ohlcv_daily**: both tables compute
+  `timestamp` as UTC-midnight-of-date in milliseconds, so
+  `oc.timestamp = od.timestamp` aligns byte-identically for the
+  same date (e.g., 2026-05-06 -> 1778025600000 in both tables).
+  Verified via 10-row JOIN sample at migration time: every shared
+  date matched exactly. This is exactly the cross-table use case
+  Rule 35 was designed to enable.
+- **Migration approach (Cycle 31)**: one-shot rebuild during a
+  brief maintenance window, inheriting Cycle 26's pattern (the
+  trades migration). Rationale: `PraxisOnchainCollector` is a
+  daily scheduled task, not a long-lived process, so disabling
+  the task and running the rebuild is sufficient -- no in-flight
+  process to kill. Pure structural change (add INTEGER
+  `timestamp` + ISO `datetime`, promote `date UNIQUE` to PK,
+  drop synthetic `id`); no data semantic transformation; rows
+  copy 1:1 with derived columns. Dual-write recipe would have
+  added zero validation value. Rebuild copied 370 rows in 0.006s;
+  total transaction wall-clock 0.010s.
 - Cycle 17 added this table to MCP `get_collector_health` with a
   48h threshold; Cycle 30 registered the missing scheduled
-  collector, closing the standing Cycle 17 TODO. Pre-Cycle-30,
-  `is_stale=true` was correct and intentional. Post-Cycle-30
-  state: `is_stale=false`, latest advances daily following
-  blockchain.info's UTC-midnight publication.
-- Migration cycle: TBD (Rule 35 schema migration would add an
-  INTEGER `timestamp` ms-since-epoch UTC midnight column derived
-  from `date`; not currently scheduled).
+  collector; Cycle 31 brought the schema into full Rule 35
+  compliance. Post-Cycle-31, `is_stale=false`, latest advances
+  daily following blockchain.info's UTC-midnight publication, and
+  the table participates in cross-table temporal JOINs on the
+  shared ms convention.
+- Migration cycle: 31 (one-shot rebuild). Closes the migration
+  program at 11/11 with no exceptions.
 
 #### Table: order_book_snapshots (CONFORMING -- Cycles 23 + 23.5, dual-write pilot)
 
@@ -268,8 +287,9 @@ server, all engines, and analysis scripts.
   before the rebuild script will pass its pre-flight age guard
   (Cycle 24.5's "<60s last write" check, retained as
   defense-in-depth).
-- Migration cycle: 26 (one-shot rebuild). Closes the migration
-  program: 10 of 10 tables conforming.
+- Migration cycle: 26 (one-shot rebuild). Tenth table to land
+  in the program; subsequently joined by `onchain_btc` in Cycle
+  31, closing the program at 11/11.
 
 ### live_collector.db (sidecar)
 
@@ -403,7 +423,7 @@ added it to MCP health.
 | crypto_data | ohlcv_1m | **CONFORMING** | **22** | stop-migrate-start | Done; 530k rows in 0.567s |
 | crypto_data | ohlcv_4h | **CONFORMING** | **20** | stop-migrate-start | Done |
 | crypto_data | ohlcv_daily | **CONFORMING** | **18** | stop-migrate-start | Done |
-| crypto_data | onchain_btc | NONCONFORMING | TBD | stop-migrate-start | No active collector |
+| crypto_data | onchain_btc | **CONFORMING** | **31** | one-shot rebuild | 370 rows copied in 0.006s; total tx 0.010s |
 | crypto_data | order_book_snapshots | **CONFORMING** | **23 + 23.5** | dual-write | Phases 0-4 in 23; Phase 5 cleanup done in 23.5 |
 | crypto_data | trades | **CONFORMING** | **26** | one-shot rebuild | 8.8M rows copied 1:1 in 11.4s; total tx 25.4s |
 | live_collector | collection_log | NONCONFORMING | TBD | dual-write | TEXT timestamp |
@@ -422,17 +442,21 @@ per-cycle execution log for the remaining migrations.
 
 ## Notes on currently-stale tables
 
-As of Cycle 30 (2026-05-07), no monitored tables are stale. All
+As of Cycle 31 (2026-05-07), no monitored tables are stale. All
 11 monitored tables across the 3 Praxis SQLite databases report
-`is_stale=false`. Historical entries below are kept for reference.
+`is_stale=false`, and all 11 conform to Rule 35. Historical
+entries below are kept for reference.
 
-- `onchain_btc`: monitored Cycle 17, scheduled Cycle 30. Pre-Cycle-30
-  the alarm (`is_stale=true`) was correct and intentional -- no
-  scheduled collector was registered, so the table sat at
-  `latest=2026-04-28` from the recovery-era backfill. Cycle 30
-  registered `PraxisOnchainCollector` (daily 00:45 local Toronto)
-  and the table now reports `is_stale=false` (370 rows,
-  latest=2026-05-06, staleness 39.6h vs 48h threshold).
+- `onchain_btc`: monitored Cycle 17, scheduled Cycle 30, schema
+  migrated Cycle 31. Pre-Cycle-30 the alarm (`is_stale=true`) was
+  correct and intentional -- no scheduled collector was registered,
+  so the table sat at `latest=2026-04-28` from the recovery-era
+  backfill. Cycle 30 registered `PraxisOnchainCollector` (daily
+  00:45 local Toronto) and the table reports `is_stale=false`
+  (370 rows, latest=2026-05-06). Cycle 31 brought the schema into
+  full Rule 35 compliance via one-shot rebuild (added INTEGER ms
+  `timestamp` + ISO `datetime`; promoted `date` UNIQUE to PK;
+  dropped synthetic `id`).
 - `market_data`: CONFORMING as of Cycle 19. Migrated to Rule 35
   schema, writer fixed (added `/global` BTC-dominance call), CLI
   subcommand wired, scheduled task `PraxisMarketDataCollector`
