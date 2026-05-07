@@ -86,7 +86,7 @@ Clean.
 
 ### Step 3: Commit + push
 
-Commit `<CYCLE_27_5_HASH>` on origin/master.
+Commit `4988f26` on origin/master.
 
 ### Step 4: USER step -- MCP server restart
 
