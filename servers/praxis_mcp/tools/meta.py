@@ -224,10 +224,12 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
         #                          scheduled collector currently registered;
         #                          will alarm is_stale=true until one lands.
         # Values are EITHER an int (threshold_seconds; uses `timestamp`
-        # column with auto ms/s detection) OR a dict spec:
+        # column at ms precision -- all int-valued entries are ms
+        # post-migration program; see SCHEMA_MIGRATION_PLAN.md) OR a
+        # dict spec:
         #   {"threshold_seconds": int,
         #    "timestamp_column": str,
-        #    "timestamp_format": "ms"|"s"|"iso_text"|"auto"|"date"}
+        #    "timestamp_format": "ms"|"s"|"iso_text"|"date"}
         # The "date" format treats the column as YYYY-MM-DD UTC midnight.
         primary_monitored = {
             "trades": 120,
@@ -256,7 +258,7 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
         primary_status = _collect_db_health(
             db_path=db_path,
             monitored_tables=primary_monitored,
-            timestamp_format="auto",   # autodetect ms vs s for primary
+            timestamp_format="ms",   # all primary-DB int-valued entries are ms post-migration program (Cycles 17-26)
         )
         result["tables"] = primary_status["tables"]
         result["unmonitored"] = primary_status["unmonitored"]
