@@ -105,16 +105,16 @@ def init_db():
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS onchain_btc (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
+            date TEXT NOT NULL PRIMARY KEY,
+            timestamp INTEGER NOT NULL,
+            datetime TEXT NOT NULL,
             active_addresses INTEGER,
             transaction_count INTEGER,
             hash_rate REAL,
             difficulty REAL,
             block_size REAL,
-            total_btc REAL,
             market_cap REAL,
-            UNIQUE(date)
+            total_btc REAL
         )
     """)
 
@@ -627,12 +627,20 @@ def collect_onchain_btc(days, conn):
     stored = 0
     for date, metrics_data in all_data.items():
         try:
+            # Cycle 31: populate timestamp (ms, UTC midnight of `date`) and
+            # datetime (ISO 8601 +00:00) for Rule 35 compliance and
+            # cross-table JOIN compatibility (ohlcv_daily uses the same
+            # convention).
+            date_dt = datetime.strptime(date, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc)
+            ts_ms = int(date_dt.timestamp() * 1000)
+            dt_iso = date_dt.isoformat()
             conn.execute("""
                 INSERT OR REPLACE INTO onchain_btc
-                (date, active_addresses, transaction_count, hash_rate,
-                 difficulty, block_size, market_cap)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (date,
+                (date, timestamp, datetime, active_addresses, transaction_count,
+                 hash_rate, difficulty, block_size, market_cap)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (date, ts_ms, dt_iso,
                   metrics_data.get("active_addresses", 0),
                   metrics_data.get("transaction_count", 0),
                   metrics_data.get("hash_rate", 0),
