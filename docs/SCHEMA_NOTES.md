@@ -182,20 +182,30 @@ server, all engines, and analysis scripts.
   `engines/lstm_predictor.py:68` queries by `date` (unaffected by the
   migration).
 
-#### Table: onchain_btc (NONCONFORMING -- monitored as of Cycle 17)
+#### Table: onchain_btc (NONCONFORMING -- monitored as of Cycle 17, scheduled as of Cycle 30)
 
 - Columns: `id` PK, `date` (TEXT `YYYY-MM-DD`), `active_addresses`,
   `transaction_count`, `hash_rate`, `difficulty`, `block_size`,
   `total_btc`, `market_cap`. **No `timestamp` column.**
-- Writer: `engines/crypto_data_collector.py` `collect_onchain` (not
-  currently invoked by any registered scheduled task).
+- Writer: `engines/crypto_data_collector.py` `collect_onchain`
+  (subcommand `collect-onchain`; the Python function name is
+  `collect_onchain_btc`).
+- Scheduled task: `PraxisOnchainCollector` (daily 00:45 local
+  Toronto, registered Cycle 30). Pulls last 7 days each run for
+  safety overlap; idempotent via `INSERT OR IGNORE` on the `date`
+  PK.
 - Conformance gaps: missing INTEGER `timestamp` entirely;
-  `date`-only.
-- Cycle 17 added this table to MCP `get_collector_health`. With no
-  scheduled collector running, `is_stale=true` is expected and
-  intentional until a collector is registered (see "Currently-stale
-  tables" below).
-- Migration cycle: TBD.
+  `date`-only. Health monitoring keys on `date` via the `date`
+  `timestamp_format` branch in `_to_latest_ms`.
+- Cycle 17 added this table to MCP `get_collector_health` with a
+  48h threshold; Cycle 30 registered the missing scheduled
+  collector, closing the standing Cycle 17 TODO. Pre-Cycle-30,
+  `is_stale=true` was correct and intentional. Post-Cycle-30
+  state: `is_stale=false`, latest advances daily following
+  blockchain.info's UTC-midnight publication.
+- Migration cycle: TBD (Rule 35 schema migration would add an
+  INTEGER `timestamp` ms-since-epoch UTC midnight column derived
+  from `date`; not currently scheduled).
 
 #### Table: order_book_snapshots (CONFORMING -- Cycles 23 + 23.5, dual-write pilot)
 
@@ -412,11 +422,17 @@ per-cycle execution log for the remaining migrations.
 
 ## Notes on currently-stale tables
 
-- `onchain_btc`: monitored as of Cycle 17. No scheduled collector
-  registered. Staleness alarms expected (`is_stale=true`) until a
-  collector lands. 364 rows, latest `2026-04-28`. Last collected
-  during recovery; coverage is roughly 1 year. Registering a
-  scheduled task is queued under "Active TODOs" in `claude/TODO.md`.
+As of Cycle 30 (2026-05-07), no monitored tables are stale. All
+11 monitored tables across the 3 Praxis SQLite databases report
+`is_stale=false`. Historical entries below are kept for reference.
+
+- `onchain_btc`: monitored Cycle 17, scheduled Cycle 30. Pre-Cycle-30
+  the alarm (`is_stale=true`) was correct and intentional -- no
+  scheduled collector was registered, so the table sat at
+  `latest=2026-04-28` from the recovery-era backfill. Cycle 30
+  registered `PraxisOnchainCollector` (daily 00:45 local Toronto)
+  and the table now reports `is_stale=false` (370 rows,
+  latest=2026-05-06, staleness 39.6h vs 48h threshold).
 - `market_data`: CONFORMING as of Cycle 19. Migrated to Rule 35
   schema, writer fixed (added `/global` BTC-dominance call), CLI
   subcommand wired, scheduled task `PraxisMarketDataCollector`

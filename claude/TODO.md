@@ -80,16 +80,6 @@ Priority-grouped, then domain-grouped within each priority.
 
 ### Lower priority -- meaningful but not urgent
 
-- **Register scheduled collector for `onchain_btc` table**: Cycle 17
-  added it to MCP `get_collector_health` (48h threshold) but no
-  scheduled task is currently running. Latest data is from 2026-04-28
-  (~2.7 days stale at the 48h threshold), so health alarms will fire
-  until a collector lands. `engines/crypto_data_collector.py`
-  `collect_onchain` exists but is not invoked by any registered
-  scheduled task. Pattern would mirror the existing daily collector
-  service registrations. *(Source: BRIEF_temporal_standard_pilot.md
-  Task 3 deferred follow-up)*
-
 - **VR profile experimental framework**: Design framework for using VR
   profile info (multi-timescale mean-reversion) to inform entry/exit
   signals, trade time horizons, and regime detection. Conceptual work
@@ -204,6 +194,39 @@ techniques in this list show up across multiple TODOs.
 
 For context on what just shipped, see `docs/praxis_main_series_transcript.md`
 and the recent `claude/retros/RETRO_*.md` files.
+
+**MONITORING COVERAGE: COMPLETE** (Cycle 30 closed it). All 11
+monitored tables across all 3 Praxis SQLite databases now report
+`is_stale=false`. First time this has been true since `onchain_btc`
+went stale on 2026-04-28.
+
+- **Cycle 30**: registered `PraxisOnchainCollector` as a Windows
+  Scheduled Task running daily at 00:45 local Toronto time. Closes
+  the standing Cycle 17 TODO (`onchain_btc` was added to
+  `get_collector_health` with a 48h threshold but no collector was
+  registered, so it correctly alarmed `is_stale=true` from
+  2026-04-28 onward). Two new files in `services/` mirroring the
+  existing `fear_greed_*` template: `onchain_collector_service.bat`
+  (runs `collect-onchain --days 7` for idempotent 7-day overlap
+  via `INSERT OR IGNORE` on the `date` PK) and
+  `register_onchain_task.ps1` (S4U logon, daily 00:45). Hybrid
+  workflow: Code committed the two service files (commit
+  `63993be`); USER ran the registration script as Administrator
+  and triggered an immediate verification run (LastTaskResult=0,
+  NextRunTime 2026-05-08 00:45 EDT, NumberOfMissedRuns=0). The
+  11:34 manual run inserted 0 new rows because the 7-day window
+  was already fully covered by the manual `collect-onchain` test
+  earlier in the session; tomorrow's 00:45 fire will pick up
+  2026-05-07 once blockchain.info publishes it. Post-state via
+  live MCP `get_collector_health`: `onchain_btc` row_count=370,
+  latest=2026-05-06T00:00:00 UTC, staleness=142,548s (39.6h vs
+  172,800s threshold), `is_stale=false`. **All 11 monitored tables
+  across the 3 databases now report `is_stale=false`** (first time
+  since 2026-04-28). Note: `onchain_btc` remains schema-NONCONFORMING
+  (no INTEGER `timestamp` column; keyed by `date` TEXT). A future
+  Rule 35 migration cycle could change that if/when desired -- not
+  blocking, since `_to_latest_ms` handles the `date` column via the
+  `date` timestamp_format branch.
 
 **SCHEMA MIGRATION PROGRAM: COMPLETE** (Cycle 26 closed it). All
 10 temporal-row tables across the 3 Praxis SQLite databases now

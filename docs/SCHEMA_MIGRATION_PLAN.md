@@ -717,8 +717,20 @@ Followups from the program (not migrations themselves):
   subprocess, not on-disk code).
 - Cycle 27: `_to_latest_ms` autodetect heuristic collapse to
   strict ms-only handling (closed; commit `5d1162f`).
+- Cycle 27.5: primary-DB monitoring `fmt` default fix (closed;
+  commit `4988f26`).
 - Cycle 28 + 29: collector exit-code observability hardening
   (closed).
+- Cycle 30: `PraxisOnchainCollector` scheduled task registration
+  (closed; commit `63993be`). Closes the standing Cycle 17 TODO
+  -- `onchain_btc` was added to `get_collector_health` with a 48h
+  threshold but no collector was registered. Daily 00:45 local
+  Toronto, idempotent 7-day overlap. Post-registration, all 11
+  monitored tables across the 3 databases report `is_stale=false`
+  for the first time since 2026-04-28. Note: `onchain_btc` itself
+  remains schema-NONCONFORMING (no INTEGER `timestamp`); a future
+  Rule 35 migration cycle could change that, but health monitoring
+  works fine via the `date` `timestamp_format` branch.
 
 ---
 
