@@ -590,10 +590,13 @@ def _parse_revival_hypotheses(text: str) -> list[dict[str, Optional[str]]]:
 
     out: list[dict[str, Optional[str]]] = []
     full_re = re.compile(
-        r"^\*\*(.+?)\*\*\s*[-]+\s*likelihood:\s*([^.]+?)\.\s*(.*)$",
+        r"^\*\*(.+?)\*\*\s*[-" + EM_DASH + EN_DASH + r"]+\s*"
+        r"likelihood:\s*([^.]+?)\.\s*(.*)$",
         re.I,
     )
-    title_re = re.compile(r"^\*\*(.+?)\*\*\s*[-]*\s*(.*)$")
+    title_re = re.compile(
+        r"^\*\*(.+?)\*\*\s*[-" + EM_DASH + EN_DASH + r"]*\s*(.*)$"
+    )
     for raw in items:
         if not raw:
             continue

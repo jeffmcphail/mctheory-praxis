@@ -56,6 +56,7 @@ A systematic knowledge base mapping the landscape of trading strategies across a
 | **TC** | 2 bps/leg × 2 legs = 4 bps round-trip |
 | **RF AUC** | 0.855-0.896 (mean 0.873) — minute-frequency features per Chan paper |
 | **Result** | **NEGATIVE after TC** |
+| **Computational engine** | 1 (Cointegration/Mean-Reversion); secondary 3 (Allocation) |
 
 **Corrected results (2026-04-02 — with correct minute-frequency features + OOS bugfixes):**
 
@@ -103,6 +104,43 @@ z-score warmup (60% of configs produced zero trades). Both are now fixed.
 - z-score warmup: pass previous 10 days of minute spread to avoid dead configs in OOS
 - UTC→Eastern timezone conversion critical for US equity minute data
 - Pair deduplication (canonical key = sorted tickers) prevents double-counting
+
+**Test conditions:**
+
+| Aspect | Value |
+|---|---|
+| Bar type | minute time bars |
+| Frequency | per-minute, 9:30-16:00 ET equity hours |
+| Universe | 38 deduplicated SP500 cointegrated pairs (Burgess discovery) |
+| TC | 4 bps round-trip per pair |
+| Feature set | 112 minute-frequency features (Chan paper spec; 7 indicators x 16 lookback combinations) |
+| Pre-filter | none -- all pairs from Burgess discovery feed CPO directly |
+| Risk management | equal weight, P>0.65 gate, notional_capital normalization, spread_history warmup |
+| Computational engine | Engine 1 (Cointegration); composes with Engine 3 (Allocation) for portfolio construction |
+
+**Active regimes during test:**
+
+Regime ablation was run during this experiment (rare
+feature -- most experiments don't have this data). Top
+predictive classes for pairs MR:
+
+- A (Trend): +7.25% AUC lift -- ADX tells you when NOT to mean-revert
+- D (Serial correlation): +5.65% lift -- Hurst confirms MR vs momentum regime
+- G (Liquidity): +4.75% lift -- can you execute the spread?
+- I (Volume): +3.98% lift -- is there participation?
+- E (Microstructure): +2.65% lift -- OFI adds moderate value
+- B, C, F, H, J, K: <=0.4% -- noise for equities
+- Full additive: +10.39% lift across all classes
+
+The OOS test window (2026-01-01 to 2026-03-20) was a
+medium-trend, low-vol period for SPX with abundant liquidity.
+
+**Revival hypotheses:**
+
+1. **Lower-TC venue or different asset class** -- likelihood: high. The signal is real (57.6% gross win rate, +5.3 bps/trade) but TC of 4 bps RT doubles the gross alpha. A market with TC < 2 bps RT (e.g., direct broker access at institutional rates, or moving to FX major pairs) could flip this NEGATIVE -> POSITIVE.
+2. **Add ADX trend filter (Class A)** -- likelihood: medium. Class A produced the largest single-class lift (+7.25%). Only trade when ADX < 25 (no trend). Reduces trades, may improve net by avoiding adverse trend regimes.
+3. **Switch to dollar bars** -- likelihood: low. Pairs MR's bar selection isn't the constraint here; the constraint is gross alpha vs. TC. Dollar bars wouldn't change the TC arithmetic.
+4. **Re-run with intraday minute features but daily holding period** -- likelihood: low. The current setup already does this; the 2.7 trades/day count isn't the cost driver.
 
 ---
 
@@ -606,6 +644,7 @@ Leverage cap confirmed to work correctly (proportional loss reduction from -83% 
 | **TC** | 4 bps one-way × 2 = 8 bps round-trip (spot + perp, entry + exit) |
 | **Training** | 2024, 7 assets × 36 configs |
 | **OOS** | 2025-01-01 → 2026-03-26 (448 days) |
+| **Computational engine** | 7 (Event/Signal); composes with Engine 3 (Allocation) |
 
 #### Why N-day hold (not 8h):
 TC of 8bps round-trip against 2.74bps daily funding (at 10% annual) means trading every 8h loses -5.3bps/day. Amortized over 7 days: TC = 1.14bps/day vs 2.74bps funding → net positive. This is the fundamental carry trade structure — hold long enough that TC becomes negligible.
@@ -741,6 +780,51 @@ Findings:
 - Hold: 3-14 days (RF selects per-day)
 - TC: budget 4-6 bps one-way (Binance maker + spot slippage)
 - Portfolio cap: 35% gross exposure max
+
+**Test conditions:**
+
+| Aspect | Value |
+|---|---|
+| Bar type | 8h funding-rate cadence + daily OHLCV |
+| Frequency | per-funding-event (8h on Binance perps) |
+| Universe | BTC + ETH perps |
+| TC | 4 bps round-trip per leg |
+| Feature set | 11 hand-crafted features (annualized funding, percentile rank, sustained-positive flag, basis, OI change, volatility level, trend strength, etc.) |
+| Pre-filter | none; gate is P > 0.70 from RF |
+| Risk management | Kelly-sized within configurable max-leverage; long-only structural exposure |
+| Computational engine | Engine 7 (Event/Signal -- funding rate IS the signal); composes with Engine 3 (Allocation/Kelly) |
+
+**Active regimes during test:**
+
+The strategy is regime F-conditioned by design (Class F:
+Funding/positioning). Behavior across regime states:
+
+- F = +1, +2 (positive funding sustained): trades nearly
+  every day; this is the alpha-bearing regime
+- F = 0 (flat funding): mostly does not trade
+- F = -1, -2 (negative funding): does not trade (correctly --
+  the structural carry is absent)
+- A (Trend): not directly conditioned but observed alignment;
+  positive funding tends to coincide with positive trend in
+  crypto bull regimes
+- B (Vol level): no strong dependence; the carry mechanism is
+  vol-agnostic when long-only
+
+The OOS validation period (2024 + 2025 H1) included two
+distinct funding regimes (Q1-Q3 2024 sustained positive;
+Feb-Aug 2025 flat-to-negative). Strategy traded in the first,
+sat out in the second. P&L profile: monotone-positive in
+favorable regimes, flat in unfavorable -- never bleeds.
+
+**Revival hypotheses:**
+
+For a POSITIVE experiment, "revival" reframes as
+"scaling/improving":
+
+1. **Add cross-exchange funding spread (Bybit, OKX, Hyperliquid)** -- likelihood: high. Same engine; adds breadth. Each new venue is +30-50% effective universe size. Test cost: small (CCXT supports all named venues).
+2. **Add term structure feature (Class J)** -- likelihood: medium. Funding term slope (8h vs longer-dated basis) is class J in the regime matrix; tested-in but limited weight. Could improve entry timing.
+3. **Bear-market validation needed** -- likelihood: not a revival but a confirmation. Strategy hasn't been tested in a sustained negative-funding bear regime. The behavior should be "sit out cleanly" but real-world execution has slippage / withdrawal risk.
+4. **LSTM v2 architecture for non-funding alpha** -- likelihood: low for THIS engine. Engine 7 + funding-rate features is mechanistically tied to the carry P&L; replacing the classifier with an LSTM might add modest lift but the structural edge is the funding mechanism itself, not the model class.
 
 ---
 
