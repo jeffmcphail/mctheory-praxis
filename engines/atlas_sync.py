@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
 import os
 import re
@@ -80,6 +81,10 @@ CREATE TABLE IF NOT EXISTS atlas_experiments (
     full_markdown       TEXT NOT NULL,
     key_findings        TEXT,
     atlas_principle     TEXT,
+    test_conditions     TEXT,
+    revival_hypotheses  TEXT,
+    regime_state_at_test TEXT,
+    computational_engine INTEGER,
     md_hash             TEXT NOT NULL,
     synced_at           TEXT NOT NULL,
     UNIQUE(source_file, source_section)
@@ -138,6 +143,10 @@ class ExperimentRecord:
     result_summary: Optional[str] = None
     key_findings: Optional[str] = None
     atlas_principle: Optional[str] = None
+    test_conditions: Optional[str] = None
+    revival_hypotheses: Optional[str] = None
+    regime_state_at_test: Optional[str] = None
+    computational_engine: Optional[int] = None
     captured_fields: list[str] = field(default_factory=list)
     missed_fields: list[str] = field(default_factory=list)
 
@@ -233,6 +242,9 @@ def parse_trading_atlas(text: str, *, strict: bool = False) -> list[ExperimentRe
             _extract_result_summary(rec, block)
             _extract_key_findings(rec, block)
             _extract_atlas_principle(rec, block)
+            _extract_test_conditions(rec, block)
+            _extract_active_regimes(rec, block)
+            _extract_revival_hypotheses(rec, block)
         except Exception as e:
             if strict:
                 raise
@@ -286,6 +298,10 @@ def _extract_attribute_table_ta(rec: ExperimentRecord, block: str) -> None:
             cls = _classify_result_token(value)
             if cls:
                 rec.result_class = cls
+        elif key == "computational engine":
+            m = re.match(r"\s*(\d+)", value)
+            if m:
+                rec.computational_engine = int(m.group(1))
 
 
 _VERDICT_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -396,6 +412,237 @@ def _extract_atlas_principle(rec: ExperimentRecord, block: str) -> None:
                 out.append(s)
     if out:
         rec.atlas_principle = "\n".join(out)[:4000]
+
+
+# ----------------------- Cycle 33 structured sections ---------------------
+#
+# Three new section types per experiment:
+#   **Test conditions:**          -> JSON dict (flat key:value)
+#   **Active regimes during test:** -> JSON dict keyed by regime
+#   **Revival hypotheses:**       -> JSON list of {title, likelihood, description}
+#
+# Plus a `Computational engine` row in the attribute table -> integer column.
+
+_BOLD_HEADER_LINE = re.compile(r"^\*\*[^*]+\*\*\s*$")
+
+
+def _extract_bold_section(block: str, header_name: str) -> Optional[str]:
+    """Capture content between `**header_name:**` and the next bold header,
+    `---` separator, or markdown heading. Returns None if header absent."""
+    pat = re.compile(
+        rf"^\*\*\s*{re.escape(header_name)}\s*:\s*\*\*\s*$"
+    )
+    out: list[str] = []
+    capturing = False
+    for line in block.splitlines():
+        if not capturing:
+            if pat.match(line.strip()):
+                capturing = True
+            continue
+        s = line.strip()
+        if _BOLD_HEADER_LINE.match(s):
+            break
+        if s.startswith("---"):
+            break
+        if re.match(r"^#{1,4}\s", s):
+            break
+        out.append(line)
+    if not capturing:
+        return None
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out)
+
+
+def _is_table_separator(s: str) -> bool:
+    s = s.strip()
+    if not s.startswith("|"):
+        return False
+    return all(c in "|:- \t" for c in s)
+
+
+def _sanitize_dict_key(text: str) -> str:
+    s = re.sub(r"\*\*", "", text).strip().lower()
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^a-z0-9_]", "", s)
+    return s
+
+
+def _parse_test_conditions(text: str) -> dict[str, str]:
+    """Parse the body of **Test conditions:** into a flat dict.
+
+    Handles either a markdown table (header row + separator + data rows)
+    or a `- key: value` bullet list.
+    """
+    out: dict[str, str] = {}
+    lines = text.splitlines()
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i].strip()
+        # Header row + separator: skip both
+        if (
+            line.startswith("|")
+            and i + 1 < n
+            and _is_table_separator(lines[i + 1].strip())
+        ):
+            i += 2
+            continue
+        if _is_table_separator(line):
+            i += 1
+            continue
+        if line.startswith("|"):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) >= 2:
+                key = _sanitize_dict_key(cells[0])
+                value = cells[-1]
+                if key:
+                    out[key] = value
+        elif line.startswith("- ") or line.startswith("* "):
+            content = line[2:].strip()
+            kv = re.match(r"^([^:]+):\s*(.+)$", content)
+            if kv:
+                key = _sanitize_dict_key(kv.group(1))
+                if key:
+                    out[key] = kv.group(2).strip()
+        i += 1
+    return out
+
+
+def _parse_regime_bullets(text: str) -> dict[str, str]:
+    """Parse **Active regimes during test:** into a dict keyed by regime.
+
+    Recognized canonical bullet form: `- A (Trend): description`. Falls back
+    to `- key: value` for non-canonical bullets (e.g. compound regime states
+    like `F = +1, +2 (positive funding sustained)`).
+    """
+    out: dict[str, str] = {}
+    cur_key: Optional[str] = None
+    cur_val: list[str] = []
+
+    def flush() -> None:
+        if cur_key is not None:
+            out[cur_key] = " ".join(cur_val).strip()
+
+    bullet_re = re.compile(r"^\s*[-*]\s+(.+)$")
+    canonical_re = re.compile(r"^([A-Z])\s*\(([^)]+)\)\s*$")
+
+    for line in text.splitlines():
+        m = bullet_re.match(line)
+        if m:
+            flush()
+            cur_key = None
+            cur_val = []
+            content = m.group(1)
+            kv = re.match(r"^([^:]+):\s*(.*)$", content)
+            if not kv:
+                continue
+            key_raw = kv.group(1).strip()
+            value = kv.group(2).strip()
+            cm = canonical_re.match(key_raw)
+            if cm:
+                letter = cm.group(1)
+                name = re.sub(r"\s+", "_", cm.group(2).strip().lower())
+                name = re.sub(r"[^a-z0-9_]", "", name)
+                cur_key = f"{letter}_{name}" if name else letter
+            else:
+                fallback = re.sub(r"\s+", "_", key_raw.lower())
+                fallback = re.sub(r"[^a-z0-9_=+,()-]", "", fallback)
+                cur_key = fallback or key_raw.strip()
+            cur_val = [value] if value else []
+        else:
+            s = line.strip()
+            if not s:
+                # Blank line terminates the current bullet.
+                flush()
+                cur_key = None
+                cur_val = []
+                continue
+            if cur_key is not None:
+                cur_val.append(s)
+    flush()
+    return out
+
+
+def _parse_revival_hypotheses(text: str) -> list[dict[str, Optional[str]]]:
+    """Parse **Revival hypotheses:** numbered list into a list of dicts.
+
+    Each item: `1. **Title** -- likelihood: <level>. <description>`
+    Multi-line continuations are joined with spaces.
+    """
+    items: list[str] = []
+    current: Optional[list[str]] = None
+    for line in text.splitlines():
+        m = re.match(r"^\s*\d+\.\s+(.*)$", line)
+        if m:
+            if current is not None:
+                items.append(" ".join(current).strip())
+            current = [m.group(1)]
+        elif current is not None:
+            s = line.strip()
+            if not s:
+                continue
+            current.append(s)
+    if current is not None:
+        items.append(" ".join(current).strip())
+
+    out: list[dict[str, Optional[str]]] = []
+    full_re = re.compile(
+        r"^\*\*(.+?)\*\*\s*[-]+\s*likelihood:\s*([^.]+?)\.\s*(.*)$",
+        re.I,
+    )
+    title_re = re.compile(r"^\*\*(.+?)\*\*\s*[-]*\s*(.*)$")
+    for raw in items:
+        if not raw:
+            continue
+        m = full_re.match(raw)
+        if m:
+            out.append({
+                "title": m.group(1).strip(),
+                "likelihood": m.group(2).strip().lower(),
+                "description": m.group(3).strip(),
+            })
+            continue
+        m = title_re.match(raw)
+        if m:
+            out.append({
+                "title": m.group(1).strip(),
+                "likelihood": None,
+                "description": m.group(2).strip(),
+            })
+            continue
+        out.append({"title": None, "likelihood": None, "description": raw})
+    return out
+
+
+def _extract_test_conditions(rec: ExperimentRecord, block: str) -> None:
+    section = _extract_bold_section(block, "Test conditions")
+    if section is None:
+        return
+    parsed = _parse_test_conditions(section)
+    if parsed:
+        rec.test_conditions = json.dumps(parsed, ensure_ascii=False)
+
+
+def _extract_active_regimes(rec: ExperimentRecord, block: str) -> None:
+    section = _extract_bold_section(block, "Active regimes during test")
+    if section is None:
+        return
+    parsed = _parse_regime_bullets(section)
+    # Per brief: store {} as `null` is reserved for "section absent".
+    # When section present but yields no bullets, store {} explicitly.
+    rec.regime_state_at_test = json.dumps(parsed, ensure_ascii=False)
+
+
+def _extract_revival_hypotheses(rec: ExperimentRecord, block: str) -> None:
+    section = _extract_bold_section(block, "Revival hypotheses")
+    if section is None:
+        return
+    parsed = _parse_revival_hypotheses(section)
+    if parsed:
+        rec.revival_hypotheses = json.dumps(parsed, ensure_ascii=False)
 
 
 # ------------------------- Prediction Market Atlas -------------------------
@@ -725,15 +972,19 @@ def upsert_experiments(
                     source_file, source_section, source_line_start, source_line_end,
                     signal_type, asset_class, framework, date_run,
                     result_class, result_summary, full_markdown, key_findings,
-                    atlas_principle, md_hash, synced_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    atlas_principle, test_conditions, revival_hypotheses,
+                    regime_state_at_test, computational_engine,
+                    md_hash, synced_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rec.source_file, rec.source_section, rec.source_line_start,
                     rec.source_line_end, rec.signal_type, rec.asset_class,
                     rec.framework, rec.date_run, rec.result_class,
                     rec.result_summary, rec.full_markdown, rec.key_findings,
-                    rec.atlas_principle, rec.md_hash, synced_at,
+                    rec.atlas_principle, rec.test_conditions,
+                    rec.revival_hypotheses, rec.regime_state_at_test,
+                    rec.computational_engine, rec.md_hash, synced_at,
                 ),
             )
             added += 1
@@ -746,6 +997,8 @@ def upsert_experiments(
                     signal_type = ?, asset_class = ?, framework = ?,
                     date_run = ?, result_class = ?, result_summary = ?,
                     full_markdown = ?, key_findings = ?, atlas_principle = ?,
+                    test_conditions = ?, revival_hypotheses = ?,
+                    regime_state_at_test = ?, computational_engine = ?,
                     md_hash = ?, synced_at = ?
                 WHERE id = ?
                 """,
@@ -754,6 +1007,8 @@ def upsert_experiments(
                     rec.signal_type, rec.asset_class, rec.framework,
                     rec.date_run, rec.result_class, rec.result_summary,
                     rec.full_markdown, rec.key_findings, rec.atlas_principle,
+                    rec.test_conditions, rec.revival_hypotheses,
+                    rec.regime_state_at_test, rec.computational_engine,
                     rec.md_hash, synced_at, prior[0],
                 ),
             )
@@ -927,6 +1182,10 @@ def _record_capture(rec: ExperimentRecord) -> None:
         ("result_summary", rec.result_summary),
         ("key_findings", rec.key_findings),
         ("atlas_principle", rec.atlas_principle),
+        ("test_conditions", rec.test_conditions),
+        ("revival_hypotheses", rec.revival_hypotheses),
+        ("regime_state_at_test", rec.regime_state_at_test),
+        ("computational_engine", rec.computational_engine),
     ]
     for name, val in fields:
         if val:
