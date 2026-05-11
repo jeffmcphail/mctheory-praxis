@@ -245,6 +245,11 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
                 "timestamp_format": "date",
             },
             "market_data": 90000,      # Cycle 19: 25h (24h + 1h slack)
+            "info_bars": {             # Cycle 34: PraxisInfoBarsCollector
+                "threshold_seconds": 1800,     # 30 min vs 5-min cadence
+                "timestamp_column": "end_timestamp",
+                "timestamp_format": "ms",
+            },
         }
 
         result = {
