@@ -9,6 +9,7 @@ Both tools are read-only.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -54,7 +55,8 @@ def register(mcp, db_path: Path):
               model: embedding model used
               results: list ordered by descending similarity, each containing
                 {id, source_file, source_section, signal_type, asset_class,
-                 result_class, result_summary, similarity_score}
+                 result_class, result_summary, computational_engine,
+                 similarity_score}
         """
         try:
             if not db_path.exists():
@@ -146,7 +148,8 @@ def register(mcp, db_path: Path):
                 """
                 SELECT e.experiment_id, e.embedding,
                        x.source_file, x.source_section, x.signal_type,
-                       x.asset_class, x.result_class, x.result_summary
+                       x.asset_class, x.result_class, x.result_summary,
+                       x.computational_engine
                 FROM atlas_embeddings e
                 JOIN atlas_experiments x ON x.id = e.experiment_id
                 """
@@ -166,6 +169,7 @@ def register(mcp, db_path: Path):
                         "asset_class": row["asset_class"],
                         "result_class": row["result_class"],
                         "result_summary": row["result_summary"],
+                        "computational_engine": row["computational_engine"],
                         "similarity_score": round(score, 4),
                     }
                 )
@@ -192,7 +196,12 @@ def register(mcp, db_path: Path):
 
         Returns:
             Dict with all fields from atlas_experiments plus a `citation`
-            field formatted as 'TRADING_ATLAS.md:lines 602-749'.
+            field formatted as 'TRADING_ATLAS.md:lines 602-749'. The
+            three JSON-typed fields (test_conditions,
+            revival_hypotheses, regime_state_at_test) are decoded back
+            into dicts/lists before return -- consumers don't need to
+            json.loads() them. computational_engine is an integer
+            (1-7) or null.
         """
         try:
             if not db_path.exists():
@@ -209,7 +218,10 @@ def register(mcp, db_path: Path):
                 SELECT id, source_file, source_section, source_line_start,
                        source_line_end, signal_type, asset_class, framework,
                        date_run, result_class, result_summary, full_markdown,
-                       key_findings, atlas_principle, md_hash, synced_at
+                       key_findings, atlas_principle,
+                       test_conditions, revival_hypotheses,
+                       regime_state_at_test, computational_engine,
+                       md_hash, synced_at
                 FROM atlas_experiments WHERE id = ?
                 """,
                 (entry_id,),
@@ -220,6 +232,19 @@ def register(mcp, db_path: Path):
                 return {"error": f"No atlas entry with id={entry_id}"}
 
             result = {k: row[k] for k in row.keys()}
+
+            for json_field in ("test_conditions", "revival_hypotheses",
+                               "regime_state_at_test"):
+                raw = result.get(json_field)
+                if raw is None:
+                    continue
+                try:
+                    result[json_field] = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    result[json_field + "_parse_error"] = (
+                        "stored value was not valid JSON"
+                    )
+
             result["citation"] = (
                 f"{row['source_file']}:lines "
                 f"{row['source_line_start']}-{row['source_line_end']}"
