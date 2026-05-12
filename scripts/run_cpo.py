@@ -296,13 +296,19 @@ def main():
     parser.add_argument("--cache-dir", default="data/minute_cache")
     parser.add_argument("--top-n", type=int, default=50)
     parser.add_argument("--tc-bps", type=float, default=2.0)
-    parser.add_argument("--max-leverage", type=float, default=2.0)
+    parser.add_argument("--max-leverage", type=float, default=2.0,
+                        help="Max portfolio gross exposure across all surviving models "
+                             "(default 2.0 = 200%%). With N models passing the gate, each "
+                             "gets weight = min(max_leverage/N, max_weight_per_model); when "
+                             "max_leverage/N is the binding constraint, total gross = "
+                             "max_leverage exactly, so this flag doubles as the canonical "
+                             "portfolio gross-cap knob. See docs/CPO_ALLOCATION.md.")
     parser.add_argument("--max-weight", type=float, default=0.05,
                         help="Max weight per model (default 0.05 = 5%%)")
-    parser.add_argument("--max-portfolio-weight", type=float, default=0.50,
-                        help="Max total portfolio gross exposure (default 0.50 = 50%%). "
-                             "Prevents leverage runaway when many models pass the gate. "
-                             "Weights scaled proportionally if total exceeds this cap.")
+    # Note: --max-portfolio-weight was removed in Cycle 36b (2026-05-12).
+    # The flag was unwired since its introduction (commit a2202a7); see
+    # docs/CPO_ALLOCATION.md and claude/retros/RETRO_exp10_addendum_audit.md.
+    # Use --max-leverage as the canonical portfolio gross cap.
     parser.add_argument("--prob-threshold", type=float, default=0.50,
                         help="P(profitable) gate threshold (default 0.50)")
     parser.add_argument("--min-lift", type=float, default=0.0,

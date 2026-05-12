@@ -446,6 +446,16 @@ def compute_allocation(model_predictions: list[dict],
     Modes:
         "equal_weight" — best for short-lived models
         "kelly" — best for persistent models with return history
+
+    Portfolio gross cap (both modes):
+        `max_leverage` is the canonical portfolio gross-exposure cap.
+        In equal_weight mode each surviving model receives
+        `min(max_leverage / N, max_weight_per_model)`; when the
+        `max_leverage / N` term binds (large N), total gross equals
+        `max_leverage` exactly. In kelly mode, `kelly_vector` applies
+        the same cap via a proportional scale-down idiom (see
+        cpo_core.py:423). See docs/CPO_ALLOCATION.md for the full
+        arithmetic and a worked Exp 10 example.
     """
     # Gate: lift-based or absolute
     if min_lift > 0:
@@ -464,6 +474,11 @@ def compute_allocation(model_predictions: list[dict],
     n = len(candidates)
 
     # ── Mode: equal_weight ────────────────────────────────────────
+    # Gross-cap arithmetic: each surviving model gets the smaller of
+    # max_leverage/N (the portfolio gross cap divided across N models)
+    # and max_weight_per_model (the per-model ceiling). Total gross =
+    # N * weight, which is bounded above by min(max_leverage,
+    # N * max_weight_per_model). See docs/CPO_ALLOCATION.md.
     if mode == "equal_weight":
         weight = min(max_leverage / n, max_weight_per_model)
         return {p["model_id"]: float(weight) for p in candidates}
