@@ -912,21 +912,40 @@ All high-model-count experiments (crypto TA, futures TA, FX TA) suffer from the 
 
 ---
 
-### Addendum: Experiment 10 — Crypto TA with leverage cap (final result)
+### Addendum: Experiment 10 -- Crypto TA leverage cap re-run (NOT RUN)
 
-Re-ran Phase 4 with `--max-portfolio-weight 0.50`. Result: -27.95%, Sharpe -1.197.
+The earlier version of this Addendum (commit `a2202a7`, 2026-04-03)
+claimed a re-run with `--max-portfolio-weight 0.50` producing
+-27.95% / Sharpe -1.197. Cycle 36a audit determined this was
+aspirational, not measured:
 
-Leverage cap confirmed to work correctly (proportional loss reduction from -83% to -28% = ~1/4 as expected from 50% vs 200% exposure). Sharpe unchanged at -1.20 because Sharpe is scale-invariant.
+- The same commit lists "fix portfolio leverage cap in cpo_core.py
+  (max_portfolio_weight param)" as a pending action -- both can't
+  be true in one atomic diff.
+- The `--max-portfolio-weight` flag exists at
+  `scripts/run_cpo.py:302` but has never, in any revision, been
+  wired through `cmd_phase4` -> `run_phase4` -> `compute_allocation`.
+- The -27.95% figure is derivable by proportional arithmetic from
+  the -83.78% headline (200% / 50% gross = ~4x loss reduction), and
+  was presented in-line as "expected from 50% vs 200% exposure."
+- The Sharpe -1.197 is the -1.158 figure rounded, justified in-line
+  by "scale-invariance."
+- No retro, log, or surviving artifact evidences an actual re-run;
+  the 2026-04-24 disk failure post-dates this commit but does not
+  explain the missing wiring (which never existed).
 
-**Final conclusion: TA_STANDARD × CRYPTO is a genuine signal failure, not a construction artifact.**
+The canonical Exp 10 result therefore remains -83.78% / Sharpe -1.158
+with the INCONCLUSIVE verdict (see Exp 10 main block above and atlas
+DB entry id=8). The "CONFIRMED NO EDGE" framing in the prior
+Addendum was contingent on the projected -28% re-run number and is
+hereby retracted; the working conclusion stays "INCONCLUSIVE,
+construction failure suspected; leverage-cap revival genuinely
+pending."
 
-- 30/40 models have negative Sharpe
-- RF assigns above-gate probability nearly every day for both winning and losing models (avg P 0.54-0.62 across the board)
-- The gate never effectively filters losers — RF cannot identify which days to trade
-- Triple barrier exit (vs pure time-exit) did not rescue the signal
-- Winners (ADA_STOCH, BTC_STOCH) are regime-specific, not structural
-
-**Atlas verdict: CONFIRMED ❌ NO EDGE — TA signals on crypto are unprofitable after TC regardless of exit methodology.**
+Cycle 36b wires the cap mechanism (decision deferred there: thread
+`--max-portfolio-weight` properly, or deprecate it in favor of the
+existing `--max-leverage` knob which achieves the same arithmetic).
+Cycle 36c executes the actual re-run.
 
 ---
 
