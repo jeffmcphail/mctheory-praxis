@@ -327,14 +327,26 @@ def _extract_result_class(rec: ExperimentRecord, block: str) -> None:
 
 def _classify_result_token(value: str) -> Optional[str]:
     upper = value.upper()
-    if "POSITIVE" in upper and "NEGATIVE" not in upper:
+    if "INCONCLUSIVE" in upper or "BLOCKED" in upper:
+        return "INCONCLUSIVE"
+    # Compound phrases must match before bare POSITIVE/NEGATIVE, since
+    # "WEAK POSITIVE" / "STRONG NEGATIVE" contain those bare tokens as
+    # substrings and would otherwise leak into the bare-token branch.
+    if (
+        "WEAK POSITIVE" in upper
+        or "WEAK NEGATIVE" in upper
+        or "STRONG POSITIVE" in upper
+        or "STRONG NEGATIVE" in upper
+        or "MARGINAL POSITIVE" in upper
+        or "MARGINAL NEGATIVE" in upper
+        or "PROMISING" in upper
+        or "PARTIAL" in upper
+    ):
+        return "PARTIAL"
+    if "POSITIVE" in upper:
         return "POSITIVE"
     if "NEGATIVE" in upper:
         return "NEGATIVE"
-    if "INCONCLUSIVE" in upper or "BLOCKED" in upper:
-        return "INCONCLUSIVE"
-    if "WEAK" in upper or "PROMISING" in upper or "PARTIAL" in upper:
-        return "PARTIAL"
     return None
 
 
