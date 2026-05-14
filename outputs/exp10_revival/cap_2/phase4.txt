@@ -1,0 +1,176 @@
+﻿  Crypto TA: 64 models (8 assets � 8 TA types)
+  TC: 2.0 bps/leg, Benchmark: BTC
+  Total configs: 7920
+  Loaded 40 models from phase3_models_funding.joblib
+
+  Fetching warmup: 2024-09-03 -> 2025-01-01
+  Fetching hourly data for 8 assets: 2024-09-03 -> 2025-01-01
+  Source: ccxt (binance)
+    4/8: BNB (2881 bars)
+    8/8: DOGE (2881 bars)
+  Loaded 8/8 assets
+  Warmup: 8 tickers, ~121 days each
+  Fetching hourly data for 8 assets: 2025-01-01 -> 2026-03-25
+  Source: ccxt (binance)
+    4/8: BNB (10753 bars)
+    8/8: DOGE (10753 bars)
+  Loaded 8/8 assets
+
+======================================================================
+PHASE 4: OOS Portfolio Trading
+  Mode: equal_weight, Gate: P > 0.50
+  Max leverage: 2.0, Max weight/model: 0.05
+======================================================================
+  Warmup applied
+  Trading days: 448
+  Day 1 (2025-01-01): predicted=0, above_gate=0
+  Day 2 (2025-01-02): predicted=0, above_gate=0
+  Day 3 (2025-01-03): predicted=0, above_gate=0
+  Day 4 (2025-01-04): predicted=0, above_gate=0
+  Day 5 (2025-01-05): predicted=0, above_gate=0
+  Day 11 (2025-01-11): predicted=40, above_gate=30
+    Allocated: 30 models, total_weight=1.500, per_model=0.0500
+    Executed: 30
+    Allocated: 28 models, total_weight=1.400, per_model=0.0500
+    Executed: 28
+  Day 20/448: cum=+0.0166, active=29
+  Day 21 (2025-01-21): predicted=40, above_gate=29
+    Allocated: 29 models, total_weight=1.450, per_model=0.0500
+    Executed: 29
+    Allocated: 24 models, total_weight=1.200, per_model=0.0500
+    Executed: 24
+  Day 31 (2025-01-31): predicted=40, above_gate=34
+    Allocated: 34 models, total_weight=1.700, per_model=0.0500
+    Executed: 34
+  Day 40/448: cum=+0.0782, active=23
+  Day 41 (2025-02-10): predicted=40, above_gate=30
+  Day 51 (2025-02-20): predicted=40, above_gate=31
+  Day 60/448: cum=+0.0076, active=26
+  Day 61 (2025-03-02): predicted=40, above_gate=28
+  Day 71 (2025-03-12): predicted=40, above_gate=21
+  Day 80/448: cum=-0.1683, active=32
+  Day 81 (2025-03-22): predicted=40, above_gate=31
+  Day 91 (2025-04-01): predicted=40, above_gate=32
+  Day 100/448: cum=-0.1808, active=27
+  Day 101 (2025-04-11): predicted=40, above_gate=29
+  Day 111 (2025-04-21): predicted=40, above_gate=26
+  Day 120/448: cum=-0.1661, active=33
+  Day 121 (2025-05-01): predicted=40, above_gate=33
+  Day 131 (2025-05-11): predicted=40, above_gate=26
+  Day 140/448: cum=-0.2479, active=31
+  Day 141 (2025-05-21): predicted=40, above_gate=30
+  Day 151 (2025-05-31): predicted=40, above_gate=33
+  Day 160/448: cum=-0.1473, active=29
+  Day 161 (2025-06-10): predicted=40, above_gate=29
+  Day 171 (2025-06-20): predicted=40, above_gate=30
+  Day 180/448: cum=-0.1745, active=30
+  Day 181 (2025-06-30): predicted=40, above_gate=23
+  Day 191 (2025-07-10): predicted=40, above_gate=29
+  Day 200/448: cum=-0.3335, active=33
+  Day 201 (2025-07-20): predicted=40, above_gate=32
+  Day 211 (2025-07-30): predicted=40, above_gate=30
+  Day 220/448: cum=-0.3661, active=27
+  Day 221 (2025-08-09): predicted=40, above_gate=28
+  Day 231 (2025-08-19): predicted=40, above_gate=33
+  Day 240/448: cum=-0.3547, active=31
+  Day 241 (2025-08-29): predicted=40, above_gate=33
+  Day 251 (2025-09-08): predicted=40, above_gate=27
+  Day 260/448: cum=-0.4165, active=29
+  Day 261 (2025-09-18): predicted=40, above_gate=27
+  Day 271 (2025-09-28): predicted=40, above_gate=29
+  Day 280/448: cum=-0.5833, active=31
+  Day 281 (2025-10-08): predicted=40, above_gate=29
+  Day 291 (2025-10-18): predicted=40, above_gate=32
+  Day 300/448: cum=-0.5237, active=30
+  Day 301 (2025-10-28): predicted=40, above_gate=29
+  Day 311 (2025-11-07): predicted=40, above_gate=29
+  Day 320/448: cum=-0.4804, active=31
+  Day 321 (2025-11-17): predicted=40, above_gate=33
+  Day 331 (2025-11-27): predicted=40, above_gate=28
+  Day 340/448: cum=-0.5636, active=32
+  Day 341 (2025-12-07): predicted=40, above_gate=29
+  Day 351 (2025-12-17): predicted=40, above_gate=30
+  Day 360/448: cum=-0.4372, active=31
+  Day 361 (2025-12-27): predicted=40, above_gate=34
+  Day 371 (2026-01-06): predicted=40, above_gate=25
+  Day 380/448: cum=-0.5539, active=34
+  Day 381 (2026-01-16): predicted=40, above_gate=29
+  Day 391 (2026-01-26): predicted=40, above_gate=30
+  Day 400/448: cum=-0.6496, active=30
+  Day 401 (2026-02-05): predicted=40, above_gate=28
+  Day 411 (2026-02-15): predicted=40, above_gate=30
+  Day 420/448: cum=-0.7519, active=35
+  Day 421 (2026-02-25): predicted=40, above_gate=30
+  Day 431 (2026-03-07): predicted=40, above_gate=28
+  Day 440/448: cum=-0.7852, active=30
+  Day 441 (2026-03-17): predicted=40, above_gate=30
+
+  OOS Results:
+    Trading days:     441
+    Cumulative ret:   -0.7637  (-76.37%)
+    Ann. return:      -0.4364  (-43.6%)
+    Ann. volatility:  0.3764   (37.6%)
+    Sharpe ratio:     -1.1596
+    Max drawdown:     -0.9724  (-97.24%)
+    Win days:         241/441 (54.6%)
+    Avg models/day:   29.9
+
+  OOS Prediction Calibration:
+    Samples: 13184, Base win rate: 37.6%
+    Accuracy: 37.6%, Brier: 0.2771
+
+              P bin      n  Actual WR    Lift
+    [0.50, 0.55)   5179  38.7%  +1.2%
+    [0.55, 0.60)   4747  38.2%  +0.7%
+    [0.60, 0.65)   2300  36.4%  -1.1%
+    [0.65, 0.70)    761  30.7%  -6.8%
+    [0.70, 0.80)    189  31.2%  -6.3%
+    [0.80, 1.01)      8  0.0%  -37.6%
+
+  Per-Model Performance (top 20 by Sharpe):
+                   Model   Days    MeanRet   Sharpe    CumRet  WinRate    AvgP
+               ADA_STOCH    266  +0.002211  +1.225  +0.58801  38.7%  0.544
+                XRP_BOLL    378  +0.000940  +0.461  +0.35529  38.4%  0.563
+                SOL_BOLL    418  +0.001011  +0.450  +0.42266  44.5%  0.553
+           SOL_EMA_CROSS    370  +0.000404  +0.171  +0.14936  47.8%  0.594
+               ETH_STOCH    245  +0.000208  +0.096  +0.05099  40.4%  0.567
+           XRP_EMA_CROSS    400  +0.000088  +0.041  +0.03508  51.2%  0.563
+           SOL_VOL_BREAK    329  -0.000171  -0.089  -0.05640  45.0%  0.573
+              AVAX_STOCH    192  -0.000205  -0.101  -0.03939  38.5%  0.553
+           ADA_VOL_BREAK    233  -0.000252  -0.133  -0.05868  40.3%  0.542
+               DOGE_BOLL    355  -0.000372  -0.182  -0.13219  34.1%  0.544
+           ETH_EMA_CROSS    414  -0.000388  -0.184  -0.16054  48.6%  0.581
+               AVAX_BOLL    325  -0.001047  -0.429  -0.34015  44.3%  0.569
+                ADA_BOLL    422  -0.000996  -0.433  -0.42051  38.4%  0.560
+           BNB_ATR_BREAK    409  -0.000321  -0.438  -0.13112  21.0%  0.606
+           BTC_EMA_CROSS    382  -0.000556  -0.448  -0.21255  47.4%  0.591
+          AVAX_ATR_BREAK    404  -0.000665  -0.466  -0.26859  24.8%  0.600
+                BNB_BOLL    382  -0.000646  -0.478  -0.24695  38.0%  0.558
+           BNB_VOL_BREAK    367  -0.000628  -0.481  -0.23061  46.3%  0.562
+               XRP_STOCH    255  -0.001081  -0.578  -0.27572  41.6%  0.537
+           BNB_EMA_CROSS    353  -0.001214  -0.773  -0.42870  45.6%  0.588
+
+  Bottom 5:
+              DOGE_STOCH    180  -0.003326  -1.699  -0.59871  32.8%  0.556
+                BTC_BOLL    338  -0.001670  -1.742  -0.56438  34.9%  0.567
+                ETH_BOLL    360  -0.003533  -1.906  -1.27202  39.7%  0.564
+           ETH_VOL_BREAK    205  -0.003812  -2.254  -0.78149  40.0%  0.552
+           ETH_ATR_BREAK    301  -0.002731  -2.337  -0.82207  21.6%  0.570
+
+  Model Sharpe Distribution (n=40):
+    Mean: -0.757  Median: -0.828
+    Positive: 6/40
+
+======================================================================
+FINAL OOS PORTFOLIO RESULTS
+======================================================================
+  Period:          2025-01-01 -> 2026-03-25
+  Trading days:    441
+  Cumulative ret:  -0.7637  (-76.37%)
+  Ann. return:     -0.4364  (-43.6%)
+  Ann. volatility: 0.3764   (37.6%)
+  Sharpe ratio:    -1.1596
+  Max drawdown:    -0.9724  (-97.24%)
+  Win days:        241/441 (54.6%)
+  Avg models/day:  29.9
+  Max models/day:  36

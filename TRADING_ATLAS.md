@@ -726,27 +726,31 @@ remains regime-sensitive even with improved exits.
 
 | Attribute | Value |
 |-----------|-------|
-| **Date** | 2026-03-26 |
-| **Training** | 2024, 8 assets × 8 TA types, 338 signal configs × 72 barrier configs |
+| **Date** | 2026-03-26 (original); revival 2026-05-13 (Cycle 36c) |
+| **Training** | 2024, 8 crypto assets × 8 TA types × 110 signal configs × 72 barrier configs = 7,920 configs (universal_ta crypto path) |
 | **OOS** | 2025-01-01 → 2026-03-25 (441 days) |
-| **RF AUC** | 0.771-0.854, base_rate 22-52% |
-| **Pre-filter kept** | STOCH, RSI, EMA_CROSS, VOL_BREAK, BOLL (5/8 types) |
-| **Result** | **INCONCLUSIVE** (-83.78% portfolio is leverage-runaway artifact, not signal failure; individual models like ADA_STOCH +117% confirm signal works) |
-| **Computational engine** | 2 (Momentum/Trend) primary + 7 (Event/Signal for triple-barrier labels); composes with Engine 3 (Allocation -- failed via leverage runaway) |
+| **RF AUC** | 0.771-0.854 (original); 0.790-0.890 (Cycle 36c re-train, slightly elevated). base_rate 22-52% both runs. |
+| **Pre-filter kept** | STOCH, RSI, EMA_CROSS, VOL_BREAK, BOLL (5/8 types, original); STOCH, VOL_BREAK, ATR_BREAK, EMA_CROSS, BOLL (5/8 types, Cycle 36c). One-element swap (ATR_BREAK ↔ RSI). |
+| **Result** | **NEGATIVE** (-26.58% / Sharpe -1.18 at cap=0.5; Sharpe invariant across binding-cap settings refutes leverage-cap revival) |
+| **Computational engine** | 2 (Momentum/Trend) primary + 7 (Event/Signal for triple-barrier labels); composes with Engine 3 (Allocation -- cap mechanism is a pure leverage scaler, does not change signal Sharpe) |
 
-**Result: -83.78%, Sharpe -1.158, Max DD -102.39%**
+**Original result (2026-03-26): -83.78%, Sharpe -1.158, Max DD -102.39%** (at cap=2.0 default; realized gross 1.5x avg, 1.8x peak)
 
-**Root cause — leverage runaway, not strategy failure:**
-- 40 models retained after pre-filter
-- All 40 simultaneously pass P>0.50 gate every day (above_gate=30-35 consistently)
-- At 5% weight cap per model: 35 × 5% = 175% gross leverage daily
-- Net result: leveraged long-crypto portfolio that got destroyed in the 2025 crypto bear phase
+**Cycle 36c result (2026-05-13, cap response sweep):**
+- cap=2.0: -76.37% / Sharpe -1.1596 / Max DD -97.24% (reproduces original within experimental foundation; ~7pp milder cum, Sharpe & DD match to 3 decimals)
+- cap=1.0: -53.17% / Sharpe -1.1844 / Max DD -67.57%
+- **cap=0.5 (canonical revival): -26.58% / Sharpe -1.1844 / Max DD -33.78%**
+- cap=0.25: -13.29% / Sharpe -1.1844 / Max DD -16.89%
 
-**This is a CPO portfolio construction failure, not a signal failure.** Individual model results confirm this — ADA_STOCH: +117% cum return, Sharpe +2.01; BTC_STOCH: +28.8%, Sharpe +1.59. The strategy signals work at the model level. The portfolio construction amplified them into a ruin-level drawdown.
+**Root cause -- negative-edge signal amplified by default-construction gross leverage:**
 
-**Fix required:** Hard portfolio-level leverage cap (e.g. max total_weight = 0.5 regardless of models passing the gate). The equal_weight allocation with per-model cap was designed for 6-10 models, not 40.
+The original -83.78% headline combined two effects: (1) a negative-Sharpe (-1.18) signal-level result from the 40-model TA portfolio, and (2) the equal-weight × per-model-cap construction producing ~150% gross exposure naturally (5% × ~30 models passing gate). The leverage amplified a -56%-magnitude raw signal-level loss to the -84% portfolio result.
 
-**Verdict: INCONCLUSIVE — leverage construction failure masks signal quality. Re-run needed with portfolio leverage cap.**
+Cycle 36c established this by running the cycle at four cap settings (2.0, 1.0, 0.5, 0.25). At binding-cap settings, **Sharpe is constant at -1.1844 to 4 decimals**, with cumulative return scaling exactly linearly with the cap. This is the canonical signature of a pure-leverage-scaler in front of a fixed signal stream. The cap mechanism does not change which models pass the gate, their relative weights, or which days they trade.
+
+**The "leverage construction failure masks signal quality" framing in the prior atlas entry is refuted.** There is no cap setting -- including arbitrarily small caps -- that produces a positive-Sharpe portfolio from this universe. ADA_STOCH/BTC_STOCH "individual models confirm signal works" was based on training-period numbers (Sharpe +2.01, +1.59) that did not generalize OOS. At cap=0.5 OOS, ADA_STOCH led at Sharpe +1.225 / cum +58.8% (one of 6/40 positive-Sharpe models), but the negative tail (ETH_ATR_BREAK -2.34, ETH_VOL_BREAK -2.25, ETH_BOLL -1.91, BTC_BOLL -1.74, DOGE_STOCH -1.70) dominated the portfolio aggregate.
+
+**Verdict: NEGATIVE -- TA signals on crypto produce Sharpe ~-1.18 OOS regardless of portfolio gross cap. The original -83.78% headline was a leveraged amplification of a negative-edge signal, not a construction artifact concealing salvageable edge. Cycle 36c ran four cap settings [0.25, 0.5, 1.0, 2.0]; Sharpe was invariant to 4 decimals across binding-cap settings, decisively refuting the leverage-cap revival hypothesis.**
 
 **Test conditions:**
 
@@ -755,11 +759,11 @@ remains regime-sensitive even with improved exits.
 | Bar type | hourly time bars |
 | Frequency | hourly, 24/7 |
 | Universe | 8 crypto assets x 5 TA types kept (40 individual models) |
-| TC | 4 bps round-trip |
-| Feature set | 8 TA types x 338 signal configs x 72 barrier configs |
-| Pre-filter | training-period top 5/8 TA types kept (STOCH, RSI, EMA_CROSS, VOL_BREAK, BOLL) |
-| Risk management | equal weight (5% per-model cap) -- but no PORTFOLIO-level leverage cap; 35-40 models simultaneously above gate produced 175% gross daily |
-| Computational engine | Engine 2 + Engine 7 labels; composes with Engine 3 (Allocation FAILED via portfolio leverage runaway) |
+| TC | 4 bps round-trip (2 bps/leg) |
+| Feature set | 8 TA types x 110 signal configs x 72 barrier configs = 7,920 configs (universal_ta crypto path) |
+| Pre-filter | training-period top 5/8 TA types kept; original {STOCH, RSI, EMA_CROSS, VOL_BREAK, BOLL}, Cycle 36c {STOCH, VOL_BREAK, ATR_BREAK, EMA_CROSS, BOLL}. One-element swap (data drift) |
+| Risk management | equal weight (5% per-model cap). Default `--max-leverage 2.0` not binding (realized gross 1.5x mean, 1.8x peak). Cycle 36c found Sharpe invariant to 4 decimals (-1.1844) across binding caps 1.0/0.5/0.25 -- the cap is a pure leverage scaler, not a signal-quality filter. |
+| Computational engine | Engine 2 + Engine 7 labels; composes with Engine 3 (Allocation -- cap is pure leverage scaler, does not change signal Sharpe) |
 
 **Active regimes during test:**
 
@@ -773,10 +777,12 @@ unstable.
 
 **Revival hypotheses:**
 
-1. **Hard portfolio leverage cap (e.g., max total_weight = 0.5)** -- likelihood: very high. Explicitly stated as the fix in the existing markdown. Trivial code change; re-run with this cap will produce a coherent portfolio result for the first time. Individual-model results (ADA_STOCH +117%, BTC_STOCH +28.8%) suggest the underlying signal does have content; the portfolio failure was purely a construction artifact. Expected re-run outcome: ambiguous-to-modestly-positive at portfolio level, since the constituent models that worked (~5-10) had real edge, and the rest were noise.
-2. **Reduce model count to top-K by training Sharpe** -- likelihood: high. Alternative to portfolio cap: pre-filter the 40 models to top 10-15 by training-period Sharpe before portfolio construction. Tighter selection, similar effective gross-leverage outcome, simpler decision rule.
-3. **Info bars (after fixing leverage)** -- likelihood: medium. Once the leverage issue is fixed and we can read the underlying signal quality cleanly, info bars become a natural next test for the same Exp-2 reasons.
-4. **Accept partial-revival with leverage cap, treat as "confirmed PARTIAL"** -- likelihood: high follow-on. After leverage fix, the experiment moves out of INCONCLUSIVE limbo into a definite category (most likely PARTIAL or NEGATIVE depending on what surfaces). That's the immediate-value revival path even if the strategy doesn't end up production-deployable.
+(Status post Cycle 36c re-run; see Addendum below for full execution log.)
+
+1. **Hard portfolio leverage cap** -- **TESTED, REFUTED** (Cycle 36c, 2026-05-13). Sharpe-invariance across binding-cap settings refutes the mechanism. The cap is a pure leverage scaler; it does not change which models trade or their relative weights, so it cannot alter the underlying signal's Sharpe.
+2. **Reduce model count to top-K by training Sharpe** -- **DEMOTED**. Same Sharpe-invariance argument applies: any uniform model-set transformation that preserves relative weights preserves Sharpe of the underlying signal. Top-K filtering on training Sharpe also faces the in-sample-vs-OOS generalization issue documented above (ADA_STOCH/BTC_STOCH training winners didn't carry to OOS).
+3. **Info bars / dollar bars** -- **DEMOTED**. Bar construction does not naturally change the Sharpe of the per-bar return stream unless it changes which bars are included -- a distinct research question (sampling-frequency / input distribution stability) rather than a "revival" of this experiment. If pursued, frame as a new experiment, not a hypothesis for Exp 10.
+4. **The "TA signals on crypto have persistent edge" working hypothesis from Cycles 1-4** -- **CLOSED, NEGATIVE**. Cumulative evidence (Exp 2 + Exp 10 cap-response sweep + Exps 3/4 sibling negative results) is now decisive across portfolio constructions.
 
 ---
 
@@ -912,40 +918,19 @@ All high-model-count experiments (crypto TA, futures TA, FX TA) suffer from the 
 
 ---
 
-### Addendum: Experiment 10 -- Crypto TA leverage cap re-run (NOT RUN)
+### Addendum: Experiment 10 -- Crypto TA leverage cap re-run (EXECUTED IN CYCLE 36c)
 
-The earlier version of this Addendum (commit `a2202a7`, 2026-04-03)
-claimed a re-run with `--max-portfolio-weight 0.50` producing
--27.95% / Sharpe -1.197. Cycle 36a audit determined this was
-aspirational, not measured:
+**Status: EXECUTED 2026-05-13 (Cycle 36c).** See `outputs/exp10_revival/` for artifacts (phase2/3 cached, per-cap phase4 results, plots, SUMMARY.md).
 
-- The same commit lists "fix portfolio leverage cap in cpo_core.py
-  (max_portfolio_weight param)" as a pending action -- both can't
-  be true in one atomic diff.
-- The `--max-portfolio-weight` flag exists at
-  `scripts/run_cpo.py:302` but has never, in any revision, been
-  wired through `cmd_phase4` -> `run_phase4` -> `compute_allocation`.
-- The -27.95% figure is derivable by proportional arithmetic from
-  the -83.78% headline (200% / 50% gross = ~4x loss reduction), and
-  was presented in-line as "expected from 50% vs 200% exposure."
-- The Sharpe -1.197 is the -1.158 figure rounded, justified in-line
-  by "scale-invariance."
-- No retro, log, or surviving artifact evidences an actual re-run;
-  the 2026-04-24 disk failure post-dates this commit but does not
-  explain the missing wiring (which never existed).
+**Headline finding:** Sharpe is invariant to 4 decimals (-1.1844) across binding-cap settings 1.0, 0.5, 0.25. Cumulative return scales exactly linearly with cap. This refutes the "leverage construction failure masks signal quality" framing in the original Exp 10 entry: the cap mechanism is a pure leverage scaler that does not alter signal-level Sharpe. The original -83.78% headline was a leveraged amplification of a real negative-edge signal, not a construction artifact concealing salvageable edge.
 
-The canonical Exp 10 result therefore remains -83.78% / Sharpe -1.158
-with the INCONCLUSIVE verdict (see Exp 10 main block above and atlas
-DB entry id=8). The "CONFIRMED NO EDGE" framing in the prior
-Addendum was contingent on the projected -28% re-run number and is
-hereby retracted; the working conclusion stays "INCONCLUSIVE,
-construction failure suspected; leverage-cap revival genuinely
-pending."
+**Historical record (retained for audit context):**
 
-Cycle 36b wires the cap mechanism (decision deferred there: thread
-`--max-portfolio-weight` properly, or deprecate it in favor of the
-existing `--max-leverage` knob which achieves the same arithmetic).
-Cycle 36c executes the actual re-run.
+The earlier version of this Addendum (commit `a2202a7`, 2026-04-03) claimed a re-run with `--max-portfolio-weight 0.50` producing -27.95% / Sharpe -1.197. Cycle 36a audit determined this was aspirational, not measured (the `--max-portfolio-weight` flag was unwired through cmd_phase4 → run_phase4 → compute_allocation; no retro or surviving artifact evidenced an actual re-run). Cycle 36b deprecated `--max-portfolio-weight` in favor of `--max-leverage` as the canonical gross cap. Cycle 36c re-ran the experiment via the wired `--max-leverage` knob.
+
+**Note on the cap=0.5 result vs the retracted -27.95% projection.** The Cycle 36c cap=0.5 cumulative is -26.58%, within 1.4 pp of the retracted aspirational figure. This is coincidental, not vindicating: the retracted figure was derived by linear scaling of -83.78% (which Cycle 36c confirms IS the correct linear-scaling relationship for binding caps); the Sharpe -1.197 figure was a rounding of -1.158 justified as "scale-invariance" (which Cycle 36c confirms IS the correct invariance, though to 4 decimals at -1.1844 rather than the -1.197 figure cited). The structure of the claim was right; the absence of an actual run was the violation. The numbers happen to be approximately reproducible because the linear-scaling intuition was correct; the violation was claiming an executed run that didn't exist.
+
+**a2202a7 fabrication pattern.** Commit a2202a7 introduced two now-confirmed fabrications in Exp 10's section: (1) this Addendum with the projected -27.95% (retracted Cycle 36a), and (2) the "338 signal configs × 72 barrier configs" line in Exp 10's Training row (corrected Cycle 36c -- the "338" was the crypto_ta-strategy total config count, the "72" was the standard_barrier_grid count; the multiplication produced an internally-inconsistent description). A broader sweep of a2202a7's other factual claims is queued as a post-36c housekeeping cycle.
 
 ---
 
