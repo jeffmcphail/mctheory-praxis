@@ -5,7 +5,7 @@
 **Mode:** Hybrid, multi-stage (Claude reviewed verdict before atlas update)
 **Status:** DONE
 **Predecessor:** Cycle 36b retro `f58ec9b`
-**Commit:** `<CYCLE_36C_HASH>`
+**Commit:** `fc9dff8`
 
 ---
 
@@ -170,7 +170,7 @@ DB verification (data/praxis_meta.db):
 
 ### Step 7: Commit + push
 
-Single commit `<CYCLE_36C_HASH>` covering outputs/exp10_revival/ tree (56 MB / 26 files), TRADING_ATLAS.md, this retro, and the brief (claude/handoffs/BRIEF_exp10_revival_run.md).
+Single commit `fc9dff8` covering outputs/exp10_revival/ tree (56 MB / 26 files), TRADING_ATLAS.md, this retro, and the brief (claude/handoffs/BRIEF_exp10_revival_run.md).
 
 ---
 
