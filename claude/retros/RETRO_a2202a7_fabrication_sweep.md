@@ -5,7 +5,7 @@
 **Mode:** Hybrid, single pause point (between investigation report and corrections)
 **Status:** DONE
 **Predecessor:** Cycle 36c (`fc9dff8` + `58add68`); memory #19 / `project_a2202a7_fabrication_sweep_queued.md`
-**Commit:** `<CYCLE_37_HASH>`
+**Commit:** `f732c3e`
 
 ---
 
