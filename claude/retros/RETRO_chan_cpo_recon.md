@@ -5,7 +5,7 @@
 **Mode:** Read-only investigation (4 parallel streams, single pause point)
 **Status:** DONE
 **Predecessor:** Cycle 37 (`f732c3e` + `ebfb438`); atlas Exp 1 NEGATIVE per 2026-04-02 documented rebuild
-**Commit:** `<CYCLE_38_HASH>`
+**Commit:** `b0ace4b`
 **Resolution:** Option D-prime -- close cycle with documentation cleanup only, no further investigation, no experimental run.
 
 ---
