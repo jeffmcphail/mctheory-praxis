@@ -66,7 +66,7 @@ z-score warmup (60% of configs produced zero trades). Both are now fixed.
 
 | Metric | Old (daily features, broken OOS) | New (112 minute features, fixed OOS) |
 |--------|----------------------------------|--------------------------------------|
-| Feature count | 17 (daily bars) | 112 (minute bars, 7 lookbacks) |
+| Feature count | 17 (daily bars) | 112 (minute bars, 8 indicators × 2 assets × 7 lookbacks) |
 | RF AUC | 0.77-0.87 (mean 0.82) | 0.855-0.896 (mean 0.873) |
 | Predictions with trades | ~6% (z-score warmup bug) | 99.6% |
 | Gross win rate | unknown (broken normalization) | **57.6%** |
@@ -113,7 +113,7 @@ z-score warmup (60% of configs produced zero trades). Both are now fixed.
 | Frequency | per-minute, 9:30-16:00 ET equity hours |
 | Universe | 38 deduplicated SP500 cointegrated pairs (Burgess discovery) |
 | TC | 4 bps round-trip per pair |
-| Feature set | 112 minute-frequency features (Chan paper spec; 7 indicators x 16 lookback combinations) |
+| Feature set | 112 minute-frequency features (Chan paper spec; 8 indicators × 2 assets × 7 lookbacks). See `engines/minute_features.py:51,54-63` for canonical constants. |
 | Pre-filter | none -- all pairs from Burgess discovery feed CPO directly |
 | Risk management | equal weight, P>0.65 gate, notional_capital normalization, spread_history warmup |
 | Computational engine | Engine 1 (Cointegration); composes with Engine 3 (Allocation) for portfolio construction |
@@ -143,9 +143,18 @@ medium-trend, low-vol period for SPX with abundant liquidity.
 **Revival hypotheses:**
 
 1. **Lower-TC venue or different asset class** -- likelihood: high. The signal is real (57.6% gross win rate, +5.3 bps/trade) but TC of 4 bps RT doubles the gross alpha. A market with TC < 2 bps RT (e.g., direct broker access at institutional rates, or moving to FX major pairs) could flip this NEGATIVE -> POSITIVE.
-2. **Add ADX trend filter (Class A)** -- likelihood: medium. Class A produced the largest single-class lift (+7.25%). Only trade when ADX < 25 (no trend). Reduces trades, may improve net by avoiding adverse trend regimes.
-3. **Switch to dollar bars** -- likelihood: low. Pairs MR's bar selection isn't the constraint here; the constraint is gross alpha vs. TC. Dollar bars wouldn't change the TC arithmetic.
+2. **Dollar-bar resampling** -- likelihood: low-to-medium. Mechanism A (bar count drops 10-30× at a $100M/pair threshold) alone gets trade count well below the 1.325/day break-even at unchanged gross alpha; Mechanism B (per-bar gross alpha rises via event concentration) is magnitude-uncertain and could go either way. Worst case: positive but small (~+0.5 bps/day). Best case: comfortably positive. Cycle 38 RECON noted dollar bars could fix the TC arithmetic mechanically but cannot predict whether net gross alpha holds up under event-time sampling.
+3. **Add ADX trend filter (Class A)** -- likelihood: medium. Class A produced the largest single-class lift (+7.25%). Only trade when ADX < 25 (no trend). Reduces trades, may improve net by avoiding adverse trend regimes.
 4. **Re-run with intraday minute features but daily holding period** -- likelihood: low. The current setup already does this; the 2.7 trades/day count isn't the cost driver.
+
+**Cycle 38 RECON addendum (2026-05-15):**
+
+Read-only investigation cycle. Verified the 2026-04-02 implementation against Chan's spec and reviewed the TC arithmetic. No code, no atlas DB updates, no experimental output produced.
+
+- **Implementation faithful to Chan paper spec.** `engines/minute_features.py:1-33` cites Chan, Belov, Ciobanu (2021) "Conditional Parameter Optimization" + Chan (2021) "Quantitative Trading" 2e, Ch.7 pp.139-147 as sources for the 8-indicator × 7-lookback feature design. Constants live at `engines/minute_features.py:51` (`FEATURE_LOOKBACKS = [50, 100, 200, 400, 800, 1600, 3200]`) and `54-63` (`INDICATOR_NAMES`). The atlas's prior "7 indicators × 16 lookback combinations" description was structurally wrong (right count 112 by coincidence, wrong factorization); corrected this cycle.
+- **Gross/TC numbers (5.3 / 11 / -5.6 bps) internally consistent.** The chain 5.3 gross − (2.7 trades × 4 bps) = -5.5 net matches the atlas's -5.6 within rounding. The 5.3 gross figure itself is only reproducible by re-running phase4 -- `output/burgess/chan_cpo/phase4_portfolio.parquet` was deleted in commit a2202a7. Cycle 38 RECON chose not to re-run because the conclusion is mechanical: break-even trade count at 5.3 gross / 4 bps RT is ~1.325/day; current 2.7/day cannot be halved within the existing bar-type-and-TC regime.
+- **Revival hypotheses ranked (re-prioritized post-RECON):** (a) lower-TC venue or asset class (highest likelihood; mechanical), (b) dollar-bar resampling (uncertain; Mechanism A dominates but B magnitude unknowable without running), (c) ADX trend filter (medium; smallest expected lift but cheapest to test).
+- **Project-memory clarification.** A separate `lookback ∈ {30, 60, 90, 120, 180, 240, 360, 720}` min set referenced in project notes is the z-score TRADING-PARAM grid (`engines/minute_features.py:25-28` annotation), NOT a feature-lookback alternative to Chan's `{50, 100, 200, 400, 800, 1600, 3200}` set. Any future "8-lookback rebuild" framing should clarify which knob is being touched.
 
 ---
 
