@@ -889,13 +889,20 @@ but is diluted by 40-model portfolio.
 
 ---
 
-## CRITICAL FINDING: PORTFOLIO LEVERAGE CAP NEEDED
+## CRITICAL FINDING [SUPERSEDED]: Portfolio leverage cap reasoning
 
-All high-model-count experiments (crypto TA, futures TA, FX TA) suffer from the same construction flaw: when 30-40 models simultaneously pass the P>0.50 gate, total portfolio weight reaches 150-200%. The 5% per-model cap was designed for the pairs trading context (6-10 models), not for 40+ TA models.
+This block originally claimed that high-model-count experiments (crypto TA, futures TA, FX TA) suffered from a construction flaw requiring a `max_portfolio_weight` parameter, and projected "~-12% loss with a 50% leverage cap" as the canonical Crypto TA revival result. Cycle 36a + 36b + 36c collectively superseded this block:
 
-**Required fix in cpo_core.py:** Add `max_portfolio_weight` parameter (e.g. 0.5 = 50% max gross exposure). When total allocation exceeds this cap, scale all weights proportionally down.
+- **Cycle 36a** (`ef889b0`) audited and retracted the sibling Exp 10 Addendum's -27.95% / Sharpe -1.197 projection as aspirational. The "~-12%" figure in this block is the same fabrication family as the Exp 10 Addendum's -27.95%, but with an additional liberty: the -27.95% was at least cleanly derived from -83.78% by linear scaling (Cycle 36c confirmed that's the correct relationship), while "~-12%" doesn't match any single leverage ratio applied to -83.78%. It's a free aspirational guess rather than derived arithmetic.
+- **Cycle 36b** (`a06b360`) deprecated `--max-portfolio-weight` in favor of the already-wired `--max-leverage` knob in `scripts/run_cpo.py`. The "Required fix in cpo_core.py: Add max_portfolio_weight parameter" task described here is therefore complete-in-a-different-shape, not pending.
+- **Cycle 36c** (`fc9dff8`) actually ran Exp 10 across four cap settings and found Sharpe is invariant to 4 decimals (-1.1844) across binding caps [1.0, 0.5, 0.25]. The cap=0.5 actual cum return is **-26.58%**, materially different from this block's "~-12%" projection (the projection was ~2× off). The "construction failure masks signal quality" framing is itself refuted by the Sharpe-invariance finding.
 
-**Impact on results:** Crypto TA -83.78% result is not interpretable as a signal failure. With 50% leverage cap, the loss would have been ~-12% on the same period. The per-model Sharpe distribution (ADA_STOCH +2.01, BTC_STOCH +1.59) shows the triple barrier is working at the model level.
+**Pending actions originally listed (status updates):**
+1. ~~Fix portfolio leverage cap in cpo_core.py (max_portfolio_weight param)~~ — completed differently: Cycle 36b uses `--max-leverage` as the canonical wired cap knob.
+2. ~~Re-run crypto TA with leverage cap → get clean signal-level result~~ — completed Cycle 36c; result is NEGATIVE, not "clean signal-level edge." See Exp 10 entry above.
+3. **Extend futures/FX OOS to 2025 full year when data available** — still pending; sibling Exps 11/12 retain their 47/52-day OOS caveats. See Exp 11/12 entries.
+
+The atlas-canonical Crypto TA × Triple Barrier conclusion is NEGATIVE per Cycle 36c (Sharpe-invariance refutes the leverage-cap revival hypothesis). This block is retained for audit context, not as live guidance.
 
 ---
 
@@ -910,11 +917,6 @@ All high-model-count experiments (crypto TA, futures TA, FX TA) suffer from the 
 | MICROSTRUCTURE | **TODO** | — | — | — |
 | FUNDAMENTAL | — | — | — | **TODO** (carry) |
 | ALTERNATIVE | **TODO** | — | — | — |
-
-**Pending actions before atlas conclusions are final:**
-1. Fix portfolio leverage cap in cpo_core.py (max_portfolio_weight param)
-2. Re-run crypto TA with leverage cap → get clean signal-level result
-3. Extend futures/FX OOS to 2025 full year when data available
 
 ---
 
