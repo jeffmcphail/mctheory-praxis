@@ -5,7 +5,7 @@
 **Mode:** RECON-then-implementation in a single cycle
 **Status:** DONE
 **Predecessor:** Cycle 40 -- Engine 7 paper reproduction (`082459b` + `cd948d3`); Cycle 41 is open-item 41a from that cycle.
-**Commit:** `<CYCLE_41_HASH>`
+**Commit:** `e9c46d5`
 
 ---
 
