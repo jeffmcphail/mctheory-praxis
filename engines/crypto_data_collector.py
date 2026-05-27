@@ -113,6 +113,27 @@ def init_db():
         )
     """)
 
+    # Cycle 43a: funding-carry alert ledger. One row per (asset, funding
+    # window) when an above_gate=1 signal was successfully POSTed to the
+    # Teams webhook. PK (asset, timestamp) matches funding_signals so
+    # downstream JOINs are trivial. Row's EXISTENCE = "alert was
+    # successfully delivered"; failed webhook POSTs do not insert (so
+    # transient failures retry on the next monitor cycle). alerted_at is
+    # the ISO wall-clock time we made the HTTP call (distinct from
+    # `datetime` which is the funding event the signal references).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS funding_alerts (
+            asset TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            datetime TEXT NOT NULL,
+            alerted_at TEXT NOT NULL,
+            p_profitable REAL NOT NULL,
+            gate_threshold REAL NOT NULL,
+            monitor_version TEXT NOT NULL,
+            PRIMARY KEY (asset, timestamp)
+        )
+    """)
+
     # Cycle 41: funding-carry monitor signal output. One row per funding
     # event per asset; timestamp is the funding-window time (00/08/16 UTC),
     # seconds-aligned to match funding_rates. PK (asset, timestamp) makes

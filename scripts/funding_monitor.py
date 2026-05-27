@@ -448,6 +448,125 @@ def persist_signals(signals: list[dict],
     return inserted
 
 
+# ── Alerting (Cycle 43a) ───────────────────────────────────────────────────────
+
+def post_teams_alert(alert_signal: dict, monitor_version: str,
+                     webhook_url: str) -> tuple[bool, str]:
+    """
+    POST a single funding-carry alert to a Teams-compatible webhook
+    (Power Automate flow with {"text": "..."} body shape).
+
+    Returns (success_bool, response_excerpt). Success = HTTP < 300.
+    Network errors and non-2xx responses are caught and reported.
+    """
+    import urllib.request
+    msg = (
+        f":dart: FUNDING CARRY SIGNAL  {alert_signal['asset']}\n"
+        f"P(profit)         = {alert_signal['p_profitable']:.4f}  "
+        f"(live gate {alert_signal['gate_threshold']:.2f})\n"
+        f"Funding ann.      = {alert_signal['ann_rate']:+.2f}%\n"
+        f"Basis             = {alert_signal['basis_pct']:+.4f}%\n"
+        f"Pct positive 30d  = {alert_signal['pct_positive']:.3f}\n"
+        f"Config            = {alert_signal['config_id']}  "
+        f"({alert_signal['hold_days']}d hold, "
+        f"min {alert_signal['min_funding_ann']:g}% ann)\n"
+        f"Expected return   = {alert_signal['expected_return']:+.4f}\n"
+        f"Funding window    = {alert_signal['datetime']}\n"
+        f"Monitor version   = {monitor_version}"
+    )
+    payload = json.dumps({"text": msg}).encode("utf-8")
+    req = urllib.request.Request(
+        webhook_url, data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status = resp.status
+            body = resp.read().decode("utf-8", errors="replace")
+            return status < 300, f"HTTP {status}: {body[:160]}"
+    except Exception as e:
+        return False, f"ERROR: {type(e).__name__}: {e}"[:200]
+
+
+def process_alerts(signals: list[dict],
+                   db_path: str = DEFAULT_DB,
+                   gate: float = DEFAULT_GATE,
+                   monitor_version: str = MONITOR_VERSION) -> int:
+    """
+    For each signal with above_gate=1, send a Teams alert (if not already
+    sent for the same funding window) and record the success in
+    funding_alerts. Idempotent via PK (asset, timestamp). Returns count
+    of new alerts successfully delivered.
+
+    Behavior when TEAMS_WEBHOOK_URL is unset: log a warning, return 0;
+    funding_signals persistence is unaffected. Setting the env var later
+    enables alerts on subsequent monitor runs.
+    """
+    webhook_url = os.getenv("TEAMS_WEBHOOK_URL", "").strip()
+    if not webhook_url:
+        print("  WARN: TEAMS_WEBHOOK_URL not set in .env; --alert is a no-op "
+              "(signals still persisted to funding_signals)")
+        return 0
+
+    ts_ms = funding_window_timestamp()
+    dt_iso = (datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                       .strftime("%Y-%m-%dT%H:%M:%S+00:00"))
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    fired = 0
+
+    for s in signals:
+        if not s.get("above_gate"):
+            continue
+        if s.get("feature_vector") is None or s.get("config_id") is None:
+            continue  # skip rows that lacked model/features
+
+        # Dedup against funding_alerts for THIS window
+        cur.execute(
+            "SELECT 1 FROM funding_alerts WHERE asset=? AND timestamp=?",
+            (s["asset"], ts_ms),
+        )
+        if cur.fetchone():
+            print(f"  Alert skipped (already sent at {dt_iso}): {s['asset']}")
+            continue
+
+        alert_payload = {
+            "asset":            s["asset"],
+            "datetime":         dt_iso,
+            "p_profitable":     float(s["p_profitable"]),
+            "gate_threshold":   float(gate),
+            "ann_rate":         float(s["ann_rate"]),
+            "basis_pct":        float(s["basis_pct"]),
+            "pct_positive":     float(s["pct_positive"]),
+            "config_id":        s["config_id"],
+            "hold_days":        int(s["hold_days"]),
+            "min_funding_ann":  float(s["min_ann_pct"]),
+            "expected_return":  float(s["exp_return"]),
+        }
+
+        ok, response = post_teams_alert(alert_payload, monitor_version, webhook_url)
+        if not ok:
+            print(f"  Alert FAILED  {s['asset']}: {response}")
+            continue
+
+        cur.execute(
+            "INSERT INTO funding_alerts (asset, timestamp, datetime, alerted_at, "
+            "p_profitable, gate_threshold, monitor_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (s["asset"], ts_ms, dt_iso,
+             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+             float(s["p_profitable"]), float(gate), monitor_version),
+        )
+        fired += 1
+        print(f"  ALERT delivered  {s['asset']}  "
+              f"P={s['p_profitable']:.4f} > gate {gate:.2f}  ({response})")
+
+    conn.commit()
+    conn.close()
+    return fired
+
+
 # ── Next window calculation ────────────────────────────────────────────────────
 
 def next_funding_window(now: datetime) -> datetime:
@@ -494,6 +613,15 @@ def run_once(args) -> str:
         print(f"  Persisted: {n_persisted} new row(s) to funding_signals "
               f"in {args.db}")
 
+    if args.alert:
+        n_alerted = process_alerts(
+            signals,
+            db_path=args.db,
+            gate=args.gate,
+            monitor_version=MONITOR_VERSION,
+        )
+        print(f"  Alerts:    {n_alerted} new row(s) to funding_alerts")
+
     report = format_report(signals, args.gate, now)
     return report
 
@@ -527,6 +655,12 @@ def main():
     parser.add_argument("--db", default=DEFAULT_DB,
                         help=f"SQLite DB for --persist and "
                              f"--funding-source=db (default {DEFAULT_DB})")
+    # Cycle 43a addition
+    parser.add_argument("--alert", action="store_true",
+                        help="POST a Teams alert for each above_gate=1 "
+                             "signal (URL via TEAMS_WEBHOOK_URL env var). "
+                             "Idempotent per (asset, funding-window) via the "
+                             "funding_alerts table.")
     args = parser.parse_args()
 
     if not Path(args.models).exists():

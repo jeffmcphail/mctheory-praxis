@@ -30,5 +30,5 @@ call "%VENV%"
 set PYTHONUTF8=1
 
 echo [%date% %time%] Starting funding monitor cycle... >> "%LOG_FILE%"
-python -u -m scripts.funding_monitor --models "%MODELS%" --persist >> "%LOG_FILE%" 2>&1
+python -u -m scripts.funding_monitor --models "%MODELS%" --persist --alert >> "%LOG_FILE%" 2>&1
 echo [%date% %time%] Monitor cycle complete (exit code: %ERRORLEVEL%). >> "%LOG_FILE%"
