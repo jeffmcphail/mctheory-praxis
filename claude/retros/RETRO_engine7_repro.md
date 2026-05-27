@@ -5,7 +5,7 @@
 **Mode:** Implementation, three-stage pipeline (data acquisition -> reproduction -> reconciliation), two pause points
 **Status:** DONE
 **Predecessor:** Cycle 39 RECON (Track E reframe -> Track A; no commits; findings inline in chat)
-**Commit:** `<CYCLE_40_HASH>`
+**Commit:** `082459b`
 
 ---
 
@@ -241,8 +241,8 @@ Single commit covering:
 - `claude/retros/RETRO_engine7_repro.md` (this file)
 - `claude/handoffs/BRIEF_engine7_repro.md` (cycle's input brief)
 
-Commit `<CYCLE_40_HASH>` to master. Follow-up commit inserts the SHA into the
-`<CYCLE_40_HASH>` placeholder in this retro.
+Commit `082459b` to master. Follow-up commit inserts the SHA into the
+`082459b` placeholder in this retro.
 
 ---
 
