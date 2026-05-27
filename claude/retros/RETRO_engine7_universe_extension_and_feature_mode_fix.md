@@ -5,7 +5,7 @@
 **Mode:** RECON-then-implementation in one cycle
 **Status:** DONE
 **Predecessor:** Cycle 41 -- Engine 7 live monitor pilot (`e9c46d5` + `cf2abee`); items 41a and 41d carried forward.
-**Commit:** `<CYCLE_42_HASH>`
+**Commit:** `dee17f6`
 
 ---
 
