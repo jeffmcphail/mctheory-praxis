@@ -211,6 +211,14 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
         #                          Cycle 14 widened from 9h to 17h to
         #                          stop legitimate cadence-aligned data
         #                          from being flagged stale.
+        # funding_signals       -- PraxisFundingMonitor (Cycle 41). Same
+        #                          UTC funding-event timestamp as
+        #                          funding_rates (records the funding
+        #                          window the inference was made against).
+        #                          Monitor runs at 00:15/08:15/16:15 LOCAL,
+        #                          ~10 min after the collector. Identical
+        #                          staleness dynamics to funding_rates;
+        #                          matched at 17h for the same reason.
         # fear_greed            -- PraxisFearGreedCollector, daily at
         #                          00:30 local (Cycle 10). 26h tolerance.
         # ohlcv_daily           -- PraxisOhlcvDailyCollector, daily at
@@ -236,6 +244,7 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
             "order_book_snapshots": 3900,
             "ohlcv_1m": 25200,
             "funding_rates": 61200,    # Cycle 14: 17h (was 32400 / 9h)
+            "funding_signals": 61200,  # Cycle 42a: matches funding_rates (same UTC-funding-event timestamp dynamics; monitor writes at 00:15/08:15/16:15 LOCAL)
             "fear_greed": 93600,       # 24h + 2h slack
             "ohlcv_daily": 93600,      # 24h + 2h slack
             "ohlcv_4h": 93600,         # 24h + 2h slack

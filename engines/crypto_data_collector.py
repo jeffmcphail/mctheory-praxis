@@ -40,9 +40,19 @@ load_dotenv()
 DB_PATH = Path("data/crypto_data.db")
 
 SUPPORTED_ASSETS = {
-    "BTC": {"coingecko_id": "bitcoin", "symbol": "BTC/USDT", "perp": "BTC/USDT:USDT"},
-    "ETH": {"coingecko_id": "ethereum", "symbol": "ETH/USDT", "perp": "ETH/USDT:USDT"},
-    "SOL": {"coingecko_id": "solana", "symbol": "SOL/USDT", "perp": "SOL/USDT:USDT"},
+    "BTC":  {"coingecko_id": "bitcoin",     "symbol": "BTC/USDT",  "perp": "BTC/USDT:USDT"},
+    "ETH":  {"coingecko_id": "ethereum",    "symbol": "ETH/USDT",  "perp": "ETH/USDT:USDT"},
+    "SOL":  {"coingecko_id": "solana",      "symbol": "SOL/USDT",  "perp": "SOL/USDT:USDT"},
+    # Cycle 42a: extension to the atlas Exp 13 deployment universe
+    # (BTC + ETH + SOL + XRP + ADA + AVAX; BNB excluded per atlas).
+    # Side effect: market_data_collector_service.bat invokes
+    # `collect-market-data --asset all`, which iterates this dict; the
+    # downstream `market_data` table will also expand from 3-asset to
+    # 6-asset coverage. CoinGecko free tier handles 6×2 calls/min when
+    # the 2s inter-asset sleep is applied (it is, in cmd_collect_market_data).
+    "XRP":  {"coingecko_id": "ripple",      "symbol": "XRP/USDT",  "perp": "XRP/USDT:USDT"},
+    "ADA":  {"coingecko_id": "cardano",     "symbol": "ADA/USDT",  "perp": "ADA/USDT:USDT"},
+    "AVAX": {"coingecko_id": "avalanche-2", "symbol": "AVAX/USDT", "perp": "AVAX/USDT:USDT"},
 }
 
 

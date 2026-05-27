@@ -359,6 +359,16 @@ def main():
 
     args = parser.parse_args()
 
+    # Cycle 42d: --feature-mode is a funding_rate-specific concept (selects
+    # between funding/funding+regime/regime feature sets within that
+    # strategy). Argparse defaults it to "funding", which previously leaked
+    # into output filenames via features_suffix for ALL strategies --
+    # producing e.g. outputs/exp10_revival/cpo/phase3_models_funding.joblib
+    # for a universal_ta run (Cycle 39 trap). Force empty for non-funding
+    # strategies so they get clean unsuffixed output filenames.
+    if args.strategy != "funding_rate":
+        args.feature_mode = ""
+
     # Override training dates if provided
     if hasattr(args, 'training_start_override') and args.training_start_override:
         args.training_start = args.training_start_override
