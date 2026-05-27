@@ -27,8 +27,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -51,21 +53,36 @@ logger = logging.getLogger(__name__)
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 DEFAULT_ASSETS   = ["BTC", "ETH", "SOL", "XRP", "ADA", "AVAX"]  # BNB excluded
-DEFAULT_MODELS   = "output/funding_rate/cpo/phase3_models_funding.joblib"
-DEFAULT_GATE     = 0.70
+# Cycle 41 fix: point default at the verified Cycle 40 model location.
+# Prior default "output/funding_rate/cpo/phase3_models_funding.joblib" did not
+# exist on disk (Cycle 39 finding).
+DEFAULT_MODELS   = "outputs/funding_carry_repro/cpo/phase3_models_funding.joblib"
+DEFAULT_GATE     = 0.70                # atlas-recommended live gate
+HEADLINE_GATE    = 0.50                # atlas headline gate (for above_gate_050)
 DEFAULT_CACHE    = "data/funding_cache"
+DEFAULT_DB       = "data/crypto_data.db"
 QUOTE            = "USDT"
 LOOKBACK_DAYS    = 35   # days of history needed for features
 FUNDING_WINDOWS  = [0, 8, 16]  # UTC hours of Binance funding payments
+# Identifies which model commit produced the signals this monitor writes.
+# Update on next phase3 re-run / model swap.
+MONITOR_VERSION  = "cycle40:082459b"
 
 
 # ── Data fetching ──────────────────────────────────────────────────────────────
 
 def fetch_live_data(assets: list[str], lookback_days: int = LOOKBACK_DAYS,
-                    cache_dir: str = DEFAULT_CACHE) -> dict:
+                    cache_dir: str = DEFAULT_CACHE,
+                    funding_source: str = "db",
+                    db_path: str = DEFAULT_DB) -> dict:
     """
     Fetch spot bars, perp bars, and funding rates for the past lookback_days.
-    Uses the same CCXT / Binance source as training.
+    Uses the same CCXT / Binance source as training for spot+perp.
+
+    funding_source: "db" (default, read from funding_rates table — Cycle 41) or
+    "ccxt" (fall back to live Binance REST). DB is preferred because the live
+    PraxisFundingCollector already gates freshness and reading from the DB
+    avoids redundant API calls + rate-limit risk.
     """
     import ccxt
 
@@ -141,39 +158,70 @@ def fetch_live_data(assets: list[str], lookback_days: int = LOOKBACK_DAYS,
         # ── Funding rates ──
         if asset not in perp_data:
             continue
-        print(f"  Fetching {asset} funding...", end=" ", flush=True)
-        try:
-            all_fr = []
-            cursor = since_ms
-            while cursor < end_ms:
-                recs = perp_exchange.fetch_funding_rate_history(
-                    perp_symbol, since=cursor, limit=500
+        if funding_source == "db":
+            print(f"  Reading {asset} funding from DB...", end=" ", flush=True)
+            try:
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT timestamp, funding_rate FROM funding_rates "
+                    "WHERE asset = ? AND timestamp >= ? AND timestamp <= ? "
+                    "ORDER BY timestamp",
+                    (asset, since_ms, end_ms),
                 )
-                if not recs:
-                    break
-                recs = [r for r in recs if r["timestamp"] < end_ms]
-                if not recs:
-                    break
-                all_fr.extend(recs)
-                last = recs[-1]["timestamp"]
-                if last <= cursor:
-                    break
-                cursor = last + 1
-            if all_fr:
-                fr_df = pd.DataFrame([
-                    {"timestamp": pd.to_datetime(r["timestamp"], unit="ms", utc=True),
-                     "rate": float(r["fundingRate"])}
-                    for r in all_fr
-                ]).drop_duplicates("timestamp").set_index("timestamp").sort_index()
+                rows = cur.fetchall()
+                conn.close()
+                if not rows:
+                    print(f"FAIL: no DB rows in {lookback_days}-day window")
+                    del perp_data[asset]
+                    continue
+                fr_df = pd.DataFrame(rows, columns=["timestamp", "rate"])
+                fr_df["timestamp"] = pd.to_datetime(fr_df["timestamp"],
+                                                     unit="ms", utc=True)
+                fr_df = (fr_df.drop_duplicates("timestamp")
+                                .set_index("timestamp")
+                                .sort_index())
                 perp_data[asset]["funding"] = fr_df["rate"]
-                print(f"{len(fr_df)} payments ✓")
-            else:
-                print("no data")
-                del perp_data[asset]
-        except Exception as e:
-            print(f"FAIL: {e}")
-            if asset in perp_data:
-                del perp_data[asset]
+                print(f"{len(fr_df)} payments (db) ✓")
+            except Exception as e:
+                print(f"FAIL: {e}")
+                if asset in perp_data:
+                    del perp_data[asset]
+        else:
+            # Legacy CCXT path (preserved for fallback / debug)
+            print(f"  Fetching {asset} funding (ccxt)...", end=" ", flush=True)
+            try:
+                all_fr = []
+                cursor = since_ms
+                while cursor < end_ms:
+                    recs = perp_exchange.fetch_funding_rate_history(
+                        perp_symbol, since=cursor, limit=500
+                    )
+                    if not recs:
+                        break
+                    recs = [r for r in recs if r["timestamp"] < end_ms]
+                    if not recs:
+                        break
+                    all_fr.extend(recs)
+                    last = recs[-1]["timestamp"]
+                    if last <= cursor:
+                        break
+                    cursor = last + 1
+                if all_fr:
+                    fr_df = pd.DataFrame([
+                        {"timestamp": pd.to_datetime(r["timestamp"], unit="ms", utc=True),
+                         "rate": float(r["fundingRate"])}
+                        for r in all_fr
+                    ]).drop_duplicates("timestamp").set_index("timestamp").sort_index()
+                    perp_data[asset]["funding"] = fr_df["rate"]
+                    print(f"{len(fr_df)} payments (ccxt) ✓")
+                else:
+                    print("no data")
+                    del perp_data[asset]
+            except Exception as e:
+                print(f"FAIL: {e}")
+                if asset in perp_data:
+                    del perp_data[asset]
 
     return {"spot": spot_data, "perp": perp_data}
 
@@ -245,17 +293,20 @@ def run_inference(
         pct_pos  = float(feat[4]) if feat is not None and len(feat) > 4 else 0.0
 
         signals.append({
-            "asset":          asset,
-            "model_id":       model_id,
-            "p_profitable":   p_prob,
-            "exp_return":     exp_ret,
-            "above_gate":     p_prob > gate,
-            "hold_days":      best_config.hold_days,
-            "min_ann_pct":    best_config.min_funding_ann_pct,
-            "ann_rate":       ann_rate,
-            "basis_pct":      basis,
+            "asset":           asset,
+            "model_id":        model_id,
+            "p_profitable":    p_prob,
+            "exp_return":      exp_ret,
+            "above_gate":      p_prob > gate,
+            "hold_days":       best_config.hold_days,
+            "min_ann_pct":     best_config.min_funding_ann_pct,
+            "ann_rate":        ann_rate,
+            "basis_pct":       basis,
             "pct_positive":   pct_pos,
-            "base_rate":      tm.get("base_rate", 0.0),
+            "base_rate":       tm.get("base_rate", 0.0),
+            # Cycle 41: extra fields persist_signals consumes
+            "config_id":       best_config.config_id,
+            "feature_vector":  feat,
         })
 
     if missing_models:
@@ -326,6 +377,77 @@ def format_report(signals: list[dict], gate: float, as_of: datetime) -> str:
     return "\n".join(lines)
 
 
+# ── Signal persistence (Cycle 41) ──────────────────────────────────────────────
+
+def funding_window_timestamp(now: datetime | None = None) -> int:
+    """
+    Round 'now' down to the most recent Binance funding window (00/08/16 UTC).
+    Returns a seconds-aligned ms epoch matching the funding_rates table
+    convention. The signal row is logically "the inference made at this
+    funding window", so the timestamp ties cleanly to the input event.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    window_hr = (now.hour // 8) * 8       # -> 0, 8, or 16
+    window_dt = now.replace(hour=window_hr, minute=0, second=0, microsecond=0)
+    return int(window_dt.timestamp() * 1000)
+
+
+def persist_signals(signals: list[dict],
+                    db_path: str = DEFAULT_DB,
+                    gate: float = DEFAULT_GATE,
+                    monitor_version: str = MONITOR_VERSION) -> int:
+    """
+    INSERT OR IGNORE one row per signal into funding_signals. PK (asset,
+    timestamp) makes re-runs at the same funding window idempotent. Returns
+    the count of new rows inserted (PK collisions are silently skipped).
+
+    Signals lacking model or features (skipped models) are not persisted.
+    """
+    from engines.funding_rate_strategy import FUNDING_FEATURES
+
+    ts_ms = funding_window_timestamp()
+    dt_iso = (datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                       .strftime("%Y-%m-%dT%H:%M:%S+00:00"))
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    inserted = 0
+    for s in signals:
+        if s.get("feature_vector") is None or s.get("config_id") is None:
+            continue  # no model / no features; nothing to record
+        try:
+            feats_dict = {k: float(v) for k, v in
+                          zip(FUNDING_FEATURES, s["feature_vector"])}
+            features_json = json.dumps(feats_dict)
+        except Exception:
+            features_json = None
+
+        cur.execute(
+            "INSERT OR IGNORE INTO funding_signals "
+            "(asset, timestamp, datetime, p_profitable, "
+            " above_gate, above_gate_050, gate_threshold, "
+            " best_config_id, hold_days, min_funding_ann, expected_return, "
+            " ann_rate, basis_pct, pct_positive, base_rate, "
+            " features_json, monitor_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (s["asset"], ts_ms, dt_iso, float(s["p_profitable"]),
+             1 if s["p_profitable"] > gate          else 0,
+             1 if s["p_profitable"] > HEADLINE_GATE else 0,
+             float(gate),
+             s["config_id"], int(s["hold_days"]),
+             float(s["min_ann_pct"]), float(s["exp_return"]),
+             float(s["ann_rate"]), float(s["basis_pct"]),
+             float(s["pct_positive"]), float(s["base_rate"]),
+             features_json, monitor_version),
+        )
+        if cur.rowcount == 1:
+            inserted += 1
+    conn.commit()
+    conn.close()
+    return inserted
+
+
 # ── Next window calculation ────────────────────────────────────────────────────
 
 def next_funding_window(now: datetime) -> datetime:
@@ -347,7 +469,12 @@ def run_once(args) -> str:
     assets = args.assets.split(",") if args.assets else DEFAULT_ASSETS
 
     print(f"\n[{now.strftime('%H:%M UTC')}] Fetching live data for {assets}...")
-    data = fetch_live_data(assets, cache_dir=args.cache_dir)
+    data = fetch_live_data(
+        assets,
+        cache_dir=args.cache_dir,
+        funding_source=args.funding_source,
+        db_path=args.db,
+    )
 
     print("\n  Computing features...")
     features = compute_live_features(data, assets)
@@ -356,6 +483,16 @@ def run_once(args) -> str:
 
     print(f"\n  Running RF inference (gate P > {args.gate})...")
     signals = run_inference(features, args.models, assets, gate=args.gate)
+
+    if args.persist:
+        n_persisted = persist_signals(
+            signals,
+            db_path=args.db,
+            gate=args.gate,
+            monitor_version=MONITOR_VERSION,
+        )
+        print(f"  Persisted: {n_persisted} new row(s) to funding_signals "
+              f"in {args.db}")
 
     report = format_report(signals, args.gate, now)
     return report
@@ -379,6 +516,17 @@ def main():
                         help="Save report to file (in addition to stdout)")
     parser.add_argument("--webhook", type=str, default=None,
                         help="POST report to webhook URL when signals are active")
+    # Cycle 41 additions
+    parser.add_argument("--persist", action="store_true",
+                        help="Persist per-asset signals to funding_signals "
+                             "table in --db (idempotent via PK)")
+    parser.add_argument("--funding-source", default="db",
+                        choices=["db", "ccxt"],
+                        help="Source of funding-history input "
+                             "(default db; ccxt is fallback)")
+    parser.add_argument("--db", default=DEFAULT_DB,
+                        help=f"SQLite DB for --persist and "
+                             f"--funding-source=db (default {DEFAULT_DB})")
     args = parser.parse_args()
 
     if not Path(args.models).exists():

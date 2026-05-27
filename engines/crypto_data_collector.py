@@ -103,6 +103,36 @@ def init_db():
         )
     """)
 
+    # Cycle 41: funding-carry monitor signal output. One row per funding
+    # event per asset; timestamp is the funding-window time (00/08/16 UTC),
+    # seconds-aligned to match funding_rates. PK (asset, timestamp) makes
+    # re-runs idempotent via INSERT OR IGNORE. above_gate uses the
+    # atlas-recommended live gate (P>0.70); above_gate_050 mirrors the
+    # P>0.50 headline gate for parallel observation. features_json holds
+    # the 11-feature vector as a JSON dict for downstream debugging.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS funding_signals (
+            asset TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            datetime TEXT NOT NULL,
+            p_profitable REAL NOT NULL,
+            above_gate INTEGER NOT NULL,
+            above_gate_050 INTEGER NOT NULL,
+            gate_threshold REAL NOT NULL,
+            best_config_id TEXT,
+            hold_days INTEGER,
+            min_funding_ann REAL,
+            expected_return REAL,
+            ann_rate REAL,
+            basis_pct REAL,
+            pct_positive REAL,
+            base_rate REAL,
+            features_json TEXT,
+            monitor_version TEXT NOT NULL,
+            PRIMARY KEY (asset, timestamp)
+        )
+    """)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS onchain_btc (
             date TEXT NOT NULL PRIMARY KEY,
