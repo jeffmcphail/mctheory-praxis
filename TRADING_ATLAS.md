@@ -1054,7 +1054,7 @@ Gate 0.70 reduces return slightly but collapses max drawdown from -0.15% to -0.0
 
 Calibration 0.80+: **+5.9% lift above 86% base** — genuine conditional precision at the highest confidence level.
 
-#### Final Atlas Verdict: CONFIRMED POSITIVE ✅
+#### Final Atlas Verdict: CONFIRMED POSITIVE + VERIFIED ✅ (Cycle 40)
 
 **Why this is a real structural edge:**
 1. Clear economic mechanism: perp traders pay for leverage, market makers collect it. This doesn't arbitrage away the way technical patterns do because the demand for leverage is structurally persistent.
@@ -1137,6 +1137,54 @@ For a POSITIVE experiment, "revival" reframes as
 2. **Add term structure feature (Class J)** -- likelihood: medium. Funding term slope (8h vs longer-dated basis) is class J in the regime matrix; tested-in but limited weight. Could improve entry timing.
 3. **Bear-market validation needed** -- likelihood: not a revival but a confirmation. Strategy hasn't been tested in a sustained negative-funding bear regime. The behavior should be "sit out cleanly" but real-world execution has slippage / withdrawal risk.
 4. **LSTM v2 architecture for non-funding alpha** -- likelihood: low for THIS engine. Engine 7 + funding-rate features is mechanistically tied to the carry P&L; replacing the classifier with an LSTM might add modest lift but the structural edge is the funding mechanism itself, not the model class.
+
+#### Cycle 40 Verification (2026-05-26) ✅
+
+End-to-end reproduction of phase2/3/4 on the deployment universe (BTC, ETH, SOL, XRP, ADA, AVAX) confirms every atlas headline figure to ≤0.4% delta — effectively deterministic given the strategy's CCXT-live fetch path. **Cycle 37's suspect-LOW classification on these figures is resolved.** Brief: `claude/handoffs/BRIEF_engine7_repro.md`. Retro: `claude/retros/RETRO_engine7_repro.md`. Backfill script: `scripts/backfill_funding_history.py`. Outputs: `outputs/funding_carry_repro/`.
+
+**Primary OOS reproduction** (train 2024-01-01..2024-12-31 → test 2025-01-01..2026-03-26):
+
+| Metric | Atlas | Cycle 40 | Δ |
+|---|---:|---:|---:|
+| Sharpe (P>0.50) | +4.65 | +4.6525 | +0.05% |
+| Cum return (P>0.50) | +1.27% | +1.27% | exact |
+| Max DD (P>0.50) | −0.15% | −0.15% | exact |
+| Sharpe (P>0.70) | +4.45 | +4.4492 | −0.18% |
+| Cum return (P>0.70) | +0.97% | +0.97% | exact |
+| Max DD (P>0.70) | −0.03% | −0.03% | exact |
+| Win days (P>0.50 / P>0.70) | 29.9% / 15.8% | 29.9% / 15.8% | exact |
+| Avg models/day (P>0.50 / P>0.70) | 1.6 / 0.5 | 1.6 / 0.5 | exact |
+
+**Per-model Sharpes (P>0.50)** — all 6 reproduce within ±0.1%:
+
+| Model | Atlas | Cycle 40 | Active days (atlas / repro) |
+|---|---:|---:|---:|
+| ADA_FUNDING | +7.21 | +7.214 | 186 / 186 |
+| ETH_FUNDING | +6.58 | +6.582 | 126 / 126 |
+| BTC_FUNDING | +5.86 | +5.863 | 77 / 77 |
+| XRP_FUNDING | +5.27 | +5.274 | 171 / 171 |
+| SOL_FUNDING | +3.69 | +3.687 | 60 / 60 |
+| AVAX_FUNDING | +1.98 | +1.981 | 82 / 82 |
+
+**Phase 3 RF Quality** reproduces exactly: BTC 0.9869/39.0%, ETH 0.9860/40.6%, SOL 0.9782/38.2%, XRP 0.9789/44.9%, ADA 0.9817/42.3%, AVAX 0.9819/31.1% — AUC to ≤0.001, base rate to one decimal.
+
+**Calibration** — every bin reproduces exactly to one decimal: [0.50,0.55) 120/21.7%, [0.55,0.60) 124/36.3%, [0.60,0.65) 112/42.0%, [0.65,0.70) 103/45.6%, [0.70,0.80) 156/66.7%, [0.80,1.01) 87/90.8%.
+
+**Validation reproduction** (train 2023 → test 2024 at P>0.70):
+
+| Metric | Atlas | Cycle 40 | Δ |
+|---|---:|---:|---:|
+| Sharpe validation | +10.78 | +10.7726 | −0.07% |
+| Cum return | +16.73% | +16.67% | −0.36% |
+| Max DD | −0.03% | −0.03% | exact |
+| Win days | 70.3% | 70.3% (256/364) | exact |
+| Avg models/day | 3.7 | 3.7 | exact |
+
+Per-asset validation flagships: BTC +52.3% / Sharpe +16.88 (atlas +52% / +16.9), ETH +111.4% / +16.86 (atlas +111% / +16.9), AVAX +62.9% / +16.46 (atlas +63% / +16.5). All within 0.5%.
+
+**Model-count semantic.** Atlas reports "Models positive: 7/7" for validation; this reproduction was run on the 6-asset deployment universe (BNB excluded per the entry's "BNB excluded — degenerate base rate" rule applied to primary AND validation). Result is 6/6 positive — the "all-positive" claim survives; the count differs because of universe size. Deployment recommendations (gate P>0.70, 6-asset universe, 3–14 day hold) unchanged.
+
+**Pre-cycle disk-hygiene finding (Cycle 39 carried forward).** The file `outputs/exp10_revival/cpo/phase3_models_funding.joblib` (37 MB) was misnamed — it held 64 Exp 10 `universal_ta` TA models (zero `*_FUNDING` keys), most likely from a 2026-04-24 SSD-recovery filename collision. Deleted as part of D2 setup; the correctly-named funding-carry model now lives only at `outputs/funding_carry_repro/cpo/phase3_models_funding.joblib`.
 
 ---
 
