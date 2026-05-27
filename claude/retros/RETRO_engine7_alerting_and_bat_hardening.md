@@ -5,7 +5,7 @@
 **Mode:** RECON-then-implementation in one cycle (no Cycle 43b follow-up needed)
 **Status:** DONE (with 1 deferred acceptance item -- see below)
 **Predecessor:** Cycle 42 -- universe extension + feature-mode fix (`dee17f6` + `84a1dd0`); items 42b (alerting) and 43h (bat hardening) carried forward.
-**Commit:** `<CYCLE_43_HASH>`
+**Commit:** `04b24b6`
 
 ---
 
