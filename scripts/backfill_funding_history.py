@@ -81,7 +81,7 @@ import requests
 # Constants
 # ---------------------------------------------------------------------------
 
-DB_PATH        = Path("data/crypto_data.db")
+DB_PATH        = Path(__file__).resolve().parent.parent / "data" / "crypto_data.db"  # Cycle 46 (44h): anchor to repo root
 ENDPOINT       = "https://fapi.binance.com/fapi/v1/fundingRate"
 SLEEP_SEC      = 1.0     # cushion between paginated calls
 LIMIT          = 1000

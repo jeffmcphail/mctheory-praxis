@@ -37,7 +37,13 @@ import requests
 from dotenv import load_dotenv
 load_dotenv()
 
-DB_PATH = Path("data/crypto_data.db")
+# Cycle 46 (44h): anchor to repo root via __file__ so init_db is
+# CWD-independent. The Cycle 43 RECON phantom-DB trap happened because
+# this constant was a relative Path resolved against process CWD,
+# which a stray `cd services` left pointing at services/. Walking
+# parent.parent from this file (engines/crypto_data_collector.py)
+# always lands at the repo root regardless of who imports us.
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "crypto_data.db"
 
 SUPPORTED_ASSETS = {
     "BTC":  {"coingecko_id": "bitcoin",     "symbol": "BTC/USDT",  "perp": "BTC/USDT:USDT"},

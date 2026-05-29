@@ -60,7 +60,10 @@ DEFAULT_MODELS   = "outputs/funding_carry_repro/cpo/phase3_models_funding.joblib
 DEFAULT_GATE     = 0.70                # atlas-recommended live gate
 HEADLINE_GATE    = 0.50                # atlas headline gate (for above_gate_050)
 DEFAULT_CACHE    = "data/funding_cache"
-DEFAULT_DB       = "data/crypto_data.db"
+# Cycle 46 (44h): anchor to repo root via __file__ so the default
+# stays correct regardless of invoking CWD. Kept as str (not Path)
+# to preserve the argparse default type for `--db`.
+DEFAULT_DB       = str(Path(__file__).resolve().parent.parent / "data" / "crypto_data.db")
 QUOTE            = "USDT"
 LOOKBACK_DAYS    = 35   # days of history needed for features
 FUNDING_WINDOWS  = [0, 8, 16]  # UTC hours of Binance funding payments
