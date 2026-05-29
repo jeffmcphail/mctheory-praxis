@@ -69,10 +69,70 @@ rendering, which this cycle closes.
    `:dart:` still appears literally -- the user did not flag this, so
    no change to emoji handling in this scope.
 
-No live retest on ntfy.sh from this cycle. The dry construction
-confirms the bytes that go on the wire are correct; the next natural
-above_gate=1 firing (or a user-driven synthetic) will validate the
-rendering end-to-end.
+**Live re-test on ntfy.sh (added 2026-05-29 ~14:58 UTC post-fix):**
+
+Brief acceptance #2 + #3 ("smoke test confirms clean rendering" +
+"quick screenshot or text-paste of the rendered notification") were
+called out explicitly by the user in the Cycle 44 follow-up brief, so
+ran a live smoke test against the user's ntfy.sh topic.
+
+P-scores had drifted since the user's 14:12-14:17 UTC live test
+(ADA: 0.3626 -> ~0.350, ETH: 0.4520 -> ~0.30, BTC: 0.302). ADA + ETH
+already had funding_alerts rows for the 2026-05-29T08:00 UTC window
+PK -> dedup would skip both regardless of gate. Picked `--gate 0.25`
+to guarantee BTC + XRP (no prior rows for this window) cross.
+
+Result:
+```
+Alert skipped (already sent at 2026-05-29T08:00:00+00:00): ADA
+ALERT delivered  XRP  P=0.2732 > gate 0.25  (HTTP 200)
+Alert skipped (already sent at 2026-05-29T08:00:00+00:00): ETH
+ALERT delivered  BTC  P=0.2593 > gate 0.25  (HTTP 200)
+Alerts:    2 new row(s) to funding_alerts
+```
+
+ntfy.sh response excerpts (truncated by the helper):
+- XRP -> `{"id":"Wbi2UJ7rIpgC","time":...,"event":"message",
+  "topic":"praxis-funding-mctheory-7k3xq8","message":":dart: FUNDING
+  CARRY SIGNAL  X..."}`
+- BTC -> `{"id":"cd6UFPRmQP88","time":...,"event":"message",
+  "topic":"praxis-funding-mctheory-7k3xq8","message":":dart: FUNDING
+  CARRY SIGNAL  B..."}`
+
+Critically, the ntfy.sh `"message"` field in the response is the raw
+message text -- no JSON wrapper, no escape sequences. The bytes on
+the wire were accepted as plain text and stored as-is. Mobile push
+delivers the same payload, so the rendering should now show clean
+multi-line text rather than the Cycle 43 wrapped/escaped wall.
+
+PK dedup behavior also confirmed live: ADA + ETH skipped without
+attempting a POST (their funding_alerts rows from the user's
+14:12/14:17 test on the same window were detected and the orchestrator
+short-circuited cleanly).
+
+funding_alerts post-test state (4 rows total):
+```
+ADA  2026-05-29T08:00:00+00:00  P=0.3626  gate 0.35  alerted 14:12:11
+ETH  2026-05-29T08:00:00+00:00  P=0.4520  gate 0.35  alerted 14:17:24
+XRP  2026-05-29T08:00:00+00:00  P=0.2732  gate 0.25  alerted 14:58:15
+BTC  2026-05-29T08:00:00+00:00  P=0.2593  gate 0.25  alerted 14:58:15
+```
+
+**Sample wire body (literal, as sent for BTC):**
+```
+:dart: FUNDING CARRY SIGNAL  BTC
+P(profit)         = 0.2593  (live gate 0.30)
+Funding ann.      = +5.90%
+Basis             = -0.0320%
+Pct positive 30d  = 0.670
+Config            = fr_0000  (3d hold, min 5% ann)
+Expected return   = +0.0008
+Funding window    = 2026-05-29T08:00:00+00:00
+Monitor version   = cycle40:082459b
+```
+
+User confirms ntfy.sh rendering visually -- that's the load-bearing
+acceptance signal and the only step Code can't do unilaterally.
 
 ---
 
@@ -95,11 +155,25 @@ rendering end-to-end.
   reflect the raw-text payload (current section still walks through
   Power Automate setup which assumes the JSON wrapper that 44j just
   removed). Bundle with 44k if a rename is also done.
-- **44m (new optional) Replace `:dart:` literal** in
-  `post_teams_alert()` with the Unicode emoji `🎯` so it renders
-  natively on ntfy.sh / mobile push (currently shows as literal
-  `:dart:`). Out of 44j's scope; user didn't flag it.
+- **44m (new optional) Replace `:dart:` literal** with native emoji.
+  ntfy.sh has two paths: (a) use the Unicode `🎯` directly in the
+  message body, or (b) move the emoji to an HTTP header
+  `Tags: dart` -- ntfy.sh parses Tags as shortcodes and renders the
+  corresponding emoji in the notification's badge area, with the
+  body text staying clean. (b) is the documented-idiomatic ntfy.sh
+  path; (a) is the simplest cross-backend default. Either is a
+  cosmetic upgrade.
+- **44n (new optional, surfaced from this cycle's live test)** ntfy.sh
+  supports a richer alert presentation via headers documented at
+  https://docs.ntfy.sh/publish/: `Title:` (bold heading on mobile,
+  could be "FUNDING CARRY SIGNAL ADA"), `Tags:` (emoji shortcodes for
+  the badge), `Priority: 4` (mark above_gate alerts as
+  high-priority so they bypass mobile do-not-disturb), `Markdown: yes`
+  (renders the body as markdown -- could bold "P(profit)" labels). Any
+  of these would land cleanly on top of the current plain-text body;
+  none is required for correctness.
 - Plus the standing carry-forward items from Cycle 43 retro: 43a-live-
-  test (done -- mark resolved when next retro is touched), 44a–44i
-  (cross-venue, LSTM, executor, regime analysis, PMA, atlas search,
-  threshold, CWD-fix, FAIL_COUNT unhappy-path test).
+  test (done -- now confirmed by both the user's 14:12-14:17 UTC test
+  and this cycle's 14:58 UTC re-test post-fix), 44a–44i (cross-venue,
+  LSTM, executor, regime analysis, PMA, atlas search, threshold,
+  CWD-fix, FAIL_COUNT unhappy-path test).
