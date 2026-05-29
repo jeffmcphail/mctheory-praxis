@@ -453,8 +453,19 @@ def persist_signals(signals: list[dict],
 def post_teams_alert(alert_signal: dict, monitor_version: str,
                      webhook_url: str) -> tuple[bool, str]:
     """
-    POST a single funding-carry alert to a Teams-compatible webhook
-    (Power Automate flow with {"text": "..."} body shape).
+    POST a single funding-carry alert to a raw-text webhook (ntfy.sh,
+    Slack incoming webhook, Discord with content-only flag, or any
+    endpoint that treats the POST body as the notification text).
+
+    Cycle 44j: payload format changed from JSON-wrapped {"text": "..."}
+    to raw UTF-8 string. The JSON-wrapped form rendered with literal "\\n"
+    escape sequences on ntfy.sh; raw text renders newlines correctly.
+    Power Automate flows -- which require the JSON wrapper -- need a
+    local revert to use this helper.
+
+    Function name retained for git-blame continuity; TEAMS_WEBHOOK_URL
+    env var likewise stays. Both are semantically "where alert POSTs
+    go" rather than "must be Teams".
 
     Returns (success_bool, response_excerpt). Success = HTTP < 300.
     Network errors and non-2xx responses are caught and reported.
@@ -474,10 +485,10 @@ def post_teams_alert(alert_signal: dict, monitor_version: str,
         f"Funding window    = {alert_signal['datetime']}\n"
         f"Monitor version   = {monitor_version}"
     )
-    payload = json.dumps({"text": msg}).encode("utf-8")
+    payload = msg.encode("utf-8")
     req = urllib.request.Request(
         webhook_url, data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "text/plain; charset=utf-8"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
