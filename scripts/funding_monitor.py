@@ -453,42 +453,53 @@ def persist_signals(signals: list[dict],
 def post_teams_alert(alert_signal: dict, monitor_version: str,
                      webhook_url: str) -> tuple[bool, str]:
     """
-    POST a single funding-carry alert to a raw-text webhook (ntfy.sh,
-    Slack incoming webhook, Discord with content-only flag, or any
-    endpoint that treats the POST body as the notification text).
+    POST a single funding-carry alert to ntfy.sh (or any raw-text
+    webhook backend). Function name retained for git-blame continuity;
+    env var is now PRAXIS_ALERT_URL with TEAMS_WEBHOOK_URL as a legacy
+    fallback (per Cycle 45 44k rename). Both are semantically "where
+    alert POSTs go" rather than "must be Teams".
 
-    Cycle 44j: payload format changed from JSON-wrapped {"text": "..."}
-    to raw UTF-8 string. The JSON-wrapped form rendered with literal "\\n"
-    escape sequences on ntfy.sh; raw text renders newlines correctly.
-    Power Automate flows -- which require the JSON wrapper -- need a
-    local revert to use this helper.
+    Cycle 45 (44m + 44n): switched to ntfy.sh's idiomatic header-based
+    presentation per https://docs.ntfy.sh/publish/
+      Title:     bold heading on mobile ("FUNDING CARRY SIGNAL <asset>")
+      Tags:      dart -> renders as a 🎯 emoji badge (replaces the
+                 :dart: literal that the Cycle 43 implementation had at
+                 the start of the body)
+      Priority:  4 (high) -- bypasses mobile do-not-disturb
+      Markdown:  yes -- renders **bold** field labels in the body
+    Body is plain markdown; field labels are bolded with **label:**.
 
-    Function name retained for git-blame continuity; TEAMS_WEBHOOK_URL
-    env var likewise stays. Both are semantically "where alert POSTs
-    go" rather than "must be Teams".
+    Cycle 44j: payload format is raw UTF-8 string (was a JSON-wrapped
+    {"text": "..."} before). Power Automate flows -- which require the
+    JSON wrapper -- need a local revert to use this helper.
 
     Returns (success_bool, response_excerpt). Success = HTTP < 300.
     Network errors and non-2xx responses are caught and reported.
     """
     import urllib.request
     msg = (
-        f":dart: FUNDING CARRY SIGNAL  {alert_signal['asset']}\n"
-        f"P(profit)         = {alert_signal['p_profitable']:.4f}  "
+        f"**P(profit):** {alert_signal['p_profitable']:.4f}  "
         f"(live gate {alert_signal['gate_threshold']:.2f})\n"
-        f"Funding ann.      = {alert_signal['ann_rate']:+.2f}%\n"
-        f"Basis             = {alert_signal['basis_pct']:+.4f}%\n"
-        f"Pct positive 30d  = {alert_signal['pct_positive']:.3f}\n"
-        f"Config            = {alert_signal['config_id']}  "
+        f"**Funding ann.:** {alert_signal['ann_rate']:+.2f}%\n"
+        f"**Basis:** {alert_signal['basis_pct']:+.4f}%\n"
+        f"**Pct positive 30d:** {alert_signal['pct_positive']:.3f}\n"
+        f"**Config:** {alert_signal['config_id']}  "
         f"({alert_signal['hold_days']}d hold, "
         f"min {alert_signal['min_funding_ann']:g}% ann)\n"
-        f"Expected return   = {alert_signal['expected_return']:+.4f}\n"
-        f"Funding window    = {alert_signal['datetime']}\n"
-        f"Monitor version   = {monitor_version}"
+        f"**Expected return:** {alert_signal['expected_return']:+.4f}\n"
+        f"**Funding window:** {alert_signal['datetime']}\n"
+        f"**Monitor version:** {monitor_version}"
     )
     payload = msg.encode("utf-8")
     req = urllib.request.Request(
         webhook_url, data=payload,
-        headers={"Content-Type": "text/plain; charset=utf-8"},
+        headers={
+            "Content-Type": "text/plain; charset=utf-8",
+            "Title": f"FUNDING CARRY SIGNAL  {alert_signal['asset']}",
+            "Tags": "dart",
+            "Priority": "4",
+            "Markdown": "yes",
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -509,15 +520,26 @@ def process_alerts(signals: list[dict],
     funding_alerts. Idempotent via PK (asset, timestamp). Returns count
     of new alerts successfully delivered.
 
-    Behavior when TEAMS_WEBHOOK_URL is unset: log a warning, return 0;
-    funding_signals persistence is unaffected. Setting the env var later
+    Cycle 45 (44k): env var renamed from TEAMS_WEBHOOK_URL to
+    PRAXIS_ALERT_URL. The legacy name is still accepted as a fallback
+    so existing .env files keep working through the transition; the
+    fallback can be removed in a future cycle once .env is migrated.
+    Behavior when neither is set: log a warning, return 0;
+    funding_signals persistence is unaffected. Setting either env var
     enables alerts on subsequent monitor runs.
     """
-    webhook_url = os.getenv("TEAMS_WEBHOOK_URL", "").strip()
+    # Cycle 45 (44k) variable rename with backward-compat fallback.
+    webhook_url = os.getenv("PRAXIS_ALERT_URL", "").strip()
+    url_source = "PRAXIS_ALERT_URL"
     if not webhook_url:
-        print("  WARN: TEAMS_WEBHOOK_URL not set in .env; --alert is a no-op "
-              "(signals still persisted to funding_signals)")
+        webhook_url = os.getenv("TEAMS_WEBHOOK_URL", "").strip()
+        url_source = "TEAMS_WEBHOOK_URL (legacy fallback)"
+    if not webhook_url:
+        print("  WARN: neither PRAXIS_ALERT_URL nor TEAMS_WEBHOOK_URL set "
+              "in .env; --alert is a no-op (signals still persisted "
+              "to funding_signals)")
         return 0
+    print(f"  Webhook URL source: {url_source}")
 
     ts_ms = funding_window_timestamp()
     dt_iso = (datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
@@ -666,12 +688,14 @@ def main():
     parser.add_argument("--db", default=DEFAULT_DB,
                         help=f"SQLite DB for --persist and "
                              f"--funding-source=db (default {DEFAULT_DB})")
-    # Cycle 43a addition
+    # Cycle 43a addition; Cycle 45 (44k) env var renamed.
     parser.add_argument("--alert", action="store_true",
-                        help="POST a Teams alert for each above_gate=1 "
-                             "signal (URL via TEAMS_WEBHOOK_URL env var). "
-                             "Idempotent per (asset, funding-window) via the "
-                             "funding_alerts table.")
+                        help="POST a ntfy.sh push alert for each "
+                             "above_gate=1 signal (URL via "
+                             "PRAXIS_ALERT_URL env var; TEAMS_WEBHOOK_URL "
+                             "still accepted as a legacy fallback). "
+                             "Idempotent per (asset, funding-window) via "
+                             "the funding_alerts table.")
     args = parser.parse_args()
 
     if not Path(args.models).exists():
