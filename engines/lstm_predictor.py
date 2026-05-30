@@ -38,7 +38,7 @@ import numpy as np
 from dotenv import load_dotenv
 load_dotenv()
 
-DATA_DB = Path("data/crypto_data.db")
+DATA_DB = Path(__file__).resolve().parent.parent / "data" / "crypto_data.db"  # Cycle 47 (44h-bulk): anchor to repo root
 MODEL_DIR = Path("models/lstm")
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"

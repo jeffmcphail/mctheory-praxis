@@ -37,7 +37,15 @@ load_dotenv()
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
-DB_PATH = Path("data/live_collector.db")
+
+# Cycle 47 (44h-bulk): anchor DB paths to repo root via __file__ for
+# CWD-independence (see Cycle 46 for the funding-chain precedent).
+# SPIKE_DB_PATH is a cross-engine reference -- spike_scanner owns the
+# DB; we read its taxonomy here. Lines previously had inline
+# Path("data/spike_scanner.db") at the read sites (refactored to
+# reference this constant instead in Cycle 47).
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "live_collector.db"
+SPIKE_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "spike_scanner.db"
 
 # Default parameters
 DEFAULT_TOP_N = 50          # Track top N markets by volume
@@ -207,7 +215,7 @@ def refresh_market_list(conn, top_n=DEFAULT_TOP_N, verbose=True):
         # Try to get event type from taxonomy (if classifier has run)
         event_type = "unknown"
         try:
-            spike_db = sqlite3.connect("data/spike_scanner.db")
+            spike_db = sqlite3.connect(str(SPIKE_DB_PATH))
             row = spike_db.execute(
                 "SELECT COALESCE(corrected_to, classified_as) FROM taxonomy WHERE slug=?",
                 (slug,)).fetchone()
@@ -536,7 +544,7 @@ def cmd_export(args):
         print(f"  No live collector database.")
         return
 
-    spike_db_path = Path("data/spike_scanner.db")
+    spike_db_path = SPIKE_DB_PATH
     if not spike_db_path.exists():
         print(f"  No spike scanner database. Run spike_scanner collect first.")
         return

@@ -32,7 +32,7 @@ load_dotenv()
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
-DB_PATH = Path("data/spike_scanner.db")
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "spike_scanner.db"  # Cycle 47 (44h-bulk): anchor to repo root
 
 # Spike detection parameters
 SPIKE_THRESHOLD_PCT = 5.0    # Minimum price change to qualify as a spike (%)

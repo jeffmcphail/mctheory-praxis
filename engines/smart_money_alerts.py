@@ -35,8 +35,10 @@ import requests
 from dotenv import load_dotenv
 load_dotenv()
 
-DB_PATH = Path("data/smart_money.db")
-ALERTS_DB_PATH = Path("data/smart_money_alerts.db")
+# Cycle 47 (44h-bulk): anchor to repo root via __file__ for CWD-independence
+# (see Cycle 46 for the funding-chain precedent).
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "smart_money.db"
+ALERTS_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "smart_money_alerts.db"
 DATA_API = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"

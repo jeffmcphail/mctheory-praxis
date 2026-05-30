@@ -76,8 +76,11 @@ load_dotenv()
 # CONFIG
 # ═══════════════════════════════════════════════════════
 
-LIVE_DB = Path("data/live_collector.db")
-EXECUTOR_DB = Path("data/mev_executor.db")
+# Cycle 47 (44h-bulk): anchor to repo root via __file__ for CWD-independence
+# (see Cycle 46 for the funding-chain precedent). EXECUTOR_DB picked up
+# inline since it's the adjacent same-trap pattern.
+LIVE_DB     = Path(__file__).resolve().parent.parent / "data" / "live_collector.db"
+EXECUTOR_DB = Path(__file__).resolve().parent.parent / "data" / "mev_executor.db"
 CLOB_API = "https://clob.polymarket.com"
 
 # Detection thresholds

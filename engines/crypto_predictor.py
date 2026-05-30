@@ -45,7 +45,7 @@ import requests
 from dotenv import load_dotenv
 load_dotenv()
 
-DB_PATH = Path("data/crypto_predictor.db")
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "crypto_predictor.db"  # Cycle 47 (44h-bulk): anchor to repo root
 MODEL_DIR = Path("models/crypto")
 
 # Supported assets

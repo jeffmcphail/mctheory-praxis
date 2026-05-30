@@ -39,7 +39,7 @@ load_dotenv()
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
-DB_PATH = Path("data/flash_scanner.db")
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "flash_scanner.db"  # Cycle 47 (44h-bulk): anchor to repo root
 
 # ═══════════════════════════════════════════════════════
 # COST MODEL

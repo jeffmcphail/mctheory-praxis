@@ -31,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-DB_PATH = Path("data/spike_scanner.db")
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "spike_scanner.db"  # Cycle 47 (44h-bulk): anchor to repo root
 OUTPUT_DIR = Path("data/training")
 
 # ═══════════════════════════════════════════════════════

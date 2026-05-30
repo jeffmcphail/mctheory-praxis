@@ -38,7 +38,7 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 POLYMARKET_FEE = 0.02  # 2% winner fee
 MIN_VOLUME = 1000       # Minimum volume to consider (filter noise)
-DB_PATH = Path("data/mev_scanner.db")
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "mev_scanner.db"  # Cycle 47 (44h-bulk): anchor to repo root
 
 # ═══════════════════════════════════════════════════════
 # DATABASE

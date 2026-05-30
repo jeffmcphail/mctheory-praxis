@@ -219,6 +219,19 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
         #                          ~10 min after the collector. Identical
         #                          staleness dynamics to funding_rates;
         #                          matched at 17h for the same reason.
+        # funding_alerts        -- PraxisFundingMonitor's alert ledger
+        #                          (Cycle 43a; Cycle 45 44k renamed the env
+        #                          var). One row per (asset, funding-window)
+        #                          when a signal crosses live P>0.70 gate
+        #                          AND the ntfy.sh POST succeeds. Populates
+        #                          sparsely -- can be empty for long stretches
+        #                          in bear/sit-out regimes. Same UTC-funding-
+        #                          event timestamp dynamics as funding_signals;
+        #                          matched at 17h. Empty-table handling:
+        #                          _collect_db_health surfaces
+        #                          row_count=0, error="empty table" rather
+        #                          than is_stale=True, so sparse populating
+        #                          doesn't trigger false stale alarms.
         # fear_greed            -- PraxisFearGreedCollector, daily at
         #                          00:30 local (Cycle 10). 26h tolerance.
         # ohlcv_daily           -- PraxisOhlcvDailyCollector, daily at
@@ -245,6 +258,7 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
             "ohlcv_1m": 25200,
             "funding_rates": 61200,    # Cycle 14: 17h (was 32400 / 9h)
             "funding_signals": 61200,  # Cycle 42a: matches funding_rates (same UTC-funding-event timestamp dynamics; monitor writes at 00:15/08:15/16:15 LOCAL)
+            "funding_alerts":  61200,  # Cycle 47: matches funding_signals; populates sparsely (only on above_gate=1 firings); empty-table reports error not is_stale
             "fear_greed": 93600,       # 24h + 2h slack
             "ohlcv_daily": 93600,      # 24h + 2h slack
             "ohlcv_4h": 93600,         # 24h + 2h slack

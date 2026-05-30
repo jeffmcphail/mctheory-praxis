@@ -40,7 +40,7 @@ load_dotenv()
 
 DATA_API = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
-DB_PATH = Path("data/smart_money.db")
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "smart_money.db"  # Cycle 47 (44h-bulk): anchor to repo root
 
 # Tracker config
 DEFAULT_TOP_N = 25           # Track top N traders

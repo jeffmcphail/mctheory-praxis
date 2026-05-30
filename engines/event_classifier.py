@@ -37,7 +37,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-DB_PATH = Path("data/spike_scanner.db")
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "spike_scanner.db"  # Cycle 47 (44h-bulk): anchor to repo root
 
 VALID_TYPES = [
     "geopolitical", "economic", "financial", "political", "legal",

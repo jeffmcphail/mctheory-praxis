@@ -40,7 +40,7 @@ load_dotenv()
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 DATA_API = "https://data-api.polymarket.com"
-DB_PATH = Path("data/negrisk_arb.db")
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "negrisk_arb.db"  # Cycle 47 (44h-bulk): anchor to repo root
 
 # NegRisk Adapter on Polygon
 NEGRISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
