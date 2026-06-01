@@ -125,6 +125,30 @@ def init_db():
         )
     """)
 
+    # Cycle 51: paper-trading executor decision log. One row per
+    # (asset, funding-window) decided by the executor. PK matches
+    # funding_alerts; INSERT OR IGNORE in the executor keeps re-runs
+    # idempotent. Skip rows still get full risk_checks_json for forensic
+    # auditability. See engines/funding_executor.py.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            asset                    TEXT NOT NULL,
+            signal_timestamp         INTEGER NOT NULL,
+            signal_datetime          TEXT NOT NULL,
+            funding_alert_alerted_at TEXT NOT NULL,
+            decided_at               TEXT NOT NULL,
+            decision                 TEXT NOT NULL,
+            skip_reason              TEXT,
+            intended_direction       TEXT,
+            intended_size_usd        REAL,
+            p_profitable             REAL NOT NULL,
+            gate_threshold           REAL NOT NULL,
+            risk_checks_json         TEXT NOT NULL,
+            executor_version         TEXT NOT NULL,
+            PRIMARY KEY (asset, signal_timestamp)
+        )
+    """)
+
     # Cycle 43a: funding-carry alert ledger. One row per (asset, funding
     # window) when an above_gate=1 signal was successfully POSTed to the
     # Teams webhook. PK (asset, timestamp) matches funding_signals so
