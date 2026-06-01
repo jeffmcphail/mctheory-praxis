@@ -40,6 +40,19 @@ Priority-grouped, then domain-grouped within each priority.
   needs registering so it picks up daily at 00:35 going forward.
   *(Source: Cycle 19 -- session lacked admin privileges)*
 
+- **Cycle 52 pre-check: add `paper_trades` to `primary_monitored`** in
+  `servers/praxis_mcp/tools/meta.py`. Currently unmonitored (Cycle 51
+  verification of PraxisFundingExecutor task confirmed paper_trades
+  shows up in the unmonitored list, not the monitored set). Same
+  threshold pattern as `funding_alerts` (Cycle 47): 17h / 61200s,
+  using `signal_timestamp` (INTEGER ms) as the timestamp column.
+  Reasoning: paper_trades populates downstream from the same
+  funding-window cadence; sparse-population dynamic is identical
+  (empty-table handling via `_collect_db_health` already surfaces
+  `row_count=0, error="empty table"` rather than `is_stale=true`).
+  Land as a small follow-up before / alongside the position-lifecycle
+  work in Cycle 52. *(Source: Cycle 51 verification step)*
+
 ### Mid priority -- structural improvements
 
 - **`phase3_models.joblib` retrain**: funding_rates ground truth is back
