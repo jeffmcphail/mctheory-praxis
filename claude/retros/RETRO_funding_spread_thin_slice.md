@@ -5,7 +5,7 @@
 **Mode:** Implementation, two-stage pipeline. Took ~3 h Code time + ~1 h compute.
 **Status:** DONE -- with cross-venue funding-spread hypothesis DISCONFIRMED on the Binance × Bybit thin slice.
 **Predecessor:** Cycle 49 RECON (atlas Exp 13 revival hypothesis #1).
-**Commit:** `<CYCLE_50_HASH>`
+**Commit:** `d0d2aa8`
 
 ---
 
