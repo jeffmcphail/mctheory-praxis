@@ -5,7 +5,7 @@
 **Mode:** RECON-then-implementation, one cycle. Took ~2h Code time + smoke verification.
 **Status:** DONE -- paper-trading executor scaffold committed; PraxisFundingExecutor task registration pending user-side admin step.
 **Predecessor:** Cycle 50 (`d0d2aa8` + `fb9c9b6`) -- cross-venue spread DISCONFIRMED; redirect target was 44c.
-**Commit:** `<CYCLE_51_HASH>`
+**Commit:** `0a2476a`
 
 ---
 
