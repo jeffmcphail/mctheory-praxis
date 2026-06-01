@@ -1133,7 +1133,21 @@ favorable regimes, flat in unfavorable -- never bleeds.
 For a POSITIVE experiment, "revival" reframes as
 "scaling/improving":
 
-1. **Add cross-exchange funding spread (Bybit, OKX, Hyperliquid)** -- likelihood: high. Same engine; adds breadth. Each new venue is +30-50% effective universe size. Test cost: small (CCXT supports all named venues).
+1. **Add cross-exchange funding spread (Bybit, OKX, Hyperliquid)** -- likelihood: high (PRIOR estimate). Same engine; adds breadth. Each new venue is +30-50% effective universe size. Test cost: small (CCXT supports all named venues).
+
+   **Status (2026-06-01): DISCONFIRMED via Cycle 50 systematic test.** Cycle 49 RECON established that real cross-venue spreads exist (median 3-5% ann, p90 8-14%) on Binance × Bybit across the 6 atlas assets, but break-even TC at 7-day taker holds is ~10% ann — typical spreads don't clear. Cycle 50 thin-slice ran phase2/3/4 on the cross-venue spread strategy (train 2024 → OOS 2025-01-01..2026-03-26) across a 4-cell matrix [P>0.50 / P>0.70 × taker 16bps / maker 7bps]. Result: **every cell deeply negative Sharpe**:
+    * taker / P>0.50: **−11.33** (cum −2.15%, 6/448 win days, 0/5 positive models)
+    * taker / P>0.70: **−6.14**  (cum −0.48%, 1/448 win days, 0/3 positive models)
+    * maker / P>0.50: **−8.40**  (cum −0.85%, 16/448 win days, 0/5 positive models)
+    * maker / P>0.70: **−4.91**  (cum −0.19%, 4/448 win days, 0/3 positive models)
+
+   Best single per-model in the best cell: `ETH_SPREAD / maker / P>0.70` = Sharpe **−8.88** over 57 trading days. No model in any cell was OOS-positive. Maker improved over taker by only 20-26% (Sharpe ratios 0.74 / 0.80) — not the >2× threshold that would have indicated "execution path matters more than universe expansion." Phase3 base rates 1.0-3.6% (vs Exp 13's 31-45%): most (day, config) combos in training were unprofitable after TC; RF achieved high AUC by memorizing the few profitable training events but didn't generalize OOS.
+
+   **Structural finding (Cycle 50 carry-forward to executor design):** ADA -- the *highest* single-asset Sharpe in Exp 13 (+7.21) and largest spread tails in Cycle 49 RECON (p99 = 29.45% ann) -- **did not trade in any cell** of the cross-venue spread strategy. ADA's funding edge lives in single-venue funding volatility, not in cross-venue spread divergence. Any future cross-venue revival attempt should treat ADA as structurally distinct from the other 5 assets, or include a different feature/return model for it.
+
+   **What is NOT disconfirmed:** the underlying signal — real 3-5% ann median |spreads| exist and persist. The trade-ability via *this particular* carry formulation (long lower-funding venue + short higher-funding venue, RF-gated N-day hold, 4-leg execution) is the negative finding. A reformulated strategy -- e.g. continuous-rebalancing statistical arb, or paired-with-Exp-13 hedging on Bybit as a side leg -- may still be viable.
+
+   References: outputs/funding_spread_repro/SUMMARY.md; brief claude/handoffs/BRIEF_funding_spread_thin_slice.md; retro claude/retros/RETRO_funding_spread_thin_slice.md.
 2. **Add term structure feature (Class J)** -- likelihood: medium. Funding term slope (8h vs longer-dated basis) is class J in the regime matrix; tested-in but limited weight. Could improve entry timing.
 3. **Bear-market validation needed** -- likelihood: not a revival but a confirmation. Strategy hasn't been tested in a sustained negative-funding bear regime. The behavior should be "sit out cleanly" but real-world execution has slippage / withdrawal risk.
 4. **LSTM v2 architecture for non-funding alpha** -- likelihood: low for THIS engine. Engine 7 + funding-rate features is mechanistically tied to the carry P&L; replacing the classifier with an LSTM might add modest lift but the structural edge is the funding mechanism itself, not the model class.

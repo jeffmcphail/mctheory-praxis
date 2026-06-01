@@ -108,6 +108,20 @@ def build_strategy(args):
             training_end=args.training_end,
             feature_mode=getattr(args, "feature_mode", "funding"),
         )
+    elif args.strategy == "funding_spread":
+        # Cycle 50 (D2a): cross-venue (Binance × Bybit) funding-spread carry.
+        # tc_bps is per-leg one-way; the hold simulation applies it across
+        # 4 legs (entry pair + exit pair, both venues). Taker baseline:
+        # --tc-bps 4.0 (16 bps RT). Maker baseline: --tc-bps 1.75 (7 bps RT).
+        from engines.funding_spread_strategy import FundingSpreadStrategy
+        assets = args.assets.split(",") if args.assets else None
+        return FundingSpreadStrategy(
+            assets=assets,
+            cache_dir=args.cache_dir,
+            tc_bps=args.tc_bps,
+            training_start=args.training_start,
+            training_end=args.training_end,
+        )
     elif args.strategy == "momentum":
         from engines.momentum_strategy import MomentumCPOStrategy
         assets    = args.assets.split(",") if args.assets else None
@@ -287,7 +301,9 @@ def main():
     parser = argparse.ArgumentParser(description="CPO Pipeline — Generic Runner")
     parser.add_argument("--strategy", required=True,
                         choices=["pairs", "crypto_ta", "futures_ta", "fx_ta",
-                                 "universal_ta", "mcb_ta", "momentum", "funding_rate", "grid_bot", "vol"],
+                                 "universal_ta", "mcb_ta", "momentum",
+                                 "funding_rate", "funding_spread",
+                                 "grid_bot", "vol"],
                         help="Trading strategy to use")
     parser.add_argument("--asset-class", default="crypto",
                         choices=["crypto", "futures", "fx"],
@@ -386,6 +402,9 @@ def main():
     elif args.strategy == "funding_rate":
         if args.output_dir is None:
             args.output_dir = Path("output/funding_rate")
+    elif args.strategy == "funding_spread":
+        if args.output_dir is None:
+            args.output_dir = Path("outputs/funding_spread_repro")
     elif args.strategy == "momentum":
         if args.output_dir is None:
             args.output_dir = Path("output/momentum")

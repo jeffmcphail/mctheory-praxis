@@ -109,13 +109,19 @@ def init_db():
         )
     """)
 
+    # Cycle 50 (D1a): added `venue` column to PK so cross-venue funding
+    # data (binance, bybit, ...) can coexist. Existing single-venue Binance
+    # data migrated via scripts/migrations/cycle50_funding_rates_add_venue.py;
+    # this init_db schema matches the post-migration shape so fresh DBs
+    # come up in the right state.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS funding_rates (
             asset TEXT NOT NULL,
+            venue TEXT NOT NULL,
             timestamp INTEGER NOT NULL,
             datetime TEXT NOT NULL,
             funding_rate REAL,
-            PRIMARY KEY (asset, timestamp)
+            PRIMARY KEY (asset, venue, timestamp)
         )
     """)
 
@@ -570,26 +576,26 @@ def collect_fear_greed(days, conn):
     }
 
 
-def collect_funding_rates(asset, days, conn):
-    """Collect funding rate history from Binance."""
-    print(f"\n  Collecting funding rates for {asset} ({days} days)...")
-
+def _fetch_binance_funding(asset, since_ms):
+    """Fetch Binance perp funding via CCXT. Returns list of dicts
+    {timestamp_ms: int, fundingRate: float} chronologically sorted."""
     try:
         import ccxt
-        exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
     except ImportError:
-        print(f"    pip install ccxt")
-        return
-
+        print("    pip install ccxt")
+        return []
+    exchange = ccxt.binance({
+        "enableRateLimit": True,
+        "options": {"defaultType": "future"},
+    })
     symbol = SUPPORTED_ASSETS[asset]["perp"]
-    since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
-
     all_rates = []
-    fetch_since = since
-
+    fetch_since = since_ms
     while True:
         try:
-            rates = exchange.fetch_funding_rate_history(symbol, since=fetch_since, limit=1000)
+            rates = exchange.fetch_funding_rate_history(
+                symbol, since=fetch_since, limit=1000,
+            )
             if not rates:
                 break
             all_rates.extend(rates)
@@ -600,30 +606,119 @@ def collect_funding_rates(asset, days, conn):
                 break
             time.sleep(0.5)
         except Exception as e:
-            print(f"    Funding rate error: {e}")
+            print(f"    Binance fetch error: {e}")
             break
+    return [
+        {"timestamp": int(r["timestamp"]),
+         "fundingRate": float(r.get("fundingRate", 0))}
+        for r in all_rates
+    ]
+
+
+def _fetch_bybit_funding(asset, since_ms):
+    """Fetch Bybit linear-perp funding via REST. Bybit's
+    GET /v5/market/funding/history returns newest-first; we paginate
+    backward via endTime cursor and reverse client-side."""
+    symbol = f"{asset}USDT"
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    out_raw = []
+    end_ms = now_ms
+    pages = 0
+    MAX_PAGES = 200  # 200 events/page; safety cap to avoid runaway loops
+    while pages < MAX_PAGES:
+        try:
+            r = requests.get(
+                "https://api.bybit.com/v5/market/funding/history",
+                params={
+                    "category": "linear", "symbol": symbol,
+                    "endTime": end_ms, "limit": 200,
+                },
+                timeout=20,
+            )
+            r.raise_for_status()
+            j = r.json()
+        except Exception as e:
+            print(f"    Bybit fetch error: {e}")
+            break
+        rows = j.get("result", {}).get("list", [])
+        if not rows:
+            break
+        # rows newest-first; collect those >= since_ms; advance end_ms cursor
+        last_ts = int(rows[-1]["fundingRateTimestamp"])  # oldest in this page
+        for row in rows:
+            ts = int(row["fundingRateTimestamp"])
+            if ts >= since_ms:
+                out_raw.append(
+                    {"timestamp": ts,
+                     "fundingRate": float(row["fundingRate"])}
+                )
+        if last_ts <= since_ms:
+            break
+        end_ms = last_ts - 1   # advance cursor backward (was a typo `last_ms`
+                               # caught by user pre-D2; D1d smoke only hit page 1)
+        pages += 1
+        if pages % 10 == 0:
+            print(f"    {len(out_raw)} bybit rates fetched ({pages} pages)...")
+        time.sleep(0.6)
+    # Deduplicate (in case overlapping cursor pages) and sort chronologically
+    seen = set()
+    deduped = []
+    for r in sorted(out_raw, key=lambda x: x["timestamp"]):
+        if r["timestamp"] in seen:
+            continue
+        seen.add(r["timestamp"])
+        deduped.append(r)
+    return deduped
+
+
+def collect_funding_rates(asset, days, conn, venue="binance"):
+    """Collect funding rate history from `venue` (binance, bybit) and
+    insert into funding_rates with the (asset, venue, timestamp) PK.
+
+    Cycle 50 (D1b) extension: added `venue` arg; default 'binance' keeps
+    pre-Cycle-50 callers working unchanged. INSERT OR IGNORE keeps
+    re-runs idempotent against the new compound PK.
+
+    Cycle 21.5 hotfix preserved: sub-second jitter in venue-reported
+    timestamps is truncated to seconds-aligned ms so re-collected rows
+    collide cleanly on the PK rather than landing as duplicates.
+    """
+    print(f"\n  Collecting funding rates for {asset} on {venue} ({days} days)...")
+    since_ms = int(
+        (datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000
+    )
+
+    if venue == "binance":
+        all_rates = _fetch_binance_funding(asset, since_ms)
+    elif venue == "bybit":
+        all_rates = _fetch_bybit_funding(asset, since_ms)
+    else:
+        print(f"    Unknown venue: {venue!r}")
+        return {
+            "status": "error",
+            "reason": f"unknown venue {venue!r}",
+            "fetched": 0,
+            "stored": 0,
+        }
 
     stored = 0
     for r in all_rates:
-        # Funding events are aligned to UTC hour boundaries by Binance contract.
-        # Binance's reporting clock includes sub-second jitter (e.g., .003 ms)
-        # which has no information value -- truncate to seconds-aligned ms so
-        # repeated INSERT OR REPLACE collapses rows for the same event,
-        # matching the migration's representation. (Cycle 21.5 hotfix.)
-        ts = (int(r["timestamp"]) // 1000) * 1000
-        dt = datetime.fromtimestamp(ts // 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        ts = (int(r["timestamp"]) // 1000) * 1000   # Cycle 21.5 alignment
+        dt = (datetime.fromtimestamp(ts // 1000, tz=timezone.utc)
+                       .strftime("%Y-%m-%dT%H:%M:%S+00:00"))
         try:
-            conn.execute("""
-                INSERT OR REPLACE INTO funding_rates
-                (asset, timestamp, datetime, funding_rate)
-                VALUES (?, ?, ?, ?)
-            """, (asset, ts, dt, r.get("fundingRate", 0)))
+            conn.execute(
+                "INSERT OR IGNORE INTO funding_rates "
+                "(asset, venue, timestamp, datetime, funding_rate) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (asset, venue, ts, dt, r["fundingRate"]),
+            )
             stored += 1
         except Exception:
             pass
 
     conn.commit()
-    print(f"    Stored {stored} funding rate observations")
+    print(f"    Stored {stored} {venue} funding rate observations")
 
     # Cycle 29: explicit status return so main() can exit non-zero
     # when a transient error caused us to write 0 rows.
@@ -631,7 +726,8 @@ def collect_funding_rates(asset, days, conn):
     if fetched == 0:
         return {
             "status": "error",
-            "reason": "CCXT funding rate fetch returned 0 records (network/API failure)",
+            "reason": f"{venue} funding rate fetch returned 0 records "
+                      f"(network/API failure)",
             "fetched": 0,
             "stored": 0,
         }
@@ -1327,6 +1423,10 @@ def main():
     p_fr = subs.add_parser("collect-funding", help="Funding rates")
     p_fr.add_argument("--asset", required=True)
     p_fr.add_argument("--days", type=int, default=365)
+    p_fr.add_argument("--venue", default="binance",
+                      choices=["binance", "bybit"],
+                      help="Exchange venue (default binance; Cycle 50 D1b "
+                           "added bybit)")
 
     p_oc = subs.add_parser("collect-onchain", help="BTC on-chain")
     p_oc.add_argument("--days", type=int, default=365)
@@ -1380,7 +1480,7 @@ def main():
         "collect-ohlcv-4h": lambda a: collect_ohlcv_4h(a.asset.upper(), a.days, init_db()),
         "collect-ohlcv-1m": lambda a: collect_ohlcv_1m(a.asset.upper(), a.days, init_db()),
         "collect-fear-greed": lambda a: collect_fear_greed(a.days, init_db()),
-        "collect-funding": lambda a: collect_funding_rates(a.asset.upper(), a.days, init_db()),
+        "collect-funding": lambda a: collect_funding_rates(a.asset.upper(), a.days, init_db(), venue=a.venue),
         "collect-onchain": lambda a: collect_onchain_btc(a.days, init_db()),
         "collect-market-data": cmd_collect_market_data,
         "collect-order-book": cmd_collect_order_book,
