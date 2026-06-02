@@ -130,6 +130,13 @@ def init_db():
     # funding_alerts; INSERT OR IGNORE in the executor keeps re-runs
     # idempotent. Skip rows still get full risk_checks_json for forensic
     # auditability. See engines/funding_executor.py.
+    #
+    # Cycle 52a added hold_days INTEGER (nullable). Resolved via JOIN
+    # funding_signals on (asset, timestamp) at decision time, or via
+    # the --force-hold-days CLI override. NULL when decision='skip'
+    # AND skip_reason='hold_days_unknown' (JOIN miss with no override).
+    # No fallback default; a JOIN miss is a data-integrity anomaly that
+    # surfaces explicitly rather than being silently defaulted.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS paper_trades (
             asset                    TEXT NOT NULL,
@@ -145,6 +152,36 @@ def init_db():
             gate_threshold           REAL NOT NULL,
             risk_checks_json         TEXT NOT NULL,
             executor_version         TEXT NOT NULL,
+            hold_days                INTEGER,
+            PRIMARY KEY (asset, signal_timestamp)
+        )
+    """)
+
+    # Cycle 52b: paper-trading position-exit log. One row per closed
+    # paper position; joined to paper_trades on (asset, signal_timestamp).
+    # Append-only (Schema-Option-B from Cycle 52 RECON); paper_trades
+    # itself is never mutated post-write. A position is OPEN if it
+    # exists in paper_trades with decision='enter' AND not in
+    # paper_position_exits. Exit-reconciliation in funding_executor.py
+    # uses window-aligned semantics matching atlas Exp 13
+    # run_funding_hold (exclusive entry, inclusive exit).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS paper_position_exits (
+            asset                TEXT    NOT NULL,
+            signal_timestamp     INTEGER NOT NULL,
+            entry_decided_at     TEXT    NOT NULL,
+            exit_decided_at      TEXT    NOT NULL,
+            exit_timestamp       INTEGER NOT NULL,
+            exit_datetime        TEXT    NOT NULL,
+            hold_days            INTEGER NOT NULL,
+            funding_events_count INTEGER NOT NULL,
+            funding_payments_usd REAL    NOT NULL,
+            tc_entry_usd         REAL    NOT NULL,
+            tc_exit_usd          REAL    NOT NULL,
+            net_pnl_usd          REAL    NOT NULL,
+            notional_usd         REAL    NOT NULL,
+            direction            TEXT    NOT NULL,
+            executor_version     TEXT    NOT NULL,
             PRIMARY KEY (asset, signal_timestamp)
         )
     """)

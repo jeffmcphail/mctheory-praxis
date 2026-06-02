@@ -259,6 +259,11 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
             "funding_rates": 61200,    # Cycle 14: 17h (was 32400 / 9h)
             "funding_signals": 61200,  # Cycle 42a: matches funding_rates (same UTC-funding-event timestamp dynamics; monitor writes at 00:15/08:15/16:15 LOCAL)
             "funding_alerts":  61200,  # Cycle 47: matches funding_signals; populates sparsely (only on above_gate=1 firings); empty-table reports error not is_stale
+            "paper_trades": {          # Cycle 51 PraxisFundingExecutor writes; Cycle 52 monitoring add
+                "threshold_seconds": 61200,    # 17h, matches funding_alerts (same UTC-funding-event cadence; populates downstream from above_gate=1 firings)
+                "timestamp_column": "signal_timestamp",
+                "timestamp_format": "ms",
+            },
             "fear_greed": 93600,       # 24h + 2h slack
             "ohlcv_daily": 93600,      # 24h + 2h slack
             "ohlcv_4h": 93600,         # 24h + 2h slack
