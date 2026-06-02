@@ -230,6 +230,7 @@ def init_db():
             ann_rate REAL,
             basis_pct REAL,
             pct_positive REAL,
+            min_pct_positive REAL,
             base_rate REAL,
             features_json TEXT,
             monitor_version TEXT NOT NULL,

@@ -295,14 +295,26 @@ def run_inference(
         basis    = float(feat[6]) if feat is not None and len(feat) > 6 else 0.0
         pct_pos  = float(feat[4]) if feat is not None and len(feat) > 4 else 0.0
 
+        # Cycle 53 D8a: config-gate. The argmax config's hard entry thresholds
+        # (min_funding_ann + min_pct_positive) must be met by the CURRENT
+        # environment, mirroring run_funding_single_day's Condition 1 + 2 in the
+        # atlas backtest. Pre-fix the monitor gated on argmax-P alone, so it
+        # alerted on (and the executor booked) trades atlas zeroed — a
+        # deployment-vs-strategy mismatch since Cycle 41. config_ok gates alert
+        # emission (process_alerts) so funding_alerts stays atlas-faithful.
+        config_ok = (ann_rate >= best_config.min_funding_ann_pct
+                     and pct_pos >= best_config.min_pct_positive)
+
         signals.append({
             "asset":           asset,
             "model_id":        model_id,
             "p_profitable":    p_prob,
             "exp_return":      exp_ret,
             "above_gate":      p_prob > gate,
+            "config_ok":       config_ok,
             "hold_days":       best_config.hold_days,
             "min_ann_pct":     best_config.min_funding_ann_pct,
+            "min_pct_positive": best_config.min_pct_positive,
             "ann_rate":        ann_rate,
             "basis_pct":       basis,
             "pct_positive":   pct_pos,
@@ -431,9 +443,9 @@ def persist_signals(signals: list[dict],
             "(asset, timestamp, datetime, p_profitable, "
             " above_gate, above_gate_050, gate_threshold, "
             " best_config_id, hold_days, min_funding_ann, expected_return, "
-            " ann_rate, basis_pct, pct_positive, base_rate, "
+            " ann_rate, basis_pct, pct_positive, min_pct_positive, base_rate, "
             " features_json, monitor_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (s["asset"], ts_ms, dt_iso, float(s["p_profitable"]),
              1 if s["p_profitable"] > gate          else 0,
              1 if s["p_profitable"] > HEADLINE_GATE else 0,
@@ -441,7 +453,8 @@ def persist_signals(signals: list[dict],
              s["config_id"], int(s["hold_days"]),
              float(s["min_ann_pct"]), float(s["exp_return"]),
              float(s["ann_rate"]), float(s["basis_pct"]),
-             float(s["pct_positive"]), float(s["base_rate"]),
+             float(s["pct_positive"]), float(s["min_pct_positive"]),
+             float(s["base_rate"]),
              features_json, monitor_version),
         )
         if cur.rowcount == 1:
@@ -554,6 +567,17 @@ def process_alerts(signals: list[dict],
 
     for s in signals:
         if not s.get("above_gate"):
+            continue
+        # Cycle 53 D8a: config-gate. Even above the P gate, only alert when the
+        # argmax config's hard thresholds are met by the environment — i.e. only
+        # on signals atlas Exp 13 would actually trade. Suppressed signals are
+        # still persisted to funding_signals (above_gate=1) for analytics; they
+        # just do not fire an alert and so are never booked by the executor.
+        if not s.get("config_ok", False):
+            print(f"  Alert suppressed (config gate: ann_rate "
+                  f"{s.get('ann_rate', 0):.1f}%% vs min {s.get('min_ann_pct', 0):g}%%, "
+                  f"pct_pos {s.get('pct_positive', 0):.3f} vs min "
+                  f"{s.get('min_pct_positive', 0):.2f}): {s['asset']}")
             continue
         if s.get("feature_vector") is None or s.get("config_id") is None:
             continue  # skip rows that lacked model/features

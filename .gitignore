@@ -145,3 +145,8 @@ praxis_manifest.txt
 # Code-side working scratch files (helpers, throwaway scripts)
 claude/scratch/
 
+
+# Cycle 53 backtest-replay harness DBs: reproducible in seconds from the
+# cached parquets + scripts/cycle53_backtest_replay.py. The committed
+# SUMMARY.md + decomposition.json are the auditable record.
+outputs/cycle53_backtest_replay/*.db

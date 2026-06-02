@@ -1,0 +1,484 @@
+{
+  "0.5": {
+    "prefix": {
+      "per_asset": {
+        "BTC": {
+          "n_trades": 77,
+          "n_shared": 74,
+          "n_zeroed": 3,
+          "executor_cum_pnl_pct": 2.876830999999999,
+          "atlas_cum_pnl_pct": 3.354861117643451,
+          "basis_drag_pct": 0.4780301176434525,
+          "config_gate_zeroing_pct": 3.896103896103896,
+          "executor_only_pnl_pct": 0.18740000000000007,
+          "residual_pct": -8.673617379884035e-17
+        },
+        "ETH": {
+          "n_trades": 126,
+          "n_shared": 103,
+          "n_zeroed": 23,
+          "executor_cum_pnl_pct": 4.496424000000001,
+          "atlas_cum_pnl_pct": 5.041051601377166,
+          "basis_drag_pct": 0.5446276013771668,
+          "config_gate_zeroing_pct": 18.253968253968253,
+          "executor_only_pnl_pct": -0.7348950000000002,
+          "residual_pct": -1.1275702593849246e-15
+        },
+        "SOL": {
+          "n_trades": 60,
+          "n_shared": 56,
+          "n_zeroed": 4,
+          "executor_cum_pnl_pct": 1.3188040000000005,
+          "atlas_cum_pnl_pct": 1.550744366419106,
+          "basis_drag_pct": 0.23194036641910495,
+          "config_gate_zeroing_pct": 6.666666666666667,
+          "executor_only_pnl_pct": 0.7822560000000001,
+          "residual_pct": 6.071532165918825e-16
+        },
+        "XRP": {
+          "n_trades": 171,
+          "n_shared": 112,
+          "n_zeroed": 59,
+          "executor_cum_pnl_pct": 3.69624,
+          "atlas_cum_pnl_pct": 4.053185380108791,
+          "basis_drag_pct": 0.35694538010878973,
+          "config_gate_zeroing_pct": 34.50292397660819,
+          "executor_only_pnl_pct": -0.9850290000000002,
+          "residual_pct": 1.3877787807814457e-15
+        },
+        "ADA": {
+          "n_trades": 186,
+          "n_shared": 160,
+          "n_zeroed": 26,
+          "executor_cum_pnl_pct": 10.644695999999998,
+          "atlas_cum_pnl_pct": 10.51019072871168,
+          "basis_drag_pct": -0.13450527128831816,
+          "config_gate_zeroing_pct": 13.978494623655912,
+          "executor_only_pnl_pct": -0.3064229999999998,
+          "residual_pct": -1.474514954580286e-15
+        },
+        "AVAX": {
+          "n_trades": 82,
+          "n_shared": 78,
+          "n_zeroed": 4,
+          "executor_cum_pnl_pct": 0.14108300000000001,
+          "atlas_cum_pnl_pct": 0.8732542708278735,
+          "basis_drag_pct": 0.7321712708278736,
+          "config_gate_zeroing_pct": 4.878048780487805,
+          "executor_only_pnl_pct": 0.15552100000000005,
+          "residual_pct": -8.673617379884035e-17
+        }
+      },
+      "aggregate": {
+        "n_trades": 702,
+        "n_shared": 583,
+        "n_zeroed": 119,
+        "executor_cum_pnl_pct": 23.174077999999998,
+        "atlas_cum_pnl_pct": 25.383287465088067,
+        "basis_drag_pct": 2.2092094650880694,
+        "config_gate_zeroing_pct": 16.951566951566953,
+        "executor_only_pnl_pct": -0.9011699999999998,
+        "residual_pct": -3.469446951953614e-16
+      },
+      "funding_match": {
+        "n_trades_checked": 702,
+        "max_abs_delta_usd": 6.661338147750939e-16,
+        "mean_abs_delta_usd": 5.651936658481699e-17,
+        "pass_1e-6": true
+      },
+      "basis_stats": {
+        "BTC": {
+          "mean_bps": 0.645986645464125,
+          "std_bps": 1.8623244490505633,
+          "n": 74
+        },
+        "ETH": {
+          "mean_bps": 0.52876466153123,
+          "std_bps": 1.6498448502477103,
+          "n": 103
+        },
+        "SOL": {
+          "mean_bps": 0.4141792257484017,
+          "std_bps": 2.8927390717761776,
+          "n": 56
+        },
+        "XRP": {
+          "mean_bps": 0.31870123223999086,
+          "std_bps": 3.5253920301448955,
+          "n": 112
+        },
+        "ADA": {
+          "mean_bps": -0.08406579455519884,
+          "std_bps": 3.8868236686839044,
+          "n": 160
+        },
+        "AVAX": {
+          "mean_bps": 0.9386811164459918,
+          "std_bps": 5.515145052702089,
+          "n": 78
+        }
+      },
+      "prefix": true
+    },
+    "postfix": {
+      "per_asset": {
+        "BTC": {
+          "n_trades": 77,
+          "n_shared": 74,
+          "n_zeroed": 3,
+          "executor_cum_pnl_pct": 2.876830999999999,
+          "atlas_cum_pnl_pct": 3.354861117643451,
+          "basis_drag_pct": 0.4780301176434525,
+          "config_gate_zeroing_pct": 3.896103896103896,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": -8.673617379884035e-17
+        },
+        "ETH": {
+          "n_trades": 126,
+          "n_shared": 103,
+          "n_zeroed": 23,
+          "executor_cum_pnl_pct": 4.496424000000001,
+          "atlas_cum_pnl_pct": 5.041051601377166,
+          "basis_drag_pct": 0.5446276013771668,
+          "config_gate_zeroing_pct": 18.253968253968253,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": -1.1275702593849246e-15
+        },
+        "SOL": {
+          "n_trades": 60,
+          "n_shared": 56,
+          "n_zeroed": 4,
+          "executor_cum_pnl_pct": 1.3188040000000005,
+          "atlas_cum_pnl_pct": 1.550744366419106,
+          "basis_drag_pct": 0.23194036641910495,
+          "config_gate_zeroing_pct": 6.666666666666667,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": 6.071532165918825e-16
+        },
+        "XRP": {
+          "n_trades": 171,
+          "n_shared": 112,
+          "n_zeroed": 59,
+          "executor_cum_pnl_pct": 3.69624,
+          "atlas_cum_pnl_pct": 4.053185380108791,
+          "basis_drag_pct": 0.35694538010878973,
+          "config_gate_zeroing_pct": 34.50292397660819,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": 1.3877787807814457e-15
+        },
+        "ADA": {
+          "n_trades": 186,
+          "n_shared": 160,
+          "n_zeroed": 26,
+          "executor_cum_pnl_pct": 10.644695999999998,
+          "atlas_cum_pnl_pct": 10.51019072871168,
+          "basis_drag_pct": -0.13450527128831816,
+          "config_gate_zeroing_pct": 13.978494623655912,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": -1.474514954580286e-15
+        },
+        "AVAX": {
+          "n_trades": 82,
+          "n_shared": 78,
+          "n_zeroed": 4,
+          "executor_cum_pnl_pct": 0.14108300000000001,
+          "atlas_cum_pnl_pct": 0.8732542708278735,
+          "basis_drag_pct": 0.7321712708278736,
+          "config_gate_zeroing_pct": 4.878048780487805,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": -8.673617379884035e-17
+        }
+      },
+      "aggregate": {
+        "n_trades": 702,
+        "n_shared": 583,
+        "n_zeroed": 119,
+        "executor_cum_pnl_pct": 23.174077999999998,
+        "atlas_cum_pnl_pct": 25.383287465088067,
+        "basis_drag_pct": 2.2092094650880694,
+        "config_gate_zeroing_pct": 16.951566951566953,
+        "executor_only_pnl_pct": 0.0,
+        "residual_pct": -3.469446951953614e-16
+      },
+      "funding_match": {
+        "n_trades_checked": 583,
+        "max_abs_delta_usd": 6.661338147750939e-16,
+        "mean_abs_delta_usd": 5.919781055670425e-17,
+        "pass_1e-6": true
+      },
+      "basis_stats": {
+        "BTC": {
+          "mean_bps": 0.645986645464125,
+          "std_bps": 1.8623244490505633,
+          "n": 74
+        },
+        "ETH": {
+          "mean_bps": 0.52876466153123,
+          "std_bps": 1.6498448502477103,
+          "n": 103
+        },
+        "SOL": {
+          "mean_bps": 0.4141792257484017,
+          "std_bps": 2.8927390717761776,
+          "n": 56
+        },
+        "XRP": {
+          "mean_bps": 0.31870123223999086,
+          "std_bps": 3.5253920301448955,
+          "n": 112
+        },
+        "ADA": {
+          "mean_bps": -0.08406579455519884,
+          "std_bps": 3.8868236686839044,
+          "n": 160
+        },
+        "AVAX": {
+          "mean_bps": 0.9386811164459918,
+          "std_bps": 5.515145052702089,
+          "n": 78
+        }
+      }
+    }
+  },
+  "0.7": {
+    "prefix": {
+      "per_asset": {
+        "BTC": {
+          "n_trades": 36,
+          "n_shared": 36,
+          "n_zeroed": 0,
+          "executor_cum_pnl_pct": 3.1377730000000006,
+          "atlas_cum_pnl_pct": 3.508024781260316,
+          "basis_drag_pct": 0.37025178126031605,
+          "config_gate_zeroing_pct": 0.0,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": -6.505213034913027e-16
+        },
+        "ETH": {
+          "n_trades": 44,
+          "n_shared": 44,
+          "n_zeroed": 0,
+          "executor_cum_pnl_pct": 1.6487949999999998,
+          "atlas_cum_pnl_pct": 2.0672049038187037,
+          "basis_drag_pct": 0.41840990381870347,
+          "config_gate_zeroing_pct": 0.0,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": 6.071532165918825e-16
+        },
+        "SOL": {
+          "n_trades": 12,
+          "n_shared": 8,
+          "n_zeroed": 4,
+          "executor_cum_pnl_pct": 0.21967000000000003,
+          "atlas_cum_pnl_pct": 0.3516479223538965,
+          "basis_drag_pct": 0.13197792235389652,
+          "config_gate_zeroing_pct": 33.33333333333333,
+          "executor_only_pnl_pct": 0.7822560000000001,
+          "residual_pct": 0.0
+        },
+        "XRP": {
+          "n_trades": 46,
+          "n_shared": 42,
+          "n_zeroed": 4,
+          "executor_cum_pnl_pct": 2.5571790000000005,
+          "atlas_cum_pnl_pct": 3.1786411099616427,
+          "basis_drag_pct": 0.6214621099616426,
+          "config_gate_zeroing_pct": 8.695652173913043,
+          "executor_only_pnl_pct": 0.13054199999999996,
+          "residual_pct": -3.469446951953614e-16
+        },
+        "ADA": {
+          "n_trades": 75,
+          "n_shared": 75,
+          "n_zeroed": 0,
+          "executor_cum_pnl_pct": 8.979886999999996,
+          "atlas_cum_pnl_pct": 9.454075820953134,
+          "basis_drag_pct": 0.47418882095313564,
+          "config_gate_zeroing_pct": 0.0,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": 2.168404344971009e-15
+        },
+        "AVAX": {
+          "n_trades": 30,
+          "n_shared": 30,
+          "n_zeroed": 0,
+          "executor_cum_pnl_pct": 0.25003399999999987,
+          "atlas_cum_pnl_pct": 0.9218251995438367,
+          "basis_drag_pct": 0.6717911995438368,
+          "config_gate_zeroing_pct": 0.0,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": 8.673617379884035e-17
+        }
+      },
+      "aggregate": {
+        "n_trades": 243,
+        "n_shared": 235,
+        "n_zeroed": 8,
+        "executor_cum_pnl_pct": 16.793337999999995,
+        "atlas_cum_pnl_pct": 19.48141973789153,
+        "basis_drag_pct": 2.688081737891531,
+        "config_gate_zeroing_pct": 3.292181069958848,
+        "executor_only_pnl_pct": 0.9127980000000001,
+        "residual_pct": 3.469446951953614e-15
+      },
+      "funding_match": {
+        "n_trades_checked": 243,
+        "max_abs_delta_usd": 6.661338147750939e-16,
+        "mean_abs_delta_usd": 6.87750039817307e-17,
+        "pass_1e-6": true
+      },
+      "basis_stats": {
+        "BTC": {
+          "mean_bps": 1.0284771701675446,
+          "std_bps": 2.3901496677591965,
+          "n": 36
+        },
+        "ETH": {
+          "mean_bps": 0.9509315995879624,
+          "std_bps": 1.7223320607192465,
+          "n": 44
+        },
+        "SOL": {
+          "mean_bps": 1.6497240294237066,
+          "std_bps": 3.5710566461328916,
+          "n": 8
+        },
+        "XRP": {
+          "mean_bps": 1.4796716903848635,
+          "std_bps": 3.366582600220212,
+          "n": 42
+        },
+        "ADA": {
+          "mean_bps": 0.6322517612708475,
+          "std_bps": 3.851389715336328,
+          "n": 75
+        },
+        "AVAX": {
+          "mean_bps": 2.239303998479456,
+          "std_bps": 5.245586960446589,
+          "n": 30
+        }
+      },
+      "prefix": true
+    },
+    "postfix": {
+      "per_asset": {
+        "BTC": {
+          "n_trades": 36,
+          "n_shared": 36,
+          "n_zeroed": 0,
+          "executor_cum_pnl_pct": 3.1377730000000006,
+          "atlas_cum_pnl_pct": 3.508024781260316,
+          "basis_drag_pct": 0.37025178126031605,
+          "config_gate_zeroing_pct": 0.0,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": -6.505213034913027e-16
+        },
+        "ETH": {
+          "n_trades": 44,
+          "n_shared": 44,
+          "n_zeroed": 0,
+          "executor_cum_pnl_pct": 1.6487949999999998,
+          "atlas_cum_pnl_pct": 2.0672049038187037,
+          "basis_drag_pct": 0.41840990381870347,
+          "config_gate_zeroing_pct": 0.0,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": 6.071532165918825e-16
+        },
+        "SOL": {
+          "n_trades": 12,
+          "n_shared": 8,
+          "n_zeroed": 4,
+          "executor_cum_pnl_pct": 0.21967000000000003,
+          "atlas_cum_pnl_pct": 0.3516479223538965,
+          "basis_drag_pct": 0.13197792235389652,
+          "config_gate_zeroing_pct": 33.33333333333333,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": 0.0
+        },
+        "XRP": {
+          "n_trades": 46,
+          "n_shared": 42,
+          "n_zeroed": 4,
+          "executor_cum_pnl_pct": 2.5571790000000005,
+          "atlas_cum_pnl_pct": 3.1786411099616427,
+          "basis_drag_pct": 0.6214621099616426,
+          "config_gate_zeroing_pct": 8.695652173913043,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": -3.469446951953614e-16
+        },
+        "ADA": {
+          "n_trades": 75,
+          "n_shared": 75,
+          "n_zeroed": 0,
+          "executor_cum_pnl_pct": 8.979886999999996,
+          "atlas_cum_pnl_pct": 9.454075820953134,
+          "basis_drag_pct": 0.47418882095313564,
+          "config_gate_zeroing_pct": 0.0,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": 2.168404344971009e-15
+        },
+        "AVAX": {
+          "n_trades": 30,
+          "n_shared": 30,
+          "n_zeroed": 0,
+          "executor_cum_pnl_pct": 0.25003399999999987,
+          "atlas_cum_pnl_pct": 0.9218251995438367,
+          "basis_drag_pct": 0.6717911995438368,
+          "config_gate_zeroing_pct": 0.0,
+          "executor_only_pnl_pct": 0.0,
+          "residual_pct": 8.673617379884035e-17
+        }
+      },
+      "aggregate": {
+        "n_trades": 243,
+        "n_shared": 235,
+        "n_zeroed": 8,
+        "executor_cum_pnl_pct": 16.793337999999995,
+        "atlas_cum_pnl_pct": 19.48141973789153,
+        "basis_drag_pct": 2.688081737891531,
+        "config_gate_zeroing_pct": 3.292181069958848,
+        "executor_only_pnl_pct": 0.0,
+        "residual_pct": 3.469446951953614e-15
+      },
+      "funding_match": {
+        "n_trades_checked": 235,
+        "max_abs_delta_usd": 6.661338147750939e-16,
+        "mean_abs_delta_usd": 6.662814508156025e-17,
+        "pass_1e-6": true
+      },
+      "basis_stats": {
+        "BTC": {
+          "mean_bps": 1.0284771701675446,
+          "std_bps": 2.3901496677591965,
+          "n": 36
+        },
+        "ETH": {
+          "mean_bps": 0.9509315995879624,
+          "std_bps": 1.7223320607192465,
+          "n": 44
+        },
+        "SOL": {
+          "mean_bps": 1.6497240294237066,
+          "std_bps": 3.5710566461328916,
+          "n": 8
+        },
+        "XRP": {
+          "mean_bps": 1.4796716903848635,
+          "std_bps": 3.366582600220212,
+          "n": 42
+        },
+        "ADA": {
+          "mean_bps": 0.6322517612708475,
+          "std_bps": 3.851389715336328,
+          "n": 75
+        },
+        "AVAX": {
+          "mean_bps": 2.239303998479456,
+          "std_bps": 5.245586960446589,
+          "n": 30
+        }
+      }
+    }
+  }
+}

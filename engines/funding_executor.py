@@ -48,6 +48,22 @@ Data-availability check (10th, Cycle 52 addition):
                                               forces decision='skip' with
                                               skip_reason='hold_days_unknown'.
 
+Strategy-definition gate (11th, Cycle 53 D8b addition):
+ 11. config_thresholds_met             true   JOIN-resolved enforcement of the
+                                              argmax config's hard entry
+                                              thresholds: ann_rate >=
+                                              min_funding_ann AND pct_positive
+                                              >= min_pct_positive. Mirrors atlas
+                                              Exp 13 run_funding_single_day
+                                              Condition 1 + 2 so the executor
+                                              books the SAME strategy atlas
+                                              verified. Not met (or fields
+                                              unavailable) -> decision='skip',
+                                              skip_reason='config_thresholds_not_met'
+                                              (or '..._unknown'). Toggle via
+                                              enforce_config_gate (default True;
+                                              False only for backtest baseline).
+
 Cycle 52 lifecycle (D5 + D6)
 ----------------------------
 Position lifecycle: enter -> hold N days -> exit. The three risk-check
@@ -153,6 +169,11 @@ class RiskChecks:
     min_p_above_gate: float
     hold_days_known: bool             # Cycle 52: 10th check (data-availability)
     hold_days_value: int | None       # JOIN-resolved or --force-hold-days override; None on JOIN miss
+    config_thresholds_met: bool       # Cycle 53 D8b: 11th check (strategy-definition gate)
+    config_ann_rate: float | None     # JOIN-resolved environment ann_rate (%)
+    config_pct_positive: float | None # JOIN-resolved environment pct_positive
+    config_min_funding_ann: float | None   # argmax config threshold
+    config_min_pct_positive: float | None  # argmax config threshold
 
     def all_ok(self) -> bool:
         return (
@@ -165,6 +186,7 @@ class RiskChecks:
             and self.kill_switch_off
             and self.p_above_min_gate
             and self.hold_days_known
+            and self.config_thresholds_met
         )
 
     def to_json_dict(self) -> dict:
@@ -180,11 +202,21 @@ class FundingExecutor:
 
     def __init__(self, db_path: Path | str = DB_PATH,
                  defaults_override: dict | None = None,
-                 force_hold_days: int | None = None):
+                 force_hold_days: int | None = None,
+                 now_func=None,
+                 enforce_config_gate: bool = True):
         self.db_path = Path(db_path)
         self.config = dict(DEFAULTS)
         if defaults_override:
             self.config.update(defaults_override)
+        # Cycle 53 D8b: 11th check. When True (production default), an entry
+        # also requires the argmax config's hard thresholds to be met by the
+        # environment (ann_rate >= min_funding_ann AND pct_positive >=
+        # min_pct_positive), JOIN-resolved from funding_signals. This enforces
+        # the SAME strategy definition atlas Exp 13 verified; without it the
+        # executor books trades atlas zeroed (Cycle 53 D7 finding). Set False
+        # only to reproduce the pre-fix baseline in the Cycle 53 backtest.
+        self.enforce_config_gate = enforce_config_gate
         self.kill_switch_on = (
             os.getenv(KILL_SWITCH_ENV, "").strip().lower() in ("1", "true", "yes")
         )
@@ -192,6 +224,14 @@ class FundingExecutor:
         # backtest sweeps to iterate hold values without touching the
         # underlying funding_signals data.
         self.force_hold_days = force_hold_days
+        # Cycle 53: optional injected clock. Production leaves this None and
+        # gets real UTC wall-clock; the backtest-replay harness injects a fixed
+        # post-OOS instant so staleness / exit-elapsed / daily-loss reckon
+        # against historical timestamps. Default preserves prior behavior
+        # exactly (zero production change).
+        self._now = now_func if now_func is not None else (
+            lambda: datetime.now(timezone.utc)
+        )
 
     # ---- DB access ----
 
@@ -207,7 +247,9 @@ class FundingExecutor:
             cur.execute("""
                 SELECT a.asset, a.timestamp, a.datetime, a.alerted_at,
                        a.p_profitable, a.gate_threshold,
-                       s.hold_days
+                       s.hold_days,
+                       s.ann_rate, s.pct_positive,
+                       s.min_funding_ann, s.min_pct_positive
                 FROM funding_alerts a
                 LEFT JOIN funding_signals s
                   ON s.asset = a.asset AND s.timestamp = a.timestamp
@@ -239,6 +281,13 @@ class FundingExecutor:
                 "p_profitable":   float(r[4]),
                 "gate_threshold": float(r[5]),
                 "hold_days":      effective_hold,
+                # Cycle 53 D8b config-gate inputs (JOIN-resolved; None on miss
+                # or pre-fix rows lacking min_pct_positive -> treated as
+                # config-not-verifiable by apply_risk_checks).
+                "ann_rate":         (float(r[7]) if r[7] is not None else None),
+                "pct_positive":     (float(r[8]) if r[8] is not None else None),
+                "min_funding_ann":  (float(r[9]) if r[9] is not None else None),
+                "min_pct_positive": (float(r[10]) if r[10] is not None else None),
             })
         return out
 
@@ -293,7 +342,7 @@ class FundingExecutor:
         """Absolute USD value of net_pnl losses booked TODAY (UTC). Positive
         return value = "we have already lost this much today" so the
         daily-loss circuit-breaker check can compare against max_daily_loss_usd."""
-        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_utc = self._now().strftime("%Y-%m-%d")
         owns = conn is None
         if owns:
             conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
@@ -358,7 +407,7 @@ class FundingExecutor:
     def apply_risk_checks(self, alert: dict,
                           conn: sqlite3.Connection | None = None) -> RiskChecks:
         """Evaluate all 10 checks (9 risk + 1 data-availability) for the alert."""
-        now = datetime.now(timezone.utc)
+        now = self._now()
         alerted_at = datetime.fromisoformat(alert["alerted_at"])
         age_seconds = (now - alerted_at).total_seconds()
 
@@ -394,6 +443,25 @@ class FundingExecutor:
         hold_days_value = alert.get("hold_days")
         hold_days_known = hold_days_value is not None
 
+        # Cycle 53 D8b: config-gate (11th check). Re-derive atlas Exp 13's
+        # Condition 1 + 2 from JOIN-resolved funding_signals fields:
+        #   ann_rate >= min_funding_ann  AND  pct_positive >= min_pct_positive
+        # If enforcement is off (backtest baseline only), the check passes
+        # trivially. If any field is missing (JOIN miss / pre-fix row without
+        # min_pct_positive), the config cannot be verified -> NOT met -> skip,
+        # so no real money rides on an unverifiable strategy definition.
+        cfg_ann = alert.get("ann_rate")
+        cfg_pct = alert.get("pct_positive")
+        cfg_min_ann = alert.get("min_funding_ann")
+        cfg_min_pct = alert.get("min_pct_positive")
+        if not self.enforce_config_gate:
+            config_thresholds_met = True
+        elif None in (cfg_ann, cfg_pct, cfg_min_ann, cfg_min_pct):
+            config_thresholds_met = False
+        else:
+            config_thresholds_met = (cfg_ann >= cfg_min_ann
+                                     and cfg_pct >= cfg_min_pct)
+
         return RiskChecks(
             signal_age_seconds=age_seconds,
             signal_age_ok=signal_age_ok,
@@ -411,6 +479,11 @@ class FundingExecutor:
             min_p_above_gate=min_gap,
             hold_days_known=hold_days_known,
             hold_days_value=int(hold_days_value) if hold_days_known else None,
+            config_thresholds_met=config_thresholds_met,
+            config_ann_rate=cfg_ann,
+            config_pct_positive=cfg_pct,
+            config_min_funding_ann=cfg_min_ann,
+            config_min_pct_positive=cfg_min_pct,
         )
 
     # ---- Decision construction ----
@@ -423,8 +496,7 @@ class FundingExecutor:
             for forensic context).
           - If JOIN missed and no override, write NULL.
         """
-        now_iso = (datetime.now(timezone.utc)
-                            .strftime("%Y-%m-%dT%H:%M:%S+00:00"))
+        now_iso = self._now().strftime("%Y-%m-%dT%H:%M:%S+00:00")
         if risks.all_ok():
             decision = "enter"
             skip_reason = None
@@ -464,6 +536,19 @@ class FundingExecutor:
                 )
             if not risks.hold_days_known:
                 reasons.append("hold_days_unknown")
+            if not risks.config_thresholds_met:
+                if None in (risks.config_ann_rate, risks.config_pct_positive,
+                            risks.config_min_funding_ann,
+                            risks.config_min_pct_positive):
+                    reasons.append("config_thresholds_unknown")
+                else:
+                    reasons.append(
+                        f"config_thresholds_not_met "
+                        f"(ann_rate={risks.config_ann_rate:.1f} vs "
+                        f"min {risks.config_min_funding_ann:g}; "
+                        f"pct_pos={risks.config_pct_positive:.3f} vs "
+                        f"min {risks.config_min_pct_positive:.2f})"
+                    )
             skip_reason = "; ".join(reasons) if reasons else "all_ok_unexpectedly"
             size = 0.0
             direction = None
@@ -549,7 +634,7 @@ class FundingExecutor:
         signal_ts = int(pos["signal_timestamp"])
         hold_days = int(pos["hold_days"])
         target_exit_ts = signal_ts + hold_days * MS_PER_DAY
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_ms = int(self._now().timestamp() * 1000)
         if now_ms < target_exit_ts:
             return None  # still holding
 
@@ -576,8 +661,7 @@ class FundingExecutor:
 
         exit_dt = datetime.fromtimestamp(target_exit_ts / 1000, timezone.utc)
         exit_datetime = exit_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
-        exit_decided_at = (datetime.now(timezone.utc)
-                                    .strftime("%Y-%m-%dT%H:%M:%S+00:00"))
+        exit_decided_at = self._now().strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
         return {
             "asset":                pos["asset"],
@@ -688,7 +772,7 @@ class FundingExecutor:
                     still_holding += 1
                     target_ts = (int(pos["signal_timestamp"])
                                  + (pos["hold_days"] or 0) * MS_PER_DAY)
-                    remaining_s = (target_ts - int(datetime.now(timezone.utc)
+                    remaining_s = (target_ts - int(self._now()
                                                      .timestamp() * 1000)) / 1000
                     print(
                         f"  {pos['asset']:<6} entry={pos['signal_datetime'][:16]} "
