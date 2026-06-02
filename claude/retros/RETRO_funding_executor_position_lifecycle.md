@@ -7,7 +7,7 @@
 exit-reconcile end-to-end; safety-belt grep clean; arithmetic
 hand-verified to 0.00e+00 delta on real Binance funding data.
 **Predecessor:** Cycle 51 (`0a2476a` + `0d902d7` + `4da4ff2`).
-**Commit:** `<CYCLE_52_HASH>`
+**Commit:** `67157a5`
 
 ---
 
