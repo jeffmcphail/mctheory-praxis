@@ -135,7 +135,8 @@ DDL = {
             intended_direction TEXT, intended_size_usd REAL,
             p_profitable REAL NOT NULL, gate_threshold REAL NOT NULL,
             risk_checks_json TEXT NOT NULL, executor_version TEXT NOT NULL,
-            hold_days INTEGER, PRIMARY KEY (asset, signal_timestamp))""",
+            hold_days INTEGER, session_id TEXT NOT NULL,
+            PRIMARY KEY (asset, signal_timestamp))""",
     "paper_position_exits": """
         CREATE TABLE paper_position_exits (
             asset TEXT NOT NULL, signal_timestamp INTEGER NOT NULL,
@@ -145,7 +146,7 @@ DDL = {
             funding_payments_usd REAL NOT NULL, tc_entry_usd REAL NOT NULL,
             tc_exit_usd REAL NOT NULL, net_pnl_usd REAL NOT NULL,
             notional_usd REAL NOT NULL, direction TEXT NOT NULL,
-            executor_version TEXT NOT NULL,
+            executor_version TEXT NOT NULL, session_id TEXT NOT NULL,
             PRIMARY KEY (asset, signal_timestamp))""",
 }
 
@@ -322,9 +323,11 @@ def build_harness(db_path: Path, preds: dict, funding_series: dict,
     return n_alerts
 
 
-def run_executor(db_path: Path, enforce_config_gate: bool) -> dict:
+def run_executor(db_path: Path, enforce_config_gate: bool,
+                 session_id: str = "cycle53-replay") -> dict:
     ex = FundingExecutor(db_path=db_path, defaults_override=RELAXED,
                          now_func=lambda: REPLAY_NOW,
+                         session_id=session_id,
                          enforce_config_gate=enforce_config_gate)
     return ex.run_once()
 

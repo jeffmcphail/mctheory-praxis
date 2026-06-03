@@ -107,6 +107,10 @@ from typing import Any
 from dotenv import load_dotenv
 load_dotenv()
 
+# Cycle 54: ambient-session helpers for the scheduled + CLI entry points
+# (main() opens a session so every booked row is attributable).
+from engines.trading_session import create_session, close_session
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -117,7 +121,7 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "crypto_data.db"
 
 # Blame trail: each cycle bumps this so paper_trades.executor_version and
 # paper_position_exits.executor_version identify which build wrote them.
-EXECUTOR_VERSION = "cycle52-lifecycle"
+EXECUTOR_VERSION = "cycle54-sessions"
 
 # Exp 13 position direction (long spot + short perp, delta-neutral carry).
 EXP13_DIRECTION = "long_spot_short_perp"
@@ -204,6 +208,7 @@ class FundingExecutor:
                  defaults_override: dict | None = None,
                  force_hold_days: int | None = None,
                  now_func=None,
+                 session_id: str | None = None,
                  enforce_config_gate: bool = True):
         self.db_path = Path(db_path)
         self.config = dict(DEFAULTS)
@@ -232,6 +237,13 @@ class FundingExecutor:
         self._now = now_func if now_func is not None else (
             lambda: datetime.now(timezone.utc)
         )
+        # Cycle 54: session attribution. Every booked paper row carries this
+        # session_id (schema contract: NOT NULL going forward). Live, replay,
+        # scheduled, and CLI runs all supply one; the ambient-session bootstrap
+        # in main() covers scheduled + CLI. run_once() refuses to write with
+        # session_id=None (fail-loud) -- INSERT OR IGNORE would otherwise
+        # SILENTLY drop the NOT NULL violation and lose the row.
+        self.session_id = session_id
 
     # ---- DB access ----
 
@@ -568,6 +580,7 @@ class FundingExecutor:
             "risk_checks_json":         json.dumps(risks.to_json_dict()),
             "executor_version":         EXECUTOR_VERSION,
             "hold_days":                risks.hold_days_value,
+            "session_id":               self.session_id,
         }
 
     # ---- Persistence ----
@@ -587,8 +600,8 @@ class FundingExecutor:
                 " funding_alert_alerted_at, decided_at, decision, "
                 " skip_reason, intended_direction, intended_size_usd, "
                 " p_profitable, gate_threshold, risk_checks_json, "
-                " executor_version, hold_days) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " executor_version, hold_days, session_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     decision["asset"],
                     decision["signal_timestamp"],
@@ -604,6 +617,7 @@ class FundingExecutor:
                     decision["risk_checks_json"],
                     decision["executor_version"],
                     decision["hold_days"],
+                    decision["session_id"],
                 ),
             )
             inserted = (cur.rowcount == 1)
@@ -679,6 +693,7 @@ class FundingExecutor:
             "notional_usd":         notional_usd,
             "direction":            pos["intended_direction"],
             "executor_version":     EXECUTOR_VERSION,
+            "session_id":           self.session_id,
             # Echo for log display, not persisted:
             "_events":              [(int(ts), float(rate) if rate is not None else None)
                                      for ts, rate in events],
@@ -693,8 +708,8 @@ class FundingExecutor:
             "(asset, signal_timestamp, entry_decided_at, exit_decided_at, "
             " exit_timestamp, exit_datetime, hold_days, funding_events_count, "
             " funding_payments_usd, tc_entry_usd, tc_exit_usd, net_pnl_usd, "
-            " notional_usd, direction, executor_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " notional_usd, direction, executor_version, session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 exit_row["asset"],
                 exit_row["signal_timestamp"],
@@ -711,6 +726,7 @@ class FundingExecutor:
                 exit_row["notional_usd"],
                 exit_row["direction"],
                 exit_row["executor_version"],
+                exit_row["session_id"],
             ),
         )
         return cur.rowcount == 1
@@ -720,6 +736,17 @@ class FundingExecutor:
     def run_once(self) -> dict:
         """Process pending alerts + exit-reconcile open positions.
         Returns a summary dict for logging."""
+        # Cycle 54 schema contract: paper rows carry a NOT NULL session_id, and
+        # persist()/persist_exit() use INSERT OR IGNORE -- which would SILENTLY
+        # drop a NOT NULL violation rather than raise. Guard here and fail loud
+        # if no session was supplied (main()'s ambient bootstrap supplies one
+        # for scheduled + CLI runs; the GUI controllers supply theirs).
+        if self.session_id is None:
+            raise ValueError(
+                "FundingExecutor.run_once() requires a session_id; got None. "
+                "Construct with session_id=... (GUI/replay) or invoke via "
+                "engines.funding_executor.main(), which opens an ambient session."
+            )
         print(f"  db: {self.db_path}")
         print(f"  executor_version: {EXECUTOR_VERSION}")
         if self.kill_switch_on:
@@ -842,6 +869,12 @@ def main() -> int:
                         help="Cycle 52: override JOIN-resolved hold_days "
                              "with a fixed N. Used by Cycle 53 backtest "
                              "sweeps; production runs leave this unset.")
+    parser.add_argument("--trigger-source", default="cli",
+                        choices=["cli", "scheduled"],
+                        help="Cycle 54: who invoked this run. The scheduled bat "
+                             "passes 'scheduled'; interactive/CLI runs default "
+                             "to 'cli'. Recorded on the ambient trading_sessions "
+                             "row for attribution.")
     args = parser.parse_args()
 
     overrides = {}
@@ -855,14 +888,42 @@ def main() -> int:
         overrides["min_p_above_gate"] = args.min_p_above_gate
 
     print("=" * 70)
-    print(" Engine 7 paper-trading executor (Cycle 52 lifecycle)")
+    print(" Engine 7 paper-trading executor (Cycle 54 sessions)")
     print("=" * 70)
     executor = FundingExecutor(
         db_path=args.db,
         defaults_override=overrides or None,
         force_hold_days=args.force_hold_days,
     )
-    summary = executor.run_once()
+    # Cycle 54: open an ambient session so every booked row is attributable
+    # (schema contract: paper_trades/paper_position_exits.session_id NOT NULL).
+    # The scheduled bat + CLI both flow through here. If session creation fails
+    # the exception propagates -> non-zero exit (fail loud; never book against a
+    # missing session). Live trigger -> mode='paper_live'.
+    config_snapshot = {
+        **executor.config,
+        "enforce_config_gate": executor.enforce_config_gate,
+        "kill_switch_on": executor.kill_switch_on,
+        "force_hold_days": executor.force_hold_days,
+    }
+    session_id = create_session(
+        db_path=args.db,
+        mode="paper_live",
+        trigger_source=args.trigger_source,
+        config_json=json.dumps(config_snapshot, sort_keys=True),
+        executor_version=EXECUTOR_VERSION,
+        status="running",
+    )
+    executor.session_id = session_id
+    print(f"  session_id: {session_id} "
+          f"(trigger_source={args.trigger_source}, mode=paper_live)")
+    try:
+        summary = executor.run_once()
+    except Exception:
+        close_session(args.db, session_id, status="error")
+        raise
+    close_session(args.db, session_id, status="completed",
+                  pnl_rollup_json=json.dumps(summary, sort_keys=True))
     print()
     print(f"  Entry:  processed={summary['processed']}  "
           f"entered={summary['entered']}  "
