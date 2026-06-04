@@ -202,6 +202,46 @@ def health_ep():
     return collector_health_snapshot(MAIN_DB)
 
 
+def _read_global(sql: str, limit: int) -> list[dict]:
+    """Read-only query against MAIN for GLOBAL (non-session-scoped) monitor
+    tables. Tolerates a missing table -> []. This is reporting over rows the
+    monitor wrote; the backend computes no signals here."""
+    conn = sqlite3.connect(f"file:{MAIN_DB}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute(sql, (limit,)).fetchall()]
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+
+
+@app.get("/api/signals")
+def signals_ep(limit: int = 60):
+    """Recent `funding_signals` — the monitor's per-window, per-asset output.
+    GLOBAL (funding_signals has no session_id): this powers the live-monitor
+    regime view (how close each asset is to the gate + whether its funding is
+    favorable), independent of any session. Ordered newest-first so the client
+    can take the latest row per asset plus a little history. Read-only;
+    pre-Cycle-53 rows may carry NULL `min_pct_positive` (render as em-dash)."""
+    return _read_global(
+        "SELECT asset, timestamp, datetime, p_profitable, above_gate, "
+        "gate_threshold, ann_rate, pct_positive, hold_days, min_funding_ann, "
+        "min_pct_positive FROM funding_signals "
+        "ORDER BY timestamp DESC, asset LIMIT ?", limit)
+
+
+@app.get("/api/alerts")
+def alerts_ep(limit: int = 60):
+    """The `funding_alerts` ledger (one row per fired alert) — GLOBAL,
+    read-only. Empty in a sit-out regime; an empty list is itself the
+    sit-out signal."""
+    return _read_global(
+        "SELECT asset, timestamp, datetime, alerted_at, p_profitable, "
+        "gate_threshold, monitor_version FROM funding_alerts "
+        "ORDER BY timestamp DESC, asset LIMIT ?", limit)
+
+
 @app.websocket("/api/ws/sessions/{sid}")
 async def ws_session(ws: WebSocket, sid: str):
     await ws.accept()
