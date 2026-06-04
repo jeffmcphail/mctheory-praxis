@@ -11,9 +11,9 @@ JS; it fetches + renders).
 | SHA | What |
 |---|---|
 | `c8c70c5` … `33facdd` | Cycle 54 backend foundation (predecessor) |
-| `PENDING_54B_SHA` | Cycle 54b: signal/alert read endpoints + `gui/funding_studio/frontend` |
+| `e7722b2` | Cycle 54b: signal/alert read endpoints + `gui/funding_studio/frontend` |
 
-(`PENDING_54B_SHA` filled by the SHA-insertion follow-up. Commits stay local.)
+(Commits stay local — Jeff pushes to origin at the next session start.)
 
 ## RECON (R0b–R4b)
 
