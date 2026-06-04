@@ -11,9 +11,7 @@ reimplements trade logic. Frontend (54b/54c) and real money stay queued.
 |---|---|
 | `c8c70c5` | Cycle 54 prep: quarantine stale `src/praxis/gui/mcb_studio` duplicate (R0) |
 | `4f3e312` | Cycle 54 foundation: first-class trading sessions + executor `session_id` threading (Step 1) |
-| `PENDING_BACKEND_SHA` | Cycle 54 backend: shared `funding_replay` engine + `meta.py` health factor-out + `gui/funding_studio` backend (Steps 2-4) |
-
-(`PENDING_BACKEND_SHA` filled by the SHA-insertion follow-up.)
+| `243414f` | Cycle 54 backend: shared `funding_replay` engine + `meta.py` health factor-out + `gui/funding_studio` backend (Steps 2-4) |
 
 ## RECON decisions (R0–R5)
 
