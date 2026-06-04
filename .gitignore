@@ -150,3 +150,11 @@ claude/scratch/
 # cached parquets + scripts/cycle53_backtest_replay.py. The committed
 # SUMMARY.md + decomposition.json are the auditable record.
 outputs/cycle53_backtest_replay/*.db
+
+# Cycle 54 Funding Studio replay harness DBs: reproducible scratch, one per
+# replay kickoff (engines/funding_replay.py). The persisted pnl_rollup_json on
+# the trading_sessions row is the durable headline.
+outputs/funding_studio_sessions/
+
+# Standing rule: never commit SQLite DB files.
+*.db

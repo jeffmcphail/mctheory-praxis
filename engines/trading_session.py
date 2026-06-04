@@ -196,20 +196,29 @@ def list_sessions(db_path: Path | str = DB_PATH, *,
         conn.close()
 
 
-def mark_interrupted_running_sessions(db_path: Path | str = DB_PATH,
+def mark_interrupted_running_sessions(db_path: Path | str = DB_PATH, *,
+                                      trigger_source: str = "gui",
                                       now_iso: str | None = None) -> int:
     """On backend startup, any session still 'running' was orphaned when the
     prior process died (the in-memory task registry did not survive). Mark
     them 'interrupted' rather than trusting a dead process is alive
     (freshness-as-verification; the long-lived-collector lesson). No
-    auto-resume this cycle. Returns the number of rows updated."""
+    auto-resume this cycle. Returns the number of rows updated.
+
+    SCOPED to trigger_source (default 'gui'): a caller must sweep only sessions
+    it owns. The scheduled task also creates 'running' rows (for the ~1s its
+    process is mid-run); the GUI backend did not spawn those, cannot know their
+    state, and must NOT mark them interrupted -- that would be a wrong-owner
+    action and a race against a live scheduled fire. Cleanup of crashed
+    *scheduled* sessions is a separate concern owned by the scheduled path.
+    """
     now = now_iso or _utc_now_iso()
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.execute(
             "UPDATE trading_sessions SET status = 'interrupted', ended_at = ? "
-            "WHERE status = 'running'",
-            (now,),
+            "WHERE status = 'running' AND trigger_source = ?",
+            (now, trigger_source),
         )
         conn.commit()
         return cur.rowcount

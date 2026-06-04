@@ -188,137 +188,96 @@ def register(mcp, db_path: Path, sidecar_dbs: dict = None):
                 response, including the new live_collector and
                 smart_money DBs (Cycle 14).
         """
-        # Primary DB monitoring config (Cycle 11 + Cycle 14 funding fix)
-        #
-        # trades                -- PraxisTradesCollector, continuous 30s
-        #                          (now 3550s windowed per Cycle 10
-        #                          patch matching OrderBook).
-        # order_book_snapshots  -- PraxisOrderBookCollector, 10s on-hour,
-        #                          3550s windowed (Cycle 8 fix). 65 min
-        #                          tolerance covers the worst-case
-        #                          sampling moment plus inter-window gap.
-        # ohlcv_1m              -- PraxisCrypto1mCollector, 6h batch.
-        #                          7h tolerance covers batch + slack.
-        # funding_rates         -- PraxisFundingCollector. Cadence in DB
-        #                          is 8h between funding events (Binance
-        #                          schedule). Scheduled collector runs at
-        #                          00:05/08:05/16:05 local Toronto time.
-        #                          Worst case gap between (now) and
-        #                          (latest data point in DB) is roughly
-        #                          one full funding cycle plus collector
-        #                          gap, which can approach 16h depending
-        #                          on which run last touched the table.
-        #                          Cycle 14 widened from 9h to 17h to
-        #                          stop legitimate cadence-aligned data
-        #                          from being flagged stale.
-        # funding_signals       -- PraxisFundingMonitor (Cycle 41). Same
-        #                          UTC funding-event timestamp as
-        #                          funding_rates (records the funding
-        #                          window the inference was made against).
-        #                          Monitor runs at 00:15/08:15/16:15 LOCAL,
-        #                          ~10 min after the collector. Identical
-        #                          staleness dynamics to funding_rates;
-        #                          matched at 17h for the same reason.
-        # funding_alerts        -- PraxisFundingMonitor's alert ledger
-        #                          (Cycle 43a; Cycle 45 44k renamed the env
-        #                          var). One row per (asset, funding-window)
-        #                          when a signal crosses live P>0.70 gate
-        #                          AND the ntfy.sh POST succeeds. Populates
-        #                          sparsely -- can be empty for long stretches
-        #                          in bear/sit-out regimes. Same UTC-funding-
-        #                          event timestamp dynamics as funding_signals;
-        #                          matched at 17h. Empty-table handling:
-        #                          _collect_db_health surfaces
-        #                          row_count=0, error="empty table" rather
-        #                          than is_stale=True, so sparse populating
-        #                          doesn't trigger false stale alarms.
-        # fear_greed            -- PraxisFearGreedCollector, daily at
-        #                          00:30 local (Cycle 10). 26h tolerance.
-        # ohlcv_daily           -- PraxisOhlcvDailyCollector, daily at
-        #                          00:15 local (Cycle 10). 26h tolerance.
-        # ohlcv_4h              -- PraxisOhlcv4hCollector, daily at
-        #                          00:20 local (Cycle 10). 26h tolerance.
-        # onchain_btc           -- Cycle 17: monitored via `date` column
-        #                          (YYYY-MM-DD, UTC midnight). 48h
-        #                          threshold matches daily-publish cadence
-        #                          plus one missed run of slack. No
-        #                          scheduled collector currently registered;
-        #                          will alarm is_stale=true until one lands.
-        # Values are EITHER an int (threshold_seconds; uses `timestamp`
-        # column at ms precision -- all int-valued entries are ms
-        # post-migration program; see SCHEMA_MIGRATION_PLAN.md) OR a
-        # dict spec:
-        #   {"threshold_seconds": int,
-        #    "timestamp_column": str,
-        #    "timestamp_format": "ms"|"s"|"iso_text"|"date"}
-        # The "date" format treats the column as YYYY-MM-DD UTC midnight.
-        primary_monitored = {
-            "trades": 120,
-            "order_book_snapshots": 3900,
-            "ohlcv_1m": 25200,
-            "funding_rates": 61200,    # Cycle 14: 17h (was 32400 / 9h)
-            "funding_signals": 61200,  # Cycle 42a: matches funding_rates (same UTC-funding-event timestamp dynamics; monitor writes at 00:15/08:15/16:15 LOCAL)
-            "funding_alerts":  61200,  # Cycle 47: matches funding_signals; populates sparsely (only on above_gate=1 firings); empty-table reports error not is_stale
-            "paper_trades": {          # Cycle 51 PraxisFundingExecutor writes; Cycle 52 monitoring add
-                "threshold_seconds": 61200,    # 17h, matches funding_alerts (same UTC-funding-event cadence; populates downstream from above_gate=1 firings)
-                "timestamp_column": "signal_timestamp",
-                "timestamp_format": "ms",
-            },
-            "fear_greed": 93600,       # 24h + 2h slack
-            "ohlcv_daily": 93600,      # 24h + 2h slack
-            "ohlcv_4h": 93600,         # 24h + 2h slack
-            "onchain_btc": {           # Cycle 17
-                "threshold_seconds": 172800,   # 48h
-                "timestamp_column": "date",
-                "timestamp_format": "date",
-            },
-            "market_data": 90000,      # Cycle 19: 25h (24h + 1h slack)
-            "info_bars": {             # Cycle 34: PraxisInfoBarsCollector
-                "threshold_seconds": 1800,     # 30 min vs 5-min cadence
-                "timestamp_column": "end_timestamp",
-                "timestamp_format": "ms",
-            },
-        }
-
-        result = {
-            "checked_at_utc": datetime.now(tz=timezone.utc).isoformat(),
-            "tables": {},
-            "unmonitored": [],
-            "databases": {},
-        }
-
-        # Primary DB
-        primary_status = _collect_db_health(
-            db_path=db_path,
-            monitored_tables=primary_monitored,
-            timestamp_format="ms",   # all primary-DB int-valued entries are ms post-migration program (Cycles 17-26)
-        )
-        result["tables"] = primary_status["tables"]
-        result["unmonitored"] = primary_status["unmonitored"]
-        result["databases"]["crypto_data"] = {
-            "path": str(db_path),
-            "tables": primary_status["tables"],
-            "unmonitored": primary_status["unmonitored"],
-        }
-
-        # Sidecar DBs (Cycle 14)
-        for name, cfg in sidecar_dbs.items():
-            scfg_path = cfg["path"]
-            scfg_monitored = cfg.get("monitored", {})
-            sidecar_status = _collect_db_health_sidecar(
-                db_path=scfg_path,
-                monitored_spec=scfg_monitored,
-            )
-            result["databases"][name] = {
-                "path": str(scfg_path),
-                "tables": sidecar_status["tables"],
-                "unmonitored": sidecar_status["unmonitored"],
-            }
-
-        return result
+        # Thresholds + per-DB assembly now live in collector_health_snapshot()
+        # (module-level; the SINGLE source of staleness thresholds, shared with
+        # the GUI /api/health). Output is unchanged from the in-closure version.
+        return collector_health_snapshot(db_path, sidecar_dbs)
 
 
 # ---- helpers below the register() closure ----
+
+
+def collector_health_snapshot(db_path: Path,
+                              sidecar_dbs: dict | None = None) -> dict:
+    """Snapshot collector health across the primary DB + sidecars.
+
+    Module-level so it is the SINGLE source of the per-table staleness
+    thresholds, shared by the get_collector_health MCP tool AND the GUI's
+    /api/health (gui/funding_studio). Returns the documented shape
+    (checked_at_utc / tables / unmonitored / databases); output is identical
+    to the pre-Cycle-54 in-closure implementation.
+
+    Each monitored table's threshold matches its collector's natural cadence.
+    A value is EITHER an int (threshold_seconds; `timestamp` column, ms) OR a
+    dict {"threshold_seconds", "timestamp_column", "timestamp_format"} (Cycle
+    17). Tables with no scheduled collector are reported under `unmonitored`.
+    """
+    sidecar_dbs = sidecar_dbs or {}
+    primary_monitored = {
+        "trades": 120,
+        "order_book_snapshots": 3900,
+        "ohlcv_1m": 25200,
+        "funding_rates": 61200,    # Cycle 14: 17h (was 32400 / 9h)
+        "funding_signals": 61200,  # Cycle 42a: matches funding_rates (same UTC-funding-event timestamp dynamics; monitor writes at 00:15/08:15/16:15 LOCAL)
+        "funding_alerts":  61200,  # Cycle 47: matches funding_signals; populates sparsely (only on above_gate=1 firings); empty-table reports error not is_stale
+        "paper_trades": {          # Cycle 51 PraxisFundingExecutor writes; Cycle 52 monitoring add
+            "threshold_seconds": 61200,    # 17h, matches funding_alerts (same UTC-funding-event cadence; populates downstream from above_gate=1 firings)
+            "timestamp_column": "signal_timestamp",
+            "timestamp_format": "ms",
+        },
+        "fear_greed": 93600,       # 24h + 2h slack
+        "ohlcv_daily": 93600,      # 24h + 2h slack
+        "ohlcv_4h": 93600,         # 24h + 2h slack
+        "onchain_btc": {           # Cycle 17
+            "threshold_seconds": 172800,   # 48h
+            "timestamp_column": "date",
+            "timestamp_format": "date",
+        },
+        "market_data": 90000,      # Cycle 19: 25h (24h + 1h slack)
+        "info_bars": {             # Cycle 34: PraxisInfoBarsCollector
+            "threshold_seconds": 1800,     # 30 min vs 5-min cadence
+            "timestamp_column": "end_timestamp",
+            "timestamp_format": "ms",
+        },
+    }
+
+    result = {
+        "checked_at_utc": datetime.now(tz=timezone.utc).isoformat(),
+        "tables": {},
+        "unmonitored": [],
+        "databases": {},
+    }
+
+    # Primary DB
+    primary_status = _collect_db_health(
+        db_path=db_path,
+        monitored_tables=primary_monitored,
+        timestamp_format="ms",   # all primary-DB int-valued entries are ms post-migration program (Cycles 17-26)
+    )
+    result["tables"] = primary_status["tables"]
+    result["unmonitored"] = primary_status["unmonitored"]
+    result["databases"]["crypto_data"] = {
+        "path": str(db_path),
+        "tables": primary_status["tables"],
+        "unmonitored": primary_status["unmonitored"],
+    }
+
+    # Sidecar DBs (Cycle 14)
+    for name, cfg in sidecar_dbs.items():
+        scfg_path = cfg["path"]
+        scfg_monitored = cfg.get("monitored", {})
+        sidecar_status = _collect_db_health_sidecar(
+            db_path=scfg_path,
+            monitored_spec=scfg_monitored,
+        )
+        result["databases"][name] = {
+            "path": str(scfg_path),
+            "tables": sidecar_status["tables"],
+            "unmonitored": sidecar_status["unmonitored"],
+        }
+
+    return result
+
 
 def _collect_db_health(*, db_path: Path, monitored_tables: dict,
                        timestamp_format: str) -> dict:
