@@ -93,6 +93,35 @@ def compute_rollup(db_path: Path | str, session_id: str) -> dict:
         conn.close()
 
 
+def compute_equity_series(db_path: Path | str, session_id: str) -> list[dict]:
+    """Realized-P&L equity curve: cumulative net_pnl_usd stepped at each exit
+    timestamp. The executor books P&L only at exit (no intra-hold MTM), so the
+    curve is a step function. Grouped by exit_timestamp so points are unique on
+    the time axis (multiple assets can exit the same instant); the terminal
+    cum_pnl_usd ties out to compute_rollup's net_pnl_usd. Read-only -- reporting
+    over booked exits, not trade logic."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT exit_timestamp, MIN(exit_datetime) AS dt, "
+            "       SUM(net_pnl_usd) AS step, COUNT(*) AS n "
+            "FROM paper_position_exits WHERE session_id=? "
+            "GROUP BY exit_timestamp ORDER BY exit_timestamp", (session_id,)).fetchall()
+    finally:
+        conn.close()
+    series, cum = [], 0.0
+    for ts, dt, step, n in rows:
+        cum += step
+        series.append({
+            "exit_timestamp": int(ts),
+            "exit_datetime": dt,
+            "exits_at_step": int(n),
+            "step_pnl_usd": round(step, 6),
+            "cum_pnl_usd": round(cum, 6),
+        })
+    return series
+
+
 class RunningSession:
     def __init__(self, session_id: str, mode: str):
         self.id = session_id

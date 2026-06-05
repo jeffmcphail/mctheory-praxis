@@ -38,7 +38,7 @@ from engines.trading_session import (
 )
 from servers.praxis_mcp.tools.meta import collector_health_snapshot
 
-from controller import SessionController, compute_rollup
+from controller import SessionController, compute_rollup, compute_equity_series
 
 app = FastAPI(title="Funding Studio (Engine 7 control)", version="0.1.0")
 app.add_middleware(
@@ -193,6 +193,15 @@ def positions_ep(sid: str):
         "  WHERE x.asset=p.asset AND x.signal_timestamp=p.signal_timestamp) "
         "ORDER BY p.signal_timestamp",
         (sid,))
+
+
+@app.get("/api/sessions/{sid}/equity")
+def equity_ep(sid: str):
+    """Realized-P&L equity curve: cumulative net_pnl_usd stepped at each exit
+    (mode-aware: replay -> harness DB, live -> MAIN). The terminal point ties
+    out to GET /{id}'s rollup net_pnl_usd -- the internal-consistency check."""
+    row = _require(sid)
+    return compute_equity_series(_session_db(row), sid)
 
 
 @app.get("/api/health")

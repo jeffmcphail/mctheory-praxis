@@ -44,7 +44,7 @@ export default function SessionPanel({ sessionId, onStop }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <SessionHeader session={detail?.session} lastState={lastState} connected={connected} onStop={onStop} />
-      <RollupBar rollup={detail?.rollup} />
+      <RollupBar rollup={detail?.rollup} session={detail?.session} />
 
       <Panel title={`Open positions (${positions.length})`}>
         <DataTable

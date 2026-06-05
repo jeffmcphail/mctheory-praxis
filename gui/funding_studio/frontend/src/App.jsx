@@ -1,14 +1,15 @@
 /**
- * App.jsx — Funding Studio (Engine 7 control), Cycle 54b.
- * Two views: Control (start + list sessions) and Monitor (always-on regime
- * panel + per-session panel). The frontend only calls the backend API; it
- * holds no trade logic.
+ * App.jsx — Funding Studio (Engine 7 control). Cycle 54b: Control + Monitor.
+ * Cycle 54c: + Analyze view (analytical layer) + an always-on collector-health
+ * header strip. The frontend only calls the backend API; it holds no trade logic.
  */
 import { useState, useEffect, useCallback } from 'react'
 import { getJSON, postJSON } from './api.js'
 import { C } from './shared/styles.js'
 import Control from './views/Control.jsx'
 import Monitor from './views/Monitor.jsx'
+import Analyze from './views/Analyze.jsx'
+import CollectorHealth from './components/CollectorHealth.jsx'
 
 export default function App() {
   const [view, setView] = useState('control')
@@ -71,13 +72,14 @@ export default function App() {
           <span style={{ color: C.muted, fontSize: 12, fontWeight: 400 }}> · Engine 7 control</span>
         </span>
         <div style={{ display: 'flex', gap: 4, marginLeft: 12 }}>
-          {[['control', '▶ Control'], ['monitor', '◉ Monitor']].map(([id, label]) => (
+          {[['control', '▶ Control'], ['monitor', '◉ Monitor'], ['analyze', '▦ Analyze']].map(([id, label]) => (
             <button key={id} onClick={() => setView(id)} style={navBtn(view === id)}>{label}</button>
           ))}
         </div>
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: C.muted }}>
-          paper · backend :8002{health?.checked_at_utc ? ` · health ${String(health.checked_at_utc).slice(11, 19)}Z` : ''}
-        </span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontSize: 11, color: C.muted }}>paper · :8002</span>
+          <CollectorHealth health={health} />
+        </div>
       </div>
 
       {err && (
@@ -87,9 +89,9 @@ export default function App() {
       )}
 
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-        {view === 'control'
-          ? <Control sessions={sessions} onStart={startSession} onStop={stopSession} onOpen={openSession} />
-          : <Monitor signals={signals} alerts={alerts} sessionId={selectedId} onStop={stopSession} />}
+        {view === 'control' && <Control sessions={sessions} onStart={startSession} onStop={stopSession} onOpen={openSession} />}
+        {view === 'monitor' && <Monitor signals={signals} alerts={alerts} sessionId={selectedId} onStop={stopSession} />}
+        {view === 'analyze' && <Analyze sessions={sessions} />}
       </div>
     </div>
   )
