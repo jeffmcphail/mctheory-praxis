@@ -13,9 +13,9 @@ Analyze). Paper-first; frontend holds zero trade logic.
 |---|---|
 | `c8c70c5`…`33facdd` | Cycle 54 backend foundation |
 | `e7722b2`, `4ad6a2b` | Cycle 54b frontend (control + live monitor) |
-| `PENDING_54C_SHA` | Cycle 54c: equity endpoint + Analyze view + health strip |
+| `82a1461` | Cycle 54c: equity endpoint + Analyze view + health strip |
 
-(`PENDING_54C_SHA` filled by the SHA-insertion follow-up. Commits stay local.)
+(Commits stay local — Jeff pushes to origin at the next session start.)
 
 ## RECON (R0c–R5c)
 
