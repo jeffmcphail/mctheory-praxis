@@ -44,6 +44,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 load_dotenv()
 
+# Cycle 57: scope the funding_rates DB read to the SAME venue the executor
+# trades/settles on (single source of truth), so the monitor never blends
+# venues. Pre-Cycle-57 the read had no venue filter and drop_duplicates()
+# arbitrarily mixed binance+bybit rows (latent since Cycle 50 added bybit).
+from engines.funding_executor import EXECUTION_VENUE
+
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -168,9 +174,10 @@ def fetch_live_data(assets: list[str], lookback_days: int = LOOKBACK_DAYS,
                 cur = conn.cursor()
                 cur.execute(
                     "SELECT timestamp, funding_rate FROM funding_rates "
-                    "WHERE asset = ? AND timestamp >= ? AND timestamp <= ? "
+                    "WHERE asset = ? AND venue = ? "
+                    "AND timestamp >= ? AND timestamp <= ? "
                     "ORDER BY timestamp",
-                    (asset, since_ms, end_ms),
+                    (asset, EXECUTION_VENUE, since_ms, end_ms),
                 )
                 rows = cur.fetchall()
                 conn.close()
