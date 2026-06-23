@@ -5,6 +5,13 @@
 Jeff at the HARD PAUSE; the deployment-grade run is gated on that review + the
 §7 data-maturity precondition.
 
+**Amended Cycle 58b (2026-06-23 — still pre-registration; no fit, no results):**
+added the Deflated Sharpe Ratio multiple-testing haircut (§6.4 +
+`engines/infobar_lstm/deflated_sharpe.py`), restated the success criterion in
+DEFLATED terms (§6.3), added the Mechanism A-vs-B success lens (§0), and made the
+data-maturity regime wording operational (§7). These are all PRE-registration
+fixes — locked before any results exist.
+
 **Null hypothesis (the base case we must reject to deploy):**
 > H0 — "An info-bar directional model has **no durable edge net of realistic
 > spot cost, out-of-sample, across regimes.**"
@@ -15,6 +22,36 @@ bar for rejecting H0 is set deliberately high below.
 
 This protocol is the **judge**. This cycle builds and verifies the judge. The
 **subject** (data) must grow before the verdict means anything (§7).
+
+---
+
+## 0. The bet: Mechanism A vs Mechanism B (the success lens)
+
+atlas Exp 1 (SP500 pairs — the verified TC-bound anchor) pre-registered the
+dollar-bar revival hypothesis and decomposed it into two mechanisms. We adopt the
+same lens, because an info-bar directional model is the same bet in a new venue:
+
+- **Mechanism A — fewer trades → less total TC.** Moving from time bars to
+  information bars drops the bar count ~10–30×, so fewer bars → fewer position
+  changes → less cumulative transaction cost. This is **MECHANICAL and
+  RELIABLE. It is NOT the question.**
+- **Mechanism B — per-bar gross alpha rises via event concentration.** Event-time
+  sampling is meant to concentrate information so each bar carries more signal,
+  raising gross alpha **per bar**. This is **MAGNITUDE-UNCERTAIN, could go either
+  way. This is the entire bet.**
+
+Therefore: **SUCCESS = Mechanism B holds** — gross alpha per bar survives
+event-time sampling by enough to clear the (now-lower) cost. **Turnover reduction
+(A) is NECESSARY-NOT-SUFFICIENT**: cheaper churn is not an edge.
+
+Run A already showed A alone does not carry it: the momentum/MA baseline still
+churned **~40 legs/day on dollar bars** (gross_cum −0.045 → net −4.4 @40 bps).
+A helps; it does not decide.
+
+**Reporting requirement (binds §6.3):** the validation reports the
+**gross-alpha-per-bar** finding EXPLICITLY (gross Sharpe and gross return per
+bar, with turnover separately), so a Mechanism-A cost win can never be mistaken
+for a Mechanism-B edge. **Net Sharpe alone is insufficient evidence of an edge.**
 
 ---
 
@@ -87,8 +124,11 @@ space is fixed here so multiple-comparisons inflation is visible:
 - **Model HPs:** hidden∈{24,32,48}, layers∈{1,2}, seq_len∈{16,32}, dropout∈{0.2,
   0.3}, lr∈{1e-3,3e-4}. → **3·2·2·2·2 = 48**.
 - **Total candidate configs = 14 × 48 = 672.** Any reported OOS result must be
-  accompanied by "N of 672 configs tried" so the reader can deflate for
-  multiple comparisons.
+  accompanied by "N of 672 configs tried" so the reader can deflate for multiple
+  comparisons — formalized as the **Deflated Sharpe Ratio (§6.4)**. Nested
+  walk-forward fixes the tune-vs-evaluate leak; it does **not** fix the
+  **selection bias** of reporting the best-of-672 (the top config can clear a
+  threshold by luck), which is exactly what the DSR corrects.
 - **Tuning discipline:** if HPs are tuned, use **nested** walk-forward — tune on
   an inner walk-forward within each train fold, judge on the untouched outer
   test fold. No HP is ever chosen by looking at outer-test results.
@@ -118,22 +158,50 @@ space is fixed here so multiple-comparisons inflation is visible:
    up-window, and must not bleed in a down-window.
 
 ### 6.3 SUCCESS CRITERION — what would justify real capital (Run C)
-Deployment is justified **only if ALL hold** (pre-committed, strict):
-1. **Net-of-cost OOS Sharpe ≥ 1.0** at the **40 bps** RT baseline (not just 20).
+Deployment is justified **only if ALL hold** (pre-committed, strict). Judged on
+**DEFLATED, net-of-cost, OOS** numbers — raw Sharpe is never the headline:
+
+1. **Deflated Sharpe Ratio ≥ 0.95** (§6.4): ≥95% confidence the winning config's
+   true Sharpe is positive AFTER the 672-trial selection haircut, non-normality,
+   and finite sample length — computed on the daily OOS net returns at the
+   **40 bps** RT baseline.
 2. **Beats buy-and-hold's own Sharpe** in BOTH the up and the down sub-period
    (skill, not beta).
-3. **Beats the null-at-rate distribution** at p < 0.05 (above its 95th pct).
-4. **Cost headroom:** `gross_alpha > 2 × (TC × turnover)` at 40 bps — i.e., the
-   edge survives a doubling of cost/turnover (Exp 1 margin of safety).
-5. **Regime robustness:** criteria 1–4 hold on **≥ 2 distinct regimes** (§7),
+3. **Mechanism B explicit (§0):** the **gross alpha-per-bar** (gross Sharpe /
+   gross return per bar) is reported and is positive enough to clear cost on its
+   own. A Mechanism-A turnover/cost win does **not** count; net Sharpe alone is
+   insufficient.
+4. **Beats the turnover-matched null** at p < 0.05 (above its 95th pct).
+5. **Cost headroom:** `gross_alpha > 2 × (TC × turnover)` at 40 bps — the edge
+   survives a doubling of cost/turnover (Exp 1 margin of safety).
+6. **Regime robustness:** criteria 1–5 hold across the data-maturity span (§7),
    not one 8-week window.
-6. **Honest deflation:** result reported with "N of 672 configs" and a
-   deflated-Sharpe / multiple-testing adjustment; the criterion is judged on the
-   **deflated** number.
 
-Anything short of all six ⇒ **fail to reject H0 ⇒ do NOT deploy.** A marginal or
-single-regime positive is explicitly NOT sufficient (the carry +4.65→negative
-flip is the cautionary precedent).
+Anything short of all six ⇒ **fail to reject H0 ⇒ do NOT deploy.** A marginal,
+single-regime, or raw-Sharpe-only positive is explicitly NOT sufficient (the
+carry +4.65→negative flip is the cautionary precedent).
+
+### 6.4 Deflated Sharpe Ratio — the multiple-testing haircut (Cycle 58b)
+
+Reporting the best-of-672 is a selection problem nested walk-forward does NOT
+fix: with 672 trials the top config can clear a Sharpe bar by luck. The
+**Deflated Sharpe Ratio** (Bailey & López de Prado 2014;
+`engines/infobar_lstm/deflated_sharpe.py`) is the pre-committed correction —
+the native tool for exactly this, by the same author the pipeline is built on.
+
+- **DSR** = P(the selected config's true Sharpe > 0) after deflating by the
+  **expected maximum Sharpe under the null** across N trials, and correcting for
+  return **skew/kurtosis** and **sample length**.
+- **Inputs (PER-OBSERVATION units):** observed daily Sharpe (= annualized ÷
+  √365), `n_obs` = number of OOS daily returns, skew + (non-excess) kurtosis of
+  the daily net returns, the **variance of the per-day Sharpes across trials**
+  (`trial_sharpe_stats`), and **N** = trial count. Mixing an annualized SR with a
+  per-day `n_obs` silently corrupts the DSR.
+- **N reported twice:** at **N = 672 (conservative, the verdict)** AND at a
+  correlation-adjusted **effective N** (`effective_independent_trials` on the
+  trial-return correlation matrix; Galwey 2009) for context — correlated configs
+  (same bars / overlapping HPs) make the effective count < 672.
+- The §6.3 #1 bar (DSR ≥ 0.95) is judged on the **conservative N = 672** figure.
 
 ## 7. DATA-MATURITY GATE (the precondition that makes a verdict count)
 
@@ -143,13 +211,16 @@ does not count until:
 - **Minimum tick history:** at least **~12 months** of `trades` for the target
   asset(s) feeding `info_bars` — enough to span materially different conditions.
   (Today: ~8 weeks, 2026-04-29→06-22.)
-- **Regime diversity:** the history must contain **≥ 2 distinct regimes** by a
-  pre-defined metric (e.g., realized-vol tertiles and/or a trend-vs-range
-  classifier), so generalization is actually tested — not just more draws from
-  one regime. Bar count is **not** regime coverage (audit §P0.5).
+- **Regime span (operational):** calendar span **≥ ~12 months** AND the OOS
+  folds must **straddle ≥ 1 documented vol/trend regime change** — a dated, named
+  transition (e.g. a realized-vol regime shift or a trend→range break) identified
+  BEFORE scoring. Regime *count* is hard to pre-specify cleanly; "the OOS folds
+  cross at least one documented regime boundary" is the testable version. Bar
+  count is **not** regime coverage (audit §P0.5).
 - **Either** path to get there:
   - **(a) Accumulate-forward:** keep the live collectors running; re-evaluate
-    when (12 months × ≥2 regimes) is met. Cost: time (months). Risk: none.
+    when (≥12 months AND the OOS folds straddle ≥1 documented regime change) is
+    met. Cost: time (months). Risk: none.
   - **(b) Paid tick backfill:** source multi-year historical trade data
     (e.g., a tick-data vendor) for BTC/ETH, backfill `trades`, rebuild
     `info_bars`. Cost: money + ingest engineering. Benefit: a multi-regime
@@ -170,8 +241,8 @@ Each item is asserted by an automated check in `run_audit.py` / `tests/`:
 |---|---|---|---|
 | 1 | Bar construction | fixed-threshold, causal, closed-bars-only | audit §P0.6 + `info_bars` tests |
 | 2 | Features ≤ bar-close | every feature uses bars ≤ i; as-of joins ts ≤ end_ts | `test_feature_causality` |
-| 3 | Label volatility | EWMA uses past bar returns only | `test_label_causality` |
-| 4 | Label target | strictly bars i+1…i+H | `test_label_causality` |
+| 3 | Label volatility | EWMA uses past bar returns only | `test_label_locality` |
+| 4 | Label target | strictly bars i+1…i+H | `test_label_locality` |
 | 5 | Scaler | fit on TRAIN fold only, applied to test | `test_scaler_train_only` |
 | 6 | Split | purge overlapping labels + embargo H | `test_walkforward_purge` |
 | 7 | Execution fill | next bar open (strictly after signal) | `costs` unit |
