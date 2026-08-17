@@ -409,7 +409,12 @@ def test_costs_reduce_returns_monotonically():
         TierSpec(n_tiers=1, tier_labels=("T1",)))
     spec = SignalSpec(formation_bars=6, holding_bars=6, execution_lag_bars=1,
                       quantile=0.2, min_symbols_per_tier=10)
-    bps = estimate_spread_bps(high, low, close, CostSpec(spread_window_bars=100))
+    # explicit fixed spread: this test covers the cost MECHANISM, and the
+    # OHLC estimators are not valid on 4h crypto bars (see costs.py).
+    bps = estimate_spread_bps(high, low, close,
+                              CostSpec(spread_model="fixed",
+                                       fixed_spread_bps=20.0,
+                                       spread_window_bars=100))
 
     gross_only = run_backtest(close, uni, bps, spec,
                               BacktestSpec(apply_costs=False,
@@ -611,3 +616,38 @@ def test_tokenized_equities_excluded_without_killing_real_coins():
         assert real in kept, f"{real} is a real crypto and must survive"
     for stock in ("AAPLBUSDT", "TSLABUSDT", "QQQBUSDT", "NVDABUSDT", "SPYBUSDT"):
         assert stock not in kept, f"{stock} is a tokenized equity and must go"
+
+
+def test_tiered_spread_panel_assigns_per_tier_costs():
+    """The honest cost model: assumed spread by liquidity tier, swept via a
+    multiplier. Replaces OHLC estimation, which failed the anchor test."""
+    from engines.xsec_reversal.costs import (
+        DEFAULT_TIER_SPREADS_BPS, tiered_spread_panel,
+    )
+    p = make_panel(n_symbols=60, n_bars=900, seed=91, delist_frac=0.0)
+    reb = p["close"].index[::24]
+    uni = assign_tiers(
+        build_point_in_time_universe(p["close"], p["dollar_vol"], reb,
+                                     UniverseSpec(adv_lookback_bars=120,
+                                                  min_obs_in_window=100,
+                                                  min_total_history_bars=100,
+                                                  min_adv_usd=1e3)),
+        TierSpec(n_tiers=3))
+
+    panel = tiered_spread_panel(uni, p["close"].index, p["close"].columns,
+                                DEFAULT_TIER_SPREADS_BPS, multiplier=1.0)
+    vals = set(np.round(panel.values[~np.isnan(panel.values)], 2))
+    assert vals <= {3.0, 15.0, 40.0}, vals
+
+    doubled = tiered_spread_panel(uni, p["close"].index, p["close"].columns,
+                                  DEFAULT_TIER_SPREADS_BPS, multiplier=2.0)
+    d = set(np.round(doubled.values[~np.isnan(doubled.values)], 2))
+    assert d <= {6.0, 30.0, 80.0}, d
+
+
+def test_estimate_spread_bps_rejects_tiered_fixed():
+    """tiered_fixed needs tier membership, so it cannot come from OHLC alone."""
+    p = make_panel(n_symbols=5, n_bars=400, seed=92, delist_frac=0.0)
+    with pytest.raises(ValueError, match="tiered_spread_panel"):
+        estimate_spread_bps(p["high"], p["low"], p["close"],
+                            CostSpec(spread_model="tiered_fixed"))

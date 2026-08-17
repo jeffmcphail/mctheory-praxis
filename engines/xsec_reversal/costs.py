@@ -54,7 +54,19 @@ class CostSpec:
     """All cost assumptions. Everything a parameter; nothing hard-coded.
 
     spread_model:
-        'corwin_schultz' | 'abdi_ranaldo' | 'fixed' | 'max_of_estimators'
+        'tiered_fixed' (DEFAULT, recommended) | 'fixed' |
+        'corwin_schultz' | 'abdi_ranaldo' | 'max_of_estimators'
+
+        *** THE OHLC ESTIMATORS ARE NOT USABLE ON 4h CRYPTO BARS. ***
+        Measured 2026-08 against known-liquid anchors: Corwin-Schultz returned
+        37-76 bps for BTC/ETH/BNB/XRP/SOL whose true effective spreads are
+        ~1-2 bps (19-38x inflated), and the estimates ranked by VOLATILITY
+        rather than spread (SOL > XRP > ETH > BNB > BTC). Worse, in the tiered
+        backtest it assigned the LIQUID tier a HIGHER cost than the illiquid
+        tier -- inverted, because thinly-traded bars often have high == low,
+        driving log(H/L) to zero. Abdi-Ranaldo was degenerate (>50% of
+        estimates floored at zero). Both are retained for reproducibility of
+        that finding, not for use.
     fee_bps_per_side: exchange taker fee, one way (Binance spot taker ~ 10 bps
         at base tier, ~ 7.5 with BNB; set explicitly per pre-registration).
     extra_slippage_bps_per_side: conservatism knob for market impact beyond the
@@ -63,7 +75,7 @@ class CostSpec:
     spread_window_bars: averaging window for the estimators.
     min_spread_bps / max_spread_bps: sanity clamps on estimated spreads.
     """
-    spread_model: str = "max_of_estimators"
+    spread_model: str = "tiered_fixed"
     fee_bps_per_side: float = 10.0
     extra_slippage_bps_per_side: float = 0.0
     fixed_spread_bps: float = 10.0
@@ -128,6 +140,12 @@ def estimate_spread_bps(
 
     Returns a wide [time x symbol] panel. Causal by construction.
     """
+    if spec.spread_model == "tiered_fixed":
+        raise ValueError(
+            "spread_model='tiered_fixed' is not produced by estimate_spread_bps "
+            "(it needs tier membership). Call tiered_spread_panel(universe_tiers, "
+            "...) instead -- run_xsec.cmd_backtest does this after assign_tiers()."
+        )
     if spec.spread_model == "fixed":
         out = pd.DataFrame(spec.fixed_spread_bps,
                            index=panel_close.index, columns=panel_close.columns)
@@ -169,3 +187,55 @@ def estimate_spread_bps(
 def one_way_cost_bps(spread_bps: pd.DataFrame, spec: CostSpec) -> pd.DataFrame:
     """Total one-way cost in bps: half the effective spread + fee + slippage."""
     return spread_bps / 2.0 + spec.fee_bps_per_side + spec.extra_slippage_bps_per_side
+
+
+# --------------------------------------------------------------------------- #
+# Tiered fixed spreads (the honest replacement for OHLC estimation)
+# --------------------------------------------------------------------------- #
+# Assumed effective (round-trip) spreads by liquidity tier, in bps. These are
+# ASSUMPTIONS, not measurements -- which is exactly why the backtest must be run
+# as a SENSITIVITY SWEEP over a multiplier rather than at a single point.
+# Anchored on published Binance spot market structure: majors ~1-2 bps,
+# mid-caps ~5-20 bps, thin alts ~20-60 bps.
+DEFAULT_TIER_SPREADS_BPS = {
+    "T1_liquid": 3.0,
+    "T2_mid": 15.0,
+    "T3_illiquid": 40.0,
+}
+
+
+def tiered_spread_panel(
+    universe_tiers: pd.DataFrame,
+    index: pd.Index,
+    columns: pd.Index,
+    tier_spreads_bps: Optional[dict] = None,
+    multiplier: float = 1.0,
+    default_bps: float = 40.0,
+) -> pd.DataFrame:
+    """Build a [time x symbol] effective-spread panel from tier membership.
+
+    Each (dt, symbol) gets its tier's assumed spread, scaled by `multiplier`.
+    Because tier membership is itself point-in-time and causal, so is this.
+
+    `multiplier` exists so the caller can sweep the assumption (0.5x, 1x, 2x,
+    4x) and report where each tier's net result flips sign -- turning an
+    unknowable input into a stated, auditable sensitivity.
+    """
+    spreads = dict(tier_spreads_bps or DEFAULT_TIER_SPREADS_BPS)
+    out = pd.DataFrame(np.nan, index=index, columns=columns)
+
+    elig = universe_tiers[universe_tiers["eligible"] & universe_tiers["tier"].notna()]
+    for tier, grp in elig.groupby("tier"):
+        val = float(spreads.get(tier, default_bps)) * float(multiplier)
+        wide = (grp.assign(_v=val)
+                   .pivot_table(index="dt", columns="symbol", values="_v",
+                                aggfunc="first")
+                   .reindex(index=index, columns=columns))
+        out = out.where(wide.isna(), wide)
+
+    # Rebalance rows only cover rebalance timestamps; forward-fill within the
+    # panel so intra-period bars inherit their tier's spread.
+    out = out.ffill()
+    logger.info("tiered_spread_panel: %s (multiplier=%.2fx)",
+                {k: round(v * multiplier, 2) for k, v in spreads.items()}, multiplier)
+    return out

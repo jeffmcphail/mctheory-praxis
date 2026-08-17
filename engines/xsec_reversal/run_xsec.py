@@ -46,7 +46,10 @@ from engines.xsec_reversal.universe import (
     TierSpec, UniverseSpec, assign_tiers, build_point_in_time_universe,
     filter_symbol_names,
 )
-from engines.xsec_reversal.costs import CostSpec, estimate_spread_bps
+from engines.xsec_reversal.costs import (
+    DEFAULT_TIER_SPREADS_BPS, CostSpec, estimate_spread_bps,
+    tiered_spread_panel,
+)
 from engines.xsec_reversal.backtest import (
     BacktestSpec, SignalSpec, capacity_analysis, run_backtest,
 )
@@ -210,9 +213,22 @@ def cmd_backtest(args) -> int:
         fee_bps_per_side=args.fee_bps,
         extra_slippage_bps_per_side=args.extra_slippage_bps,
         spread_window_bars=args.spread_window,
+        fixed_spread_bps=args.fixed_spread_bps,
     )
-    print(f"\nestimating spreads [{cost_spec.spread_model}] ...")
-    spread_bps = estimate_spread_bps(high, low, close, cost_spec)
+    if cost_spec.spread_model in ("corwin_schultz", "abdi_ranaldo",
+                                  "max_of_estimators"):
+        print("\n*** WARNING: OHLC spread estimators are NOT VALID on 4h crypto "
+              "bars ***")
+        print("    Anchor test: Corwin-Schultz reported 37-76 bps for "
+              "BTC/ETH/BNB/XRP/SOL")
+        print("    (true ~1-2 bps), ranked by VOLATILITY not spread, and "
+              "inverted across")
+        print("    tiers. Abdi-Ranaldo was degenerate. Use --spread-model "
+              "tiered_fixed.")
+        print("    Any net-of-cost number below is NOT a verdict.\n")
+        spread_bps = estimate_spread_bps(high, low, close, cost_spec)
+    else:
+        spread_bps = None  # built after tiers are assigned
 
     uspec = UniverseSpec(
         adv_lookback_bars=args.adv_lookback,
@@ -259,10 +275,30 @@ def cmd_backtest(args) -> int:
         resid = [args.residualize]
 
     combos = [c for c in itertools.product(formations, holdings, quantiles, resid)]
-    print(f"\nrunning {len(combos)} config(s) x {args.n_tiers} tiers ...\n")
+
+    tier_spreads = dict(DEFAULT_TIER_SPREADS_BPS)
+    if args.tier_spreads:
+        vals = [float(x) for x in args.tier_spreads.split(",")]
+        labels = sorted(uni["tier"].dropna().unique())
+        tier_spreads = dict(zip(labels, vals))
+
+    multipliers = ([float(m) for m in args.sensitivity.split(",")]
+                   if args.sensitivity else [1.0])
+
+    print(f"\nrunning {len(combos)} config(s) x {args.n_tiers} tiers "
+          f"x {len(multipliers)} spread multiplier(s) ...")
+    if cost_spec.spread_model == "tiered_fixed":
+        print(f"assumed tier spreads (bps): {tier_spreads}")
+        if len(multipliers) > 1:
+            print(f"sensitivity multipliers: {multipliers}")
+    print()
 
     records, trial_sharpes = [], []
-    for (f, h, q, r) in combos:
+    for mult in multipliers:
+      if cost_spec.spread_model == "tiered_fixed":
+        spread_bps = tiered_spread_panel(uni, close.index, close.columns,
+                                         tier_spreads, multiplier=mult)
+      for (f, h, q, r) in combos:
         sspec = SignalSpec(formation_bars=f, holding_bars=h, quantile=q,
                            residualize_mode=r,
                            execution_lag_bars=args.execution_lag,
@@ -273,9 +309,10 @@ def cmd_backtest(args) -> int:
         res = run_backtest(close, uni, spread_bps, sspec, bspec, cost_spec)
         for tier, r_ in res.items():
             rec = {"formation": f, "holding": h, "quantile": q,
-                   "residualize": r, "tier": tier, **r_.metrics}
+                   "residualize": r, "spread_mult": mult, "tier": tier,
+                   **r_.metrics}
             records.append(rec)
-            if not np.isnan(r_.metrics.get("net_sharpe", np.nan)):
+            if mult == 1.0 and not np.isnan(r_.metrics.get("net_sharpe", np.nan)):
                 trial_sharpes.append(r_.metrics["net_sharpe"])
 
     df = pd.DataFrame(records)
@@ -297,6 +334,22 @@ def cmd_backtest(args) -> int:
               f"cost={best['avg_cost_bps']:.1f}bps IC={best['mean_ic']:+.4f} "
               f"(f={int(best['formation'])},h={int(best['holding'])},"
               f"q={best['quantile']},{best['residualize']})")
+
+    if len(multipliers) > 1:
+        print("\n" + "=" * 78)
+        print("SPREAD SENSITIVITY -- best net Sharpe per tier at each assumption")
+        print("=" * 78)
+        piv = (df.groupby(["tier", "spread_mult"])["net_sharpe"].max()
+                 .unstack("spread_mult"))
+        hdr = "  ".join(f"{m:>7.2f}x" for m in piv.columns)
+        print(f"{'tier':14s} {hdr}")
+        for tier, row in piv.iterrows():
+            cells = "  ".join(f"{v:>8.2f}" for v in row.values)
+            print(f"{tier:14s} {cells}")
+        print("\nA tier is only a candidate edge if it stays above the 0.85 "
+              "noise floor")
+        print("across a PLAUSIBLE range of spread assumptions -- not just the "
+              "cheapest one.")
 
     # ---- deflated Sharpe on the grid ------------------------------------
     if len(trial_sharpes) > 1:
@@ -338,6 +391,89 @@ def cmd_backtest(args) -> int:
     print("\nREMINDER: a NEGATIVE result here stays PROVISIONAL until the Cycle 59 "
           "framework validation lands (an unvalidated instrument cannot "
           "distinguish 'no edge' from 'broken measurement').")
+    return 0
+
+
+
+def cmd_diagnose(args) -> int:
+    """Validate the SPREAD ESTIMATOR before trusting any net-of-cost verdict.
+
+    Binance klines carry no quotes, so spreads are ESTIMATED from OHLC. The
+    decisive check is an anchor test: BTCUSDT's true effective spread is about
+    1-2 bps. If the estimator says 40 bps for BTC, every tier's cost is
+    inflated by the same order and the net result is meaningless.
+    """
+    panels = _load_panels(Path(args.panel_dir), args.interval)
+    close, high, low, dvol = (panels["close"], panels["high"],
+                              panels["low"], panels["dollar_vol"])
+    print(f"panels: {close.shape}, {close.index.min()} -> {close.index.max()}\n")
+
+    cs = estimate_spread_bps(high, low, close,
+                             CostSpec(spread_model="corwin_schultz",
+                                      spread_window_bars=args.spread_window,
+                                      min_spread_bps=0.0, max_spread_bps=1e4))
+    ar = estimate_spread_bps(high, low, close,
+                             CostSpec(spread_model="abdi_ranaldo",
+                                      spread_window_bars=args.spread_window,
+                                      min_spread_bps=0.0, max_spread_bps=1e4))
+
+    print("=" * 78)
+    print("ANCHOR TEST -- known-liquid symbols (true effective spread ~1-5 bps)")
+    print("=" * 78)
+    print(f"{'symbol':14s} {'Corwin-Schultz':>16s} {'Abdi-Ranaldo':>16s}   verdict")
+    anchors = [a.strip().upper() for a in args.anchors.split(",")]
+    inflation = []
+    for a in anchors:
+        if a not in close.columns:
+            print(f"{a:14s} {'(absent)':>16s}")
+            continue
+        c = float(np.nanmedian(cs[a].values)) if cs[a].notna().any() else float("nan")
+        r = float(np.nanmedian(ar[a].values)) if ar[a].notna().any() else float("nan")
+        worst = np.nanmax([c, r])
+        verd = "PLAUSIBLE" if worst <= args.anchor_tolerance_bps else "INFLATED"
+        if np.isfinite(worst):
+            inflation.append(worst / 2.0)  # vs a ~2 bps truth
+        print(f"{a:14s} {c:16.2f} {r:16.2f}   {verd}")
+
+    if inflation:
+        factor = float(np.median(inflation))
+        print(f"\nmedian anchor estimate is ~{factor:.1f}x a 2 bps truth")
+        if factor > args.anchor_tolerance_bps / 2.0:
+            print("VERDICT: the OHLC spread estimator is INFLATED on 4h crypto bars.")
+            print("  Corwin-Schultz assumes range = volatility + spread with vol")
+            print("  scaling in time. On high-vol 4h bars volatility dominates, and")
+            print("  flooring the frequent negative estimates at zero biases the")
+            print("  average UP. 'max_of_estimators' then compounds it.")
+            print("  -> do NOT read the net-of-cost result as a verdict.")
+        else:
+            print("VERDICT: estimator looks usable at these horizons.")
+
+    print("\n" + "=" * 78)
+    print("UNIVERSE-WIDE SPREAD DISTRIBUTION (bps)")
+    print("=" * 78)
+    for name, est in (("corwin_schultz", cs), ("abdi_ranaldo", ar)):
+        v = est.values[~np.isnan(est.values)]
+        if v.size:
+            print(f"{name:16s} p25={np.percentile(v,25):7.2f} "
+                  f"med={np.percentile(v,50):7.2f} p75={np.percentile(v,75):7.2f} "
+                  f"p95={np.percentile(v,95):7.2f}")
+
+    print("\n" + "=" * 78)
+    print("BREAKEVEN ANALYSIS (what spread would each tier tolerate?)")
+    print("=" * 78)
+    print("Using the probe's gross alpha per rebalance and turnover ~1.6:\n")
+    print(f"{'tier':14s} {'gross bps':>10s} {'fee/reb':>9s} {'max spread':>12s}")
+    for tier, gross in [("T1_liquid", args.t1_gross), ("T2_mid", args.t2_gross),
+                        ("T3_illiquid", args.t3_gross)]:
+        fee_cost = args.turnover * args.fee_bps
+        max_one_way = gross / args.turnover
+        max_spread = 2.0 * (max_one_way - args.fee_bps)
+        print(f"{tier:14s} {gross:10.2f} {fee_cost:9.2f} {max_spread:12.2f}")
+    print(f"\nAt fee={args.fee_bps} bps/side and turnover={args.turnover}, fees alone")
+    print(f"cost {args.turnover*args.fee_bps:.1f} bps per rebalance BEFORE any spread.")
+    print("If that already exceeds a tier's gross alpha, no spread model can save it")
+    print("at this rebalance frequency -- the lever is a LONGER HOLDING PERIOD")
+    print("(the pre-registered grid includes h=12 and h=24) or maker-side execution.")
     return 0
 
 
@@ -414,14 +550,38 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="min non-missing bars WITHIN the ADV lookback "
                         "window; must be <= --adv-lookback")
     b.add_argument("--max-symbols", type=int, default=None)
-    b.add_argument("--spread-model", default="max_of_estimators",
-                   choices=["corwin_schultz", "abdi_ranaldo", "fixed", "max_of_estimators"])
+    b.add_argument("--spread-model", default="tiered_fixed",
+                   choices=["tiered_fixed", "fixed", "corwin_schultz",
+                            "abdi_ranaldo", "max_of_estimators"])
     b.add_argument("--spread-window", type=int, default=180)
     b.add_argument("--fee-bps", type=float, default=10.0)
+    b.add_argument("--fixed-spread-bps", type=float, default=10.0,
+                   help="used when --spread-model fixed")
     b.add_argument("--extra-slippage-bps", type=float, default=0.0)
     b.add_argument("--periods-per-year", type=float, default=2190.0)
     b.add_argument("--participation", type=float, default=0.01)
+    b.add_argument("--tier-spreads", default=None,
+                   help="comma-separated assumed effective spreads in bps, "
+                        "one per tier ascending by tier label, e.g. '3,15,40'")
+    b.add_argument("--sensitivity", default=None,
+                   help="comma-separated spread multipliers to sweep, "
+                        "e.g. '0.5,1,2,4'")
     b.set_defaults(func=cmd_backtest)
+
+    d = sub.add_parser("diagnose", help="validate the spread estimator + breakeven")
+    _add_verbose(d)
+    d.add_argument("--panel-dir", default="data/external/xsec")
+    d.add_argument("--interval", default="4h")
+    d.add_argument("--spread-window", type=int, default=180)
+    d.add_argument("--anchors", default="BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,SOLUSDT",
+                   help="known-liquid symbols whose true spread is ~1-5 bps")
+    d.add_argument("--anchor-tolerance-bps", type=float, default=10.0)
+    d.add_argument("--fee-bps", type=float, default=10.0)
+    d.add_argument("--turnover", type=float, default=1.6)
+    d.add_argument("--t1-gross", type=float, default=8.51)
+    d.add_argument("--t2-gross", type=float, default=17.28)
+    d.add_argument("--t3-gross", type=float, default=22.03)
+    d.set_defaults(func=cmd_diagnose)
     return p
 
 
