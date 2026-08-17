@@ -217,7 +217,8 @@ def cmd_backtest(args) -> int:
     uspec = UniverseSpec(
         adv_lookback_bars=args.adv_lookback,
         min_adv_usd=args.min_adv_usd,
-        min_history_bars=args.min_history,
+        min_obs_in_window=args.min_obs_in_window,
+        min_total_history_bars=args.min_history,
         max_symbols=args.max_symbols,
     )
     tspec = TierSpec(n_tiers=args.n_tiers)
@@ -229,8 +230,21 @@ def cmd_backtest(args) -> int:
     uni = assign_tiers(uni, tspec)
 
     per_dt = uni[uni["eligible"]].groupby("dt").size()
+    if per_dt.empty or per_dt.median() == 0:
+        print("\nFATAL: the point-in-time universe is EMPTY at every rebalance.")
+        print("  Check --min-obs-in-window (<= --adv-lookback), --min-history,")
+        print("  and --min-adv-usd. Refusing to produce meaningless metrics.")
+        return 1
     print(f"eligible names/rebalance: min={int(per_dt.min())} "
           f"med={int(per_dt.median())} max={int(per_dt.max())}")
+
+    need = args.min_names * args.n_tiers
+    if per_dt.median() < need:
+        print(f"\nFATAL: median eligible names ({int(per_dt.median())}) is below "
+              f"{need} = --min-names x --n-tiers.")
+        print("  Tiers would be too thin to rank. Loosen the filters or reduce "
+              "--n-tiers / --min-names. Refusing to run.")
+        return 1
 
     # ---- grid ------------------------------------------------------------
     if args.grid:
@@ -394,7 +408,11 @@ def build_argparser() -> argparse.ArgumentParser:
     b.add_argument("--min-names", type=int, default=10)
     b.add_argument("--adv-lookback", type=int, default=180)
     b.add_argument("--min-adv-usd", type=float, default=50_000.0)
-    b.add_argument("--min-history", type=int, default=200)
+    b.add_argument("--min-history", type=int, default=200,
+                   help="min TOTAL observed bars since listing (maturity)")
+    b.add_argument("--min-obs-in-window", type=int, default=144,
+                   help="min non-missing bars WITHIN the ADV lookback "
+                        "window; must be <= --adv-lookback")
     b.add_argument("--max-symbols", type=int, default=None)
     b.add_argument("--spread-model", default="max_of_estimators",
                    choices=["corwin_schultz", "abdi_ranaldo", "fixed", "max_of_estimators"])

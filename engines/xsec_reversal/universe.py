@@ -39,6 +39,28 @@ logger = logging.getLogger("xsec.universe")
 # Substrings marking Binance leveraged tokens (artificial mean reversion).
 DEFAULT_LEVERAGED_PATTERNS = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 # Stable/pegged bases -- no dispersion, pure noise in a reversal ranking.
+# Binance tokenized EQUITIES / ETFs (symbol pattern <TICKER>B + USDT).
+# These are STOCKS, not crypto: their returns are driven by equity factors and
+# US market hours, so leaving them in a crypto cross-sectional study is
+# contamination. They also carry regulatory-delisting events unrelated to any
+# market mechanism.
+#
+# *** An explicit list is REQUIRED -- a naive endswith("BUSDT") rule would also
+# delete BNBUSDT, SHIBUSDT, ARBUSDT, TRBUSDT, AMBUSDT, VIBUSDT and BBUSDT,
+# which are real (and major) crypto assets. ***
+DEFAULT_TOKENIZED_EQUITY_SYMBOLS = (
+    "AAPLBUSDT", "AAOIBUSDT", "AMATBUSDT", "AMDBUSDT", "AMZNBUSDT", "ARMBUSDT",
+    "AVGOBUSDT", "AXTIBUSDT", "BABABUSDT", "CBRSBUSDT", "COINBUSDT", "CRCLBUSDT",
+    "CRWVBUSDT", "DELLBUSDT", "DRAMBUSDT", "EWYBUSDT", "FLNCBUSDT", "GLWBUSDT",
+    "GOOGLBUSDT", "GSBUSDT", "HOODBUSDT", "IBMBUSDT", "INTCBUSDT", "INTWBUSDT",
+    "KORUBUSDT", "LITEBUSDT", "METABUSDT", "MRVLBUSDT", "MSFTBUSDT", "MSTRBUSDT",
+    "MUBUSDT", "MUUBUSDT", "MVLLBUSDT", "NBISBUSDT", "NOKBUSDT", "NVDABUSDT",
+    "ORCLBUSDT", "PLTRBUSDT", "PYPLBUSDT", "QCOMBUSDT", "QNTBUSDT", "QQQBUSDT",
+    "RKLBBUSDT", "SKHYBUSDT", "SMHBUSDT", "SNDKBUSDT", "SNXXBUSDT", "SOXLBUSDT",
+    "SOXSBUSDT", "SPCXBUSDT", "SPYBUSDT", "TQQQBUSDT", "TSLABUSDT", "TSMBUSDT",
+    "WDCBUSDT",
+)
+
 DEFAULT_STABLE_BASES = (
     "BUSD", "USDC", "TUSD", "USDP", "DAI", "FDUSD", "SUSD", "EUR", "GBP",
     "AUD", "USDS", "USDSB", "PAX", "UST", "USTC",
@@ -67,17 +89,43 @@ class TierSpec:
 
 @dataclass(frozen=True)
 class UniverseSpec:
-    """Point-in-time universe filters. Everything is a parameter."""
+    """Point-in-time universe filters. Everything is a parameter.
+
+    TWO DISTINCT HISTORY REQUIREMENTS (they were conflated in the first
+    version, which silently made the universe EMPTY -- see __post_init__):
+
+      * min_obs_in_window -- DATA QUALITY. How many of the trailing
+        `adv_lookback_bars` must be non-missing. Capped by the window size, so
+        it MUST be <= adv_lookback_bars.
+
+      * min_total_history_bars -- MATURITY. Total observed bars since the
+        symbol's first print, up to this rebalance. Unbounded by the window;
+        this is what keeps 3-bar listings and freshly-launched tokens out.
+    """
     quote: str = "USDT"
     adv_lookback_bars: int = 180          # trailing bars for ADV + liveness
     min_adv_usd: float = 50_000.0         # floor: below this it is not tradeable
-    min_history_bars: int = 200           # need this much trailing data to enter
+    min_obs_in_window: int = 144          # 80% coverage of the ADV window
+    min_total_history_bars: int = 200     # maturity since listing
     max_symbols: Optional[int] = None     # cap universe size (by ADV) if set
     exclude_leveraged: bool = True
     exclude_stables: bool = True
+    exclude_tokenized_equities: bool = True
     leveraged_patterns: tuple = DEFAULT_LEVERAGED_PATTERNS
     stable_bases: tuple = DEFAULT_STABLE_BASES
+    tokenized_equity_symbols: tuple = DEFAULT_TOKENIZED_EQUITY_SYMBOLS
     require_full_window: bool = False     # if True, symbol must have EVERY bar
+
+    def __post_init__(self):
+        # Loud failure beats a silently empty universe.
+        if self.min_obs_in_window > self.adv_lookback_bars:
+            raise ValueError(
+                f"min_obs_in_window ({self.min_obs_in_window}) exceeds "
+                f"adv_lookback_bars ({self.adv_lookback_bars}). Coverage is "
+                f"counted WITHIN the trailing window, so this can never be "
+                f"satisfied and the universe would always be empty. Use "
+                f"min_total_history_bars for a maturity requirement instead."
+            )
 
 
 def filter_symbol_names(symbols, spec: UniverseSpec = UniverseSpec()) -> list[str]:
@@ -93,6 +141,8 @@ def filter_symbol_names(symbols, spec: UniverseSpec = UniverseSpec()) -> list[st
             base = su[: -len(spec.quote)] if spec.quote else su
             if base in spec.stable_bases:
                 continue
+        if spec.exclude_tokenized_equities and su in spec.tokenized_equity_symbols:
+            continue
         out.append(s)
     dropped = len(list(symbols)) - len(out)
     logger.info("filter_symbol_names: kept %d, dropped %d (leveraged/stable/quote)",
@@ -128,6 +178,8 @@ def build_point_in_time_universe(
 
     rows = []
     lb = spec.adv_lookback_bars
+    # Cumulative observed bars per symbol, computed once (maturity criterion).
+    cum_obs = panel_close.notna().cumsum()
     for dt in rebalance_index:
         # STRICTLY causal: only bars at or before dt.
         hist_c = panel_close.loc[:dt].tail(lb)
@@ -141,9 +193,12 @@ def build_point_in_time_universe(
         live_now = panel_close.loc[dt].notna() if dt in panel_close.index else \
             pd.Series(False, index=panel_close.columns)
 
+        total_obs = (cum_obs.loc[dt] if dt in cum_obs.index
+                     else cum_obs.loc[:dt].iloc[-1])
         eligible = (
             live_now
-            & (n_obs >= spec.min_history_bars)
+            & (n_obs >= spec.min_obs_in_window)
+            & (total_obs >= spec.min_total_history_bars)
             & (adv >= spec.min_adv_usd)
             & adv.notna()
         )
@@ -155,6 +210,7 @@ def build_point_in_time_universe(
             "symbol": panel_close.columns,
             "adv_usd": adv.values,
             "n_obs": n_obs.values,
+            "total_obs": total_obs.values,
             "eligible": eligible.values,
         })
 

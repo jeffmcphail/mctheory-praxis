@@ -156,7 +156,8 @@ def test_universe_is_survivorship_aware():
     reb = p["close"].index[::24]
     uni = build_point_in_time_universe(p["close"], p["dollar_vol"], reb,
                                        UniverseSpec(adv_lookback_bars=100,
-                                                    min_history_bars=50,
+                                                    min_obs_in_window=50,
+                                                    min_total_history_bars=50,
                                                     min_adv_usd=1e3))
     assert p["delisted"], "fixture should delist some symbols"
     d = p["delisted"][0]
@@ -170,7 +171,8 @@ def test_tier_assignment_is_causal_and_ordered():
     reb = p["close"].index[::24]
     uni = build_point_in_time_universe(p["close"], p["dollar_vol"], reb,
                                        UniverseSpec(adv_lookback_bars=120,
-                                                    min_history_bars=100,
+                                                    min_obs_in_window=100,
+                                                    min_total_history_bars=100,
                                                     min_adv_usd=1e3))
     uni = assign_tiers(uni, TierSpec(n_tiers=3))
     elig = uni[uni["eligible"]]
@@ -182,7 +184,8 @@ def test_universe_uses_only_trailing_data():
     """Mutating the FUTURE must not change a past rebalance's ADV/eligibility."""
     p = make_panel(n_symbols=30, n_bars=600, seed=11, delist_frac=0.0)
     reb = p["close"].index[::24]
-    spec = UniverseSpec(adv_lookback_bars=100, min_history_bars=50, min_adv_usd=1e3)
+    spec = UniverseSpec(adv_lookback_bars=100, min_obs_in_window=50,
+                        min_total_history_bars=50, min_adv_usd=1e3)
     base = build_point_in_time_universe(p["close"], p["dollar_vol"], reb, spec)
 
     dv2 = p["dollar_vol"].copy()
@@ -284,7 +287,8 @@ def test_execution_lag_prevents_same_bar_lookahead():
     uni = assign_tiers(
         build_point_in_time_universe(close, dvol, reb,
                                      UniverseSpec(adv_lookback_bars=100,
-                                                  min_history_bars=50,
+                                                  min_obs_in_window=50,
+                                                  min_total_history_bars=50,
                                                   min_adv_usd=1e3)),
         TierSpec(n_tiers=1, tier_labels=("T1",)))
 
@@ -310,7 +314,8 @@ def _run_simple(panels, phi_label, apply_costs=False, **sig_kw):
     uni = assign_tiers(
         build_point_in_time_universe(close, dvol, reb,
                                      UniverseSpec(adv_lookback_bars=120,
-                                                  min_history_bars=100,
+                                                  min_obs_in_window=100,
+                                                  min_total_history_bars=100,
                                                   min_adv_usd=1e3)),
         TierSpec(n_tiers=1, tier_labels=("T1",)))
     spec = SignalSpec(formation_bars=1, holding_bars=1, execution_lag_bars=0,
@@ -398,7 +403,8 @@ def test_costs_reduce_returns_monotonically():
     uni = assign_tiers(
         build_point_in_time_universe(close, dvol, reb,
                                      UniverseSpec(adv_lookback_bars=120,
-                                                  min_history_bars=100,
+                                                  min_obs_in_window=100,
+                                                  min_total_history_bars=100,
                                                   min_adv_usd=1e3)),
         TierSpec(n_tiers=1, tier_labels=("T1",)))
     spec = SignalSpec(formation_bars=6, holding_bars=6, execution_lag_bars=1,
@@ -421,7 +427,8 @@ def test_capacity_orders_by_tier():
     uni = assign_tiers(
         build_point_in_time_universe(p["close"], p["dollar_vol"], reb,
                                      UniverseSpec(adv_lookback_bars=120,
-                                                  min_history_bars=100,
+                                                  min_obs_in_window=100,
+                                                  min_total_history_bars=100,
                                                   min_adv_usd=1e3)),
         TierSpec(n_tiers=3))
     cap = capacity_analysis(uni, SignalSpec(quantile=0.2), participation_rate=0.01)
@@ -543,3 +550,64 @@ def test_archive_client_reuses_one_session():
     s1, s2 = c.session, c.session
     assert s1 is s2
     assert s1.get_adapter("https://data.binance.vision")._pool_maxsize >= 16
+
+
+# --------------------------------------------------------------------------- #
+# REGRESSION: default params must produce a NON-EMPTY universe
+# --------------------------------------------------------------------------- #
+def test_default_universe_spec_is_not_degenerate():
+    """The first version defaulted adv_lookback_bars=180 with
+    min_obs_in_window=200,
+                        min_total_history_bars=200. Coverage is counted WITHIN the window, so the
+    threshold could never be met and the universe was empty at every
+    rebalance -- the backtest would have reported nothing, forever.
+
+    Every existing test overrode both params, so none of them caught it.
+    """
+    spec = UniverseSpec()
+    assert spec.min_obs_in_window <= spec.adv_lookback_bars
+
+    p = make_panel(n_symbols=60, n_bars=1200, seed=77, delist_frac=0.1)
+    reb = p["close"].index[::24]
+    uni = build_point_in_time_universe(p["close"], p["dollar_vol"], reb, spec)
+    per_dt = uni[uni["eligible"]].groupby("dt").size()
+    assert not per_dt.empty and per_dt.median() > 0, \
+        "DEFAULT parameters produce an empty universe"
+
+
+def test_universe_spec_rejects_impossible_coverage():
+    with pytest.raises(ValueError, match="can never be satisfied|exceeds"):
+        UniverseSpec(adv_lookback_bars=100, min_obs_in_window=200)
+
+
+def test_maturity_filter_excludes_short_listings():
+    """min_total_history_bars must exclude brand-new listings (e.g. the
+    tokenized equities, which had 3-116 bars) even when their recent window
+    coverage looks fine."""
+    p = make_panel(n_symbols=30, n_bars=1000, seed=78, delist_frac=0.0)
+    newbie = p["close"].columns[0]
+    # blank everything except the last 150 bars for one symbol
+    p["close"].iloc[:-150, 0] = np.nan
+    p["dollar_vol"].iloc[:-150, 0] = np.nan
+
+    reb = p["close"].index[::24]
+    spec = UniverseSpec(adv_lookback_bars=120, min_obs_in_window=96,
+                        min_total_history_bars=200, min_adv_usd=1e3)
+    uni = build_point_in_time_universe(p["close"], p["dollar_vol"], reb, spec)
+    rows = uni[uni["symbol"] == newbie]
+    assert not rows["eligible"].any(), \
+        "a 150-bar listing passed a 200-bar maturity filter"
+
+
+def test_tokenized_equities_excluded_without_killing_real_coins():
+    """Explicit list, NOT an endswith('BUSDT') rule -- that suffix also matches
+    BNBUSDT, SHIBUSDT, ARBUSDT, TRBUSDT, AMBUSDT, VIBUSDT and BBUSDT."""
+    syms = ["BTCUSDT", "BNBUSDT", "SHIBUSDT", "ARBUSDT", "TRBUSDT", "AMBUSDT",
+            "VIBUSDT", "BBUSDT", "AAPLBUSDT", "TSLABUSDT", "QQQBUSDT",
+            "NVDABUSDT", "SPYBUSDT"]
+    kept = filter_symbol_names(syms, UniverseSpec())
+    for real in ("BTCUSDT", "BNBUSDT", "SHIBUSDT", "ARBUSDT", "TRBUSDT",
+                 "AMBUSDT", "VIBUSDT", "BBUSDT"):
+        assert real in kept, f"{real} is a real crypto and must survive"
+    for stock in ("AAPLBUSDT", "TSLABUSDT", "QQQBUSDT", "NVDABUSDT", "SPYBUSDT"):
+        assert stock not in kept, f"{stock} is a tokenized equity and must go"
