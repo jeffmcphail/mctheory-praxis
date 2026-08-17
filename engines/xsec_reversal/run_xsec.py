@@ -31,7 +31,9 @@ import argparse
 import itertools
 import json
 import logging
+import time
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -98,23 +100,60 @@ def cmd_collect(args) -> int:
                            verify_checksum=not args.no_checksum)
 
     close, high, low, dvol = {}, {}, {}, {}
-    n_ok = n_empty = 0
-    for i, sym in enumerate(symbols, 1):
-        try:
-            df = client.load_symbol_range(sym, args.interval, periods)
-        except Exception as e:  # noqa: BLE001
-            logger.error("[%s] failed: %s", sym, e)
-            continue
+    n_ok = n_empty = n_err = 0
+    t0 = time.time()
+    total = len(symbols)
+    print(f"collecting {total} symbols x {len(periods)} periods "
+          f"({args.interval}) with {args.workers} worker(s) ...")
+
+    def _fetch(sym):
+        return sym, client.load_symbol_range(
+            sym, args.interval, periods, use_listing=not args.no_listing)
+
+    def _record(sym, df):
+        nonlocal n_ok, n_empty
         if df is None or df.empty:
             n_empty += 1
-            continue
+            return
         close[sym] = df["close"]
         high[sym] = df["high"]
         low[sym] = df["low"]
         dvol[sym] = df["quote_asset_volume"]
         n_ok += 1
-        if i % 25 == 0:
-            print(f"  ... {i}/{len(symbols)} symbols processed ({n_ok} with data)")
+
+    def _progress(i):
+        if i % 25 and i != total:
+            return
+        el = time.time() - t0
+        rate = i / el if el > 0 else 0.0
+        eta = (total - i) / rate if rate > 0 else float("nan")
+        print(f"  ... {i}/{total} symbols ({n_ok} with data, {n_empty} empty, "
+              f"{n_err} errors) | {el/60:.1f} min elapsed, ETA {eta/60:.1f} min")
+
+    if args.workers > 1:
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(_fetch, s): s for s in symbols}
+            for i, fut in enumerate(as_completed(futs), 1):
+                sym = futs[fut]
+                try:
+                    sym, df = fut.result()
+                    _record(sym, df)
+                except Exception as e:  # noqa: BLE001
+                    n_err += 1
+                    logger.error("[%s] failed: %s", sym, e)
+                _progress(i)
+    else:
+        for i, sym in enumerate(symbols, 1):
+            try:
+                _, df = _fetch(sym)
+                _record(sym, df)
+            except Exception as e:  # noqa: BLE001
+                n_err += 1
+                logger.error("[%s] failed: %s", sym, e)
+            _progress(i)
+
+    print(f"\ncollect finished in {(time.time()-t0)/60:.1f} min "
+          f"({n_ok} ok, {n_empty} empty, {n_err} errors)")
 
     if not close:
         print("ERROR: no data collected")
@@ -134,7 +173,7 @@ def cmd_collect(args) -> int:
         print(f"wrote {fp}  shape={p.shape}")
 
     cov = panels["close"].notna().sum()
-    print(f"\nsymbols with data: {n_ok}; no data in window: {n_empty}")
+    print(f"\nsymbols with data: {n_ok}; no data in window: {n_empty}; errors: {n_err}")
     print(f"bars per symbol: min={int(cov.min())} med={int(cov.median())} max={int(cov.max())}")
     print(f"panel span: {panels['close'].index.min()} -> {panels['close'].index.max()}")
     delisted = int((panels['close'].iloc[-1].isna() & (cov > 0)).sum())
@@ -329,7 +368,13 @@ def build_argparser() -> argparse.ArgumentParser:
     c.add_argument("--out-dir", default="data/external/xsec")
     c.add_argument("--cache-dir", default="data/external/binance_archive")
     c.add_argument("--limit", type=int, default=None)
-    c.add_argument("--no-checksum", action="store_true")
+    c.add_argument("--no-checksum", action="store_true",
+                   help="skip .CHECKSUM verification (halves request count)")
+    c.add_argument("--workers", type=int, default=6,
+                   help="parallel symbol downloads (default 6; be polite)")
+    c.add_argument("--no-listing", action="store_true",
+                   help="probe every month instead of listing available "
+                        "periods first (much slower; debug only)")
     c.set_defaults(func=cmd_collect)
 
     b = sub.add_parser("backtest", help="run the tiered backtest")

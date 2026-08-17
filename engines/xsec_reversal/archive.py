@@ -209,6 +209,25 @@ class ArchiveClient:
     def __post_init__(self):
         self.cache_dir = Path(self.cache_dir)
         self.rejected_symbols: list = []
+        self._session = None
+
+    @property
+    def session(self):
+        """Shared requests.Session with a pooled adapter.
+
+        Without this every call pays a fresh TLS handshake -- the smoke run
+        logged "Starting new HTTPS connection" on EVERY request, which is the
+        difference between a 3-hour and a 10-hour collect.
+        """
+        if self._session is None:
+            import requests
+            from requests.adapters import HTTPAdapter
+            s = requests.Session()
+            adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32)
+            s.mount("https://", adapter)
+            s.headers.update({"User-Agent": "praxis-xsec/1.0"})
+            self._session = s
+        return self._session
 
     # ---------------- symbol enumeration (the survivorship fix) -------------
     @staticmethod
@@ -270,7 +289,7 @@ class ArchiveClient:
                     params = {"prefix": prefix, "delimiter": "/", "list-type": "2"}
                     if token:
                         params["continuation-token"] = token
-                    resp = requests.get(url, params=params, timeout=self.timeout)
+                    resp = self.session.get(url, params=params, timeout=self.timeout)
                     resp.raise_for_status()
 
                     if self._looks_like_html(resp.content):
@@ -322,6 +341,60 @@ class ArchiveClient:
               "survivorship bias this experiment exists to avoid."
         )
 
+    def list_symbol_periods(
+        self,
+        symbol: str,
+        interval: str,
+        scope: str = "monthly",
+    ) -> list[str]:
+        """List the periods ('YYYY-MM') that actually EXIST for a symbol.
+
+        One listing request replaces N blind month probes. A coin listed in 2024
+        would otherwise 404 for ~36 straight months, and with checksum requests
+        that wasted traffic dominates the whole collect.
+
+        Returns [] if the symbol/interval prefix holds nothing.
+        """
+        prefix = f"data/{self.market}/{scope}/klines/{symbol}/{interval}/"
+        candidates = ([self.listing_url] if self.listing_url
+                      else list(LISTING_URL_CANDIDATES))
+        pat = re.compile(
+            rf"{re.escape(symbol)}-{re.escape(interval)}-(\d{{4}}-\d{{2}})\.zip$")
+
+        for url in candidates:
+            periods, token, pages = [], None, 0
+            try:
+                while pages < 20:
+                    params = {"prefix": prefix, "list-type": "2"}
+                    if token:
+                        params["continuation-token"] = token
+                    resp = self.session.get(url, params=params, timeout=self.timeout)
+                    resp.raise_for_status()
+                    if self._looks_like_html(resp.content):
+                        raise ValueError("listing endpoint returned HTML, not XML")
+
+                    root = ElementTree.fromstring(resp.content)
+                    for c in root.findall(f"{_S3_NS}Contents"):
+                        k = c.find(f"{_S3_NS}Key")
+                        if k is None or not k.text:
+                            continue
+                        m = pat.search(k.text)
+                        if m:
+                            periods.append(m.group(1))
+                    trunc = root.find(f"{_S3_NS}IsTruncated")
+                    nxt = root.find(f"{_S3_NS}NextContinuationToken")
+                    pages += 1
+                    if trunc is not None and trunc.text == "true" and nxt is not None:
+                        token = nxt.text
+                    else:
+                        break
+                return sorted(set(periods))
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[%s] period listing via %s failed: %s", symbol, url, e)
+                continue
+        logger.warning("[%s] could not list periods; falling back to probing", symbol)
+        return []
+
     # ---------------- download -------------------------------------------
     def _rel_path(self, symbol: str, interval: str, period: str,
                   scope: str = "monthly") -> str:
@@ -349,7 +422,7 @@ class ArchiveClient:
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                r = requests.get(url, timeout=self.timeout)
+                r = self.session.get(url, timeout=self.timeout)
                 if r.status_code == 404:
                     logger.debug("[%s] no archive for %s (404) -- not listed then",
                                  symbol, period)
@@ -358,7 +431,7 @@ class ArchiveClient:
                 content = r.content
 
                 if self.verify_checksum:
-                    cs = requests.get(url + ".CHECKSUM", timeout=self.timeout)
+                    cs = self.session.get(url + ".CHECKSUM", timeout=self.timeout)
                     if cs.status_code == 200:
                         want = cs.text.split()[0].strip().lower()
                         got = hashlib.sha256(content).hexdigest()
@@ -406,10 +479,25 @@ class ArchiveClient:
         interval: str,
         periods: Iterable[str],
         scope: str = "monthly",
+        use_listing: bool = True,
     ) -> Optional[pd.DataFrame]:
         """Concatenate several periods for one symbol. Missing periods are
         skipped (and counted) rather than raising -- absence IS the listing
         history we need for point-in-time universe construction."""
+        periods = list(periods)
+        if use_listing:
+            available = set(self.list_symbol_periods(symbol, interval, scope))
+            if available:
+                wanted = [p for p in periods if p in available]
+                logger.debug("[%s] %d/%d requested periods exist in the archive",
+                             symbol, len(wanted), len(periods))
+                periods = wanted
+            # empty `available` -> listing failed; fall through to probing
+
+        if not periods:
+            logger.info("[%s] no periods available in the requested window", symbol)
+            return None
+
         frames, missing = [], 0
         for p in periods:
             try:

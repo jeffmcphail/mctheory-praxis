@@ -506,3 +506,40 @@ def test_symbols_file_roundtrip_is_utf8(tmp_path):
     f.write_text(payload, encoding="utf-8")
     got = f.read_text(encoding="utf-8")
     assert got.split() == ["BTCUSDT", "ETHUSDT", "ADABKRW"]
+
+
+def test_list_symbol_periods_parses_contents_keys():
+    """Period discovery must extract YYYY-MM from Contents keys and ignore
+    .CHECKSUM entries. This replaces blind month-probing, which wasted ~36
+    requests per recently-listed coin."""
+    import re as _re
+    from engines.xsec_reversal.archive import _S3_NS
+    from xml.etree import ElementTree
+
+    xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Contents><Key>data/spot/monthly/klines/BTCUSDT/4h/BTCUSDT-4h-2021-01.zip</Key></Contents>
+  <Contents><Key>data/spot/monthly/klines/BTCUSDT/4h/BTCUSDT-4h-2021-01.zip.CHECKSUM</Key></Contents>
+  <Contents><Key>data/spot/monthly/klines/BTCUSDT/4h/BTCUSDT-4h-2021-02.zip</Key></Contents>
+  <IsTruncated>false</IsTruncated>
+</ListBucketResult>"""
+    pat = _re.compile(r"BTCUSDT-4h-(\d{4}-\d{2})\.zip$")
+    root = ElementTree.fromstring(xml)
+    found = []
+    for c in root.findall(f"{_S3_NS}Contents"):
+        k = c.find(f"{_S3_NS}Key")
+        m = pat.search(k.text)
+        if m:
+            found.append(m.group(1))
+    assert sorted(set(found)) == ["2021-01", "2021-02"], found
+
+
+def test_archive_client_reuses_one_session():
+    """Connection pooling: the smoke run opened a NEW TLS connection per
+    request. One shared Session is the difference between a ~3h and a ~10h
+    collect."""
+    from engines.xsec_reversal.archive import ArchiveClient
+    c = ArchiveClient()
+    s1, s2 = c.session, c.session
+    assert s1 is s2
+    assert s1.get_adapter("https://data.binance.vision")._pool_maxsize >= 16
