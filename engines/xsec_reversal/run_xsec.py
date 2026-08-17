@@ -59,7 +59,8 @@ def _setup_logging(v: int) -> None:
 
 # --------------------------------------------------------------------------- #
 def cmd_symbols(args) -> int:
-    client = ArchiveClient(cache_dir=Path(args.cache_dir))
+    client = ArchiveClient(cache_dir=Path(args.cache_dir),
+                           listing_url=args.listing_url)
     syms = client.list_all_symbols(quote=args.quote)
     spec = UniverseSpec(quote=args.quote,
                         exclude_leveraged=not args.keep_leveraged,
@@ -275,20 +276,40 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+def _add_verbose(parser: argparse.ArgumentParser) -> None:
+    """Attach -v/--verbose to a SUBparser.
+
+    default=SUPPRESS is deliberate: without it, the subparser writes its own
+    default (0) into the shared namespace and silently clobbers a top-level
+    `-vv`. With SUPPRESS the attribute is only set when the flag is actually
+    given, so `-vv symbols` and `symbols -vv` both work.
+    """
+    parser.add_argument("-v", "--verbose", action="count",
+                        default=argparse.SUPPRESS,
+                        help="-v=INFO, -vv=DEBUG (accepted before or after the subcommand)")
+
+
 def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Tiered cross-sectional reversal (Cycle 60)")
-    p.add_argument("-v", "--verbose", action="count", default=0)
+    p.add_argument("-v", "--verbose", action="count", default=0,
+                   help="-v=INFO, -vv=DEBUG (accepted before or after the subcommand)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("symbols", help="enumerate ALL archive symbols (incl. delisted)")
+    _add_verbose(s)
     s.add_argument("--out", default="data/external/xsec/symbols_all.txt")
     s.add_argument("--cache-dir", default="data/external/binance_archive")
     s.add_argument("--quote", default="USDT")
+    s.add_argument("--listing-url", default=None,
+                   help="S3 origin for bucket enumeration; default tries "
+                        "the known candidates. NOTE: the data.binance.vision "
+                        "CDN returns an HTML browser page for listing queries.")
     s.add_argument("--keep-leveraged", action="store_true")
     s.add_argument("--keep-stables", action="store_true")
     s.set_defaults(func=cmd_symbols)
 
     c = sub.add_parser("collect", help="download klines and build panels")
+    _add_verbose(c)
     c.add_argument("--symbols-file", required=True)
     c.add_argument("--interval", default="4h")
     c.add_argument("--start", required=True, help="YYYY-MM")
@@ -300,6 +321,7 @@ def build_argparser() -> argparse.ArgumentParser:
     c.set_defaults(func=cmd_collect)
 
     b = sub.add_parser("backtest", help="run the tiered backtest")
+    _add_verbose(b)
     b.add_argument("--panel-dir", default="data/external/xsec")
     b.add_argument("--interval", default="4h")
     b.add_argument("--out-dir", default="outputs/xsec_reversal")

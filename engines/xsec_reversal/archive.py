@@ -55,6 +55,17 @@ import pandas as pd
 logger = logging.getLogger("xsec.archive")
 
 BASE_URL = "https://data.binance.vision"
+
+# *** LISTING vs DOWNLOAD ARE DIFFERENT ENDPOINTS ***
+# data.binance.vision is a CDN front. Requesting it with ?prefix=&delimiter=
+# returns the JavaScript FILE-BROWSER HTML PAGE (HTTP 200, ~2.5 KB), not S3
+# XML -- which fails with a cryptic "mismatched tag" ParseError. Bucket
+# enumeration must go to the S3 ORIGIN. File downloads work fine on the CDN.
+LISTING_URL_CANDIDATES = (
+    "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision",
+    "https://data.binance.vision",  # fallback only; currently serves HTML
+)
+
 _S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 
 # Magnitude threshold separating epoch-milliseconds from epoch-microseconds.
@@ -173,7 +184,8 @@ class ArchiveClient:
         {cache_dir}/spot/monthly/klines/{SYMBOL}/{interval}/{file}.zip
     """
     cache_dir: Path = Path("data/external/binance_archive")
-    base_url: str = BASE_URL
+    base_url: str = BASE_URL          # file downloads (CDN is fine and fast)
+    listing_url: Optional[str] = None  # bucket enumeration; None = try candidates
     market: str = "spot"
     timeout: int = 60
     max_retries: int = 3
@@ -185,56 +197,105 @@ class ArchiveClient:
         self.cache_dir = Path(self.cache_dir)
 
     # ---------------- symbol enumeration (the survivorship fix) -------------
+    @staticmethod
+    def _looks_like_html(content: bytes) -> bool:
+        head = content[:512].lstrip().lower()
+        return head.startswith(b"<!doctype html") or head.startswith(b"<html")
+
+    @staticmethod
+    def parse_listing_page(content: bytes, prefix: str) -> tuple[list[str], Optional[str]]:
+        """Parse one S3 ListBucketResult page -> (symbols, continuation_token).
+
+        Split out from the network call so it is unit-testable without HTTP.
+        """
+        root = ElementTree.fromstring(content)
+        syms = []
+        for cp in root.findall(f"{_S3_NS}CommonPrefixes"):
+            p = cp.find(f"{_S3_NS}Prefix")
+            if p is None or not p.text:
+                continue
+            sym = p.text[len(prefix):].strip("/")
+            if sym:
+                syms.append(sym)
+        truncated = root.find(f"{_S3_NS}IsTruncated")
+        nxt = root.find(f"{_S3_NS}NextContinuationToken")
+        token = (nxt.text if (truncated is not None and truncated.text == "true"
+                              and nxt is not None) else None)
+        return syms, token
+
     def list_all_symbols(
         self,
         interval_scope: str = "monthly",
         quote: Optional[str] = "USDT",
-        max_pages: int = 200,
+        max_pages: int = 500,
     ) -> list[str]:
         """Enumerate EVERY symbol in the archive, including delisted pairs.
 
         Walks the S3 bucket listing with delimiter='/' so each CommonPrefix is a
-        symbol directory. This is the survivorship-bias-free source of truth;
-        do NOT substitute the exchangeInfo API or fetch-all-trading-pairs.sh.
+        symbol directory. This is the survivorship-bias-free source of truth; do
+        NOT substitute exchangeInfo or fetch-all-trading-pairs.sh (verified: that
+        script calls api.binance.com/api/v3/exchangeInfo, i.e. LIVE SYMBOLS ONLY).
+
+        Tries LISTING_URL_CANDIDATES in order and rejects HTML responses, because
+        the CDN answers listing queries with a JS file-browser page (HTTP 200)
+        rather than XML.
         """
         import requests  # local import: module is importable without network deps
 
         prefix = f"data/{self.market}/{interval_scope}/klines/"
-        symbols: list[str] = []
-        token: Optional[str] = None
-        pages = 0
+        candidates = ([self.listing_url] if self.listing_url
+                      else list(LISTING_URL_CANDIDATES))
+        errors = []
 
-        while pages < max_pages:
-            params = {"prefix": prefix, "delimiter": "/", "list-type": "2"}
-            if token:
-                params["continuation-token"] = token
-            resp = requests.get(self.base_url, params=params, timeout=self.timeout)
-            resp.raise_for_status()
-            root = ElementTree.fromstring(resp.content)
+        for url in candidates:
+            symbols: list[str] = []
+            token: Optional[str] = None
+            pages = 0
+            try:
+                while pages < max_pages:
+                    params = {"prefix": prefix, "delimiter": "/", "list-type": "2"}
+                    if token:
+                        params["continuation-token"] = token
+                    resp = requests.get(url, params=params, timeout=self.timeout)
+                    resp.raise_for_status()
 
-            for cp in root.findall(f"{_S3_NS}CommonPrefixes"):
-                p = cp.find(f"{_S3_NS}Prefix")
-                if p is None or not p.text:
-                    continue
-                sym = p.text[len(prefix):].strip("/")
-                if sym:
-                    symbols.append(sym)
+                    if self._looks_like_html(resp.content):
+                        raise ValueError(
+                            f"listing endpoint returned HTML, not S3 XML "
+                            f"({len(resp.content)} bytes) -- this host serves the "
+                            f"JS file-browser UI for listing queries"
+                        )
 
-            truncated = root.find(f"{_S3_NS}IsTruncated")
-            nxt = root.find(f"{_S3_NS}NextContinuationToken")
-            pages += 1
-            if truncated is not None and truncated.text == "true" and nxt is not None:
-                token = nxt.text
-                time.sleep(self.polite_delay)
-            else:
-                break
+                    page_syms, token = self.parse_listing_page(resp.content, prefix)
+                    symbols.extend(page_syms)
+                    pages += 1
+                    if not token:
+                        break
+                    time.sleep(self.polite_delay)
 
-        if quote:
-            symbols = [s for s in symbols if s.endswith(quote)]
-        symbols = sorted(set(symbols))
-        logger.info("enumerated %d archive symbols (quote=%s, pages=%d) "
-                    "-- INCLUDES DELISTED", len(symbols), quote, pages)
-        return symbols
+                if not symbols:
+                    raise ValueError("listing returned zero symbols")
+
+                if quote:
+                    symbols = [s for s in symbols if s.endswith(quote)]
+                symbols = sorted(set(symbols))
+                logger.info("enumerated %d archive symbols from %s "
+                            "(quote=%s, pages=%d) -- INCLUDES DELISTED",
+                            len(symbols), url, quote, pages)
+                return symbols
+
+            except Exception as e:  # noqa: BLE001
+                logger.warning("listing endpoint %s failed: %s", url, e)
+                errors.append(f"{url}: {e}")
+                continue
+
+        raise RuntimeError(
+            "could not enumerate archive symbols from any listing endpoint.\n  "
+            + "\n  ".join(errors)
+            + "\n\nDO NOT fall back to api.binance.com/exchangeInfo -- that "
+              "returns only CURRENTLY LISTED symbols and reintroduces the "
+              "survivorship bias this experiment exists to avoid."
+        )
 
     # ---------------- download -------------------------------------------
     def _rel_path(self, symbol: str, interval: str, period: str,

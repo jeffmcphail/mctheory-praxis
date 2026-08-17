@@ -15,7 +15,8 @@ import pandas as pd
 import pytest
 
 from engines.xsec_reversal.archive import (
-    DEFAULT_KLINE_SCHEMA, KlineSchema, parse_kline_csv, month_range,
+    DEFAULT_KLINE_SCHEMA, ArchiveClient, KlineSchema, parse_kline_csv,
+    month_range,
 )
 from engines.xsec_reversal.universe import (
     TierSpec, UniverseSpec, assign_tiers, build_point_in_time_universe,
@@ -427,3 +428,53 @@ def test_capacity_orders_by_tier():
     assert len(cap) == 3
     assert cap.iloc[0]["max_book_usd"] > cap.iloc[-1]["max_book_usd"], \
         "liquid tier must have larger capacity than illiquid tier"
+
+
+# --------------------------------------------------------------------------- #
+# archive.py — bucket listing (regression: CDN returns HTML, not XML)
+# --------------------------------------------------------------------------- #
+_LISTING_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>data.binance.vision</Name>
+  <Prefix>data/spot/monthly/klines/</Prefix>
+  <Delimiter>/</Delimiter>
+  <IsTruncated>true</IsTruncated>
+  <NextContinuationToken>TOKEN123</NextContinuationToken>
+  <CommonPrefixes><Prefix>data/spot/monthly/klines/BTCUSDT/</Prefix></CommonPrefixes>
+  <CommonPrefixes><Prefix>data/spot/monthly/klines/ADABKRW/</Prefix></CommonPrefixes>
+  <CommonPrefixes><Prefix>data/spot/monthly/klines/ETHUSDT/</Prefix></CommonPrefixes>
+</ListBucketResult>"""
+
+_LISTING_XML_LAST = b"""<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Prefix>data/spot/monthly/klines/</Prefix>
+  <IsTruncated>false</IsTruncated>
+  <CommonPrefixes><Prefix>data/spot/monthly/klines/SOLUSDT/</Prefix></CommonPrefixes>
+</ListBucketResult>"""
+
+
+def test_parse_listing_page_extracts_symbols_and_token():
+    syms, token = ArchiveClient.parse_listing_page(
+        _LISTING_XML, "data/spot/monthly/klines/")
+    assert syms == ["BTCUSDT", "ADABKRW", "ETHUSDT"]
+    assert token == "TOKEN123"
+    # ADABKRW is a DELISTED pair (BKRW discontinued) -- its presence is the
+    # whole point of enumerating the bucket instead of exchangeInfo.
+    assert "ADABKRW" in syms
+
+
+def test_parse_listing_page_final_page_has_no_token():
+    syms, token = ArchiveClient.parse_listing_page(
+        _LISTING_XML_LAST, "data/spot/monthly/klines/")
+    assert syms == ["SOLUSDT"]
+    assert token is None
+
+
+def test_html_response_is_detected():
+    """REGRESSION: data.binance.vision answers listing queries with a JS
+    file-browser page (HTTP 200). Parsing that as XML raised a cryptic
+    'mismatched tag' error. It must be recognised as HTML instead."""
+    html = b"<!DOCTYPE html>\n<html><head><title>Binance Data</title></head>"
+    assert ArchiveClient._looks_like_html(html)
+    assert ArchiveClient._looks_like_html(b"   <html lang='en'>")
+    assert not ArchiveClient._looks_like_html(_LISTING_XML)
