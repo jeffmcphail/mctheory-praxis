@@ -37,7 +37,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from engines.xsec_reversal.archive import ArchiveClient, month_range
+from engines.xsec_reversal.archive import (
+    ArchiveClient, is_valid_symbol, month_range,
+)
 from engines.xsec_reversal.universe import (
     TierSpec, UniverseSpec, assign_tiers, build_point_in_time_universe,
     filter_symbol_names,
@@ -70,6 +72,9 @@ def cmd_symbols(args) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(kept) + "\n", encoding="utf-8")
     print(f"enumerated {len(syms)} archive symbols (INCLUDING DELISTED)")
+    if getattr(client, "rejected_symbols", None):
+        print(f"rejected {len(client.rejected_symbols)} non-ticker bucket "
+              f"prefix(es): {client.rejected_symbols[:10]}")
     print(f"after name filters: {len(kept)}")
     print(f"wrote {out}")
     print("NOTE: this list comes from the S3 bucket listing, NOT exchangeInfo -- "
@@ -78,7 +83,14 @@ def cmd_symbols(args) -> int:
 
 
 def cmd_collect(args) -> int:
-    symbols = [s.strip() for s in Path(args.symbols_file).read_text().split() if s.strip()]
+    # encoding is EXPLICIT: the file is written UTF-8, and Windows would
+    # otherwise decode it as cp1252 and crash on any non-ASCII byte.
+    raw = Path(args.symbols_file).read_text(encoding='utf-8')
+    symbols = [s.strip() for s in raw.split() if s.strip()]
+    bad = [s for s in symbols if not is_valid_symbol(s)]
+    if bad:
+        print(f'WARNING: dropping {len(bad)} invalid symbol name(s) from the list: {bad[:10]}')
+        symbols = [s for s in symbols if is_valid_symbol(s)]
     if args.limit:
         symbols = symbols[: args.limit]
     periods = month_range(args.start, args.end)

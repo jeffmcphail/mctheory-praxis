@@ -478,3 +478,31 @@ def test_html_response_is_detected():
     assert ArchiveClient._looks_like_html(html)
     assert ArchiveClient._looks_like_html(b"   <html lang='en'>")
     assert not ArchiveClient._looks_like_html(_LISTING_XML)
+
+
+def test_is_valid_symbol_rejects_non_ticker_names():
+    """REGRESSION: the bucket listing contained a prefix with a non-ASCII byte
+    (0x81), which crashed reading the symbols file on Windows (cp1252) and would
+    have 404'd on download -- silently counted as 'no data in window'."""
+    from engines.xsec_reversal.archive import is_valid_symbol
+    assert is_valid_symbol("BTCUSDT")
+    assert is_valid_symbol("1INCHUSDT")     # tickers may start with a digit
+    assert is_valid_symbol("ADABKRW")       # delisted pairs are still valid names
+    assert not is_valid_symbol("BAD\x81SYM")
+    assert not is_valid_symbol("lowercase")
+    assert not is_valid_symbol("A")
+    assert not is_valid_symbol("sym-with-dash")
+    assert not is_valid_symbol("")
+
+
+def test_symbols_file_roundtrip_is_utf8(tmp_path):
+    """The symbols file must be written AND read as UTF-8 explicitly.
+
+    Writing UTF-8 and reading with the platform default (cp1252 on Windows)
+    raised UnicodeDecodeError on byte 0x81. Both sides are now pinned.
+    """
+    f = tmp_path / "symbols.txt"
+    payload = "BTCUSDT\nETHUSDT\nADABKRW\n"
+    f.write_text(payload, encoding="utf-8")
+    got = f.read_text(encoding="utf-8")
+    assert got.split() == ["BTCUSDT", "ETHUSDT", "ADABKRW"]

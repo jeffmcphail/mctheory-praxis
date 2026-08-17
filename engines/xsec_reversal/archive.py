@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import re
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -67,6 +68,18 @@ LISTING_URL_CANDIDATES = (
 )
 
 _S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+
+# Binance tickers are ASCII uppercase alphanumeric (e.g. BTCUSDT, 1INCHUSDT).
+# The bucket listing can contain stray prefixes that are NOT valid symbols --
+# including names with non-ASCII bytes. Those would 404 on download and be
+# silently miscounted as "symbol had no data in the window", so they are
+# rejected at enumeration time and reported.
+_VALID_SYMBOL_RE = re.compile(r"^[A-Z0-9]{3,30}$")
+
+
+def is_valid_symbol(name: str) -> bool:
+    """True if `name` looks like a real Binance ticker."""
+    return bool(_VALID_SYMBOL_RE.match(name))
 
 # Magnitude threshold separating epoch-milliseconds from epoch-microseconds.
 _US_THRESHOLD = 1e14
@@ -195,6 +208,7 @@ class ArchiveClient:
 
     def __post_init__(self):
         self.cache_dir = Path(self.cache_dir)
+        self.rejected_symbols: list = []
 
     # ---------------- symbol enumeration (the survivorship fix) -------------
     @staticmethod
@@ -276,12 +290,23 @@ class ArchiveClient:
                 if not symbols:
                     raise ValueError("listing returned zero symbols")
 
+                symbols = sorted(set(symbols))
+                n_raw = len(symbols)
+                invalid = [s for s in symbols if not is_valid_symbol(s)]
+                if invalid:
+                    logger.warning(
+                        "rejected %d non-ticker prefix(es) from the bucket "
+                        "listing (not ASCII-uppercase-alphanumeric): %r",
+                        len(invalid), invalid[:10])
+                    self.rejected_symbols = invalid
+                symbols = [s for s in symbols if is_valid_symbol(s)]
+
                 if quote:
                     symbols = [s for s in symbols if s.endswith(quote)]
-                symbols = sorted(set(symbols))
                 logger.info("enumerated %d archive symbols from %s "
-                            "(quote=%s, pages=%d) -- INCLUDES DELISTED",
-                            len(symbols), url, quote, pages)
+                            "(raw=%d, rejected=%d, quote=%s, pages=%d) "
+                            "-- INCLUDES DELISTED",
+                            len(symbols), url, n_raw, len(invalid), quote, pages)
                 return symbols
 
             except Exception as e:  # noqa: BLE001
