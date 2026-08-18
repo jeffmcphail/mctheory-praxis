@@ -386,30 +386,59 @@ def cmd_backtest(args) -> int:
         print("across a PLAUSIBLE range of spread assumptions -- not just the "
               "cheapest one.")
 
-    # ---- deflated Sharpe on the grid ------------------------------------
-    if len(trial_sharpes) > 1:
-        try:
-            from engines.infobar_lstm.deflated_sharpe import (
-                deflated_sharpe_ratio, trial_sharpe_stats,
-            )
-            stats = trial_sharpe_stats(trial_sharpes)
-            best_sr = max(trial_sharpes)
-            n_periods = int(df["n_periods"].max())
-            dsr = deflated_sharpe_ratio(
-                observed_sr=best_sr / np.sqrt(args.periods_per_year / reb_every),
-                var_sr_across_trials=stats["var"] / (args.periods_per_year / reb_every),
-                n_trials=stats["n"], n_obs=n_periods, skew=0.0, kurt=3.0)
-            print("\n" + "=" * 78)
-            print("DEFLATED SHARPE (multiple-testing correction)")
-            print("=" * 78)
-            print(f"trials={stats['n']}  best_ann_sharpe={best_sr:.3f}")
-            print(f"expected-max-Sharpe under null (per-period)={dsr.sr0_expected_max:.4f}")
-            print(f"DSR={dsr.dsr:.4f}   "
-                  f"{'PASSES' if dsr.dsr > 0.95 else 'FAILS'} the 0.95 pre-registered gate")
-            print("NOTE: skew/kurtosis passed as normal defaults here; feed the "
-                  "realised moments of the winning config for the final verdict.")
-        except Exception as e:  # noqa: BLE001
-            logger.warning("DSR step skipped: %s", e)
+    # ---- deflated Sharpe, computed within COHERENT CELLS ------------------
+    # Configs with different holding periods have different annualisation
+    # factors and different n_obs, so pooling them into one "trial population"
+    # is incoherent. Within a (tier, holding, spread_mult) cell all 24 configs
+    # share reb_every and n_periods, so the DSR is well posed there.
+    print("\n" + "=" * 78)
+    print("DEFLATED SHARPE -- per (tier, holding) cell at spread multiplier 1.0")
+    print("=" * 78)
+    try:
+        from engines.infobar_lstm.deflated_sharpe import deflated_sharpe_ratio
+
+        base = df[df["spread_mult"] == 1.0]
+        print(f"{'tier':14s} {'h':>3s} {'trials':>7s} {'n_obs':>7s} "
+              f"{'best_SR_ann':>12s} {'DSR':>8s}  verdict")
+        best_by_tier = {}
+        for (tier, h), cell in base.groupby(["tier", "holding"]):
+            sr = cell["net_sharpe"].dropna()
+            if len(sr) < 3:
+                continue
+            ann = np.sqrt(args.periods_per_year / float(h))
+            n_obs = int(cell["n_periods"].max())
+            try:
+                d = deflated_sharpe_ratio(
+                    observed_sr=float(sr.max()) / ann,
+                    var_sr_across_trials=float(sr.var(ddof=1)) / (ann ** 2),
+                    n_trials=int(len(sr)), n_obs=n_obs, skew=0.0, kurt=3.0)
+                dsr = float(d.dsr)
+            except Exception:  # noqa: BLE001
+                continue
+            verdict = "PASS" if dsr > 0.95 else "fail"
+            print(f"{tier:14s} {int(h):3d} {len(sr):7d} {n_obs:7d} "
+                  f"{sr.max():12.3f} {dsr:8.4f}  {verdict}")
+            if dsr > best_by_tier.get(tier, (-1, None))[0]:
+                best_by_tier[tier] = (dsr, h)
+        print("\nNOTE: selecting the best CELL adds further multiplicity on top of")
+        print("the within-cell correction, so these DSRs are an UPPER bound on")
+        print("significance, not a final verdict.")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("DSR step skipped: %s", e)
+
+    # ---- criterion 4: demean must beat none -------------------------------
+    print("\n" + "=" * 78)
+    print("CRITERION 4 -- residualisation (demean should beat none)")
+    print("=" * 78)
+    b1 = df[df["spread_mult"] == 1.0]
+    for tier, g in b1.groupby("tier"):
+        dm = g[g["residualize"] == "demean"]["net_sharpe"]
+        nn = g[g["residualize"] == "none"]["net_sharpe"]
+        if dm.empty or nn.empty:
+            continue
+        ok = "OK" if dm.max() > nn.max() else "VIOLATED (beta dispersion?)"
+        print(f"{tier:14s} demean best={dm.max():7.3f}  none best={nn.max():7.3f}"
+              f"   median demean={dm.median():7.3f} none={nn.median():7.3f}   {ok}")
 
     cap = capacity_analysis(uni, SignalSpec(quantile=args.quantile),
                             participation_rate=args.participation)
