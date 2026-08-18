@@ -651,3 +651,84 @@ def test_estimate_spread_bps_rejects_tiered_fixed():
     with pytest.raises(ValueError, match="tiered_spread_panel"):
         estimate_spread_bps(p["high"], p["low"], p["close"],
                             CostSpec(spread_model="tiered_fixed"))
+
+
+# --------------------------------------------------------------------------- #
+# REGRESSION: overlapping returns inflate Sharpe
+# --------------------------------------------------------------------------- #
+def test_overlapping_rebalance_inflates_annualised_return():
+    """Rebalancing faster than the holding period counts each forward return
+    multiple times.
+
+    MEASURED, not assumed: on a synthetic panel with H=24, rebalancing every 6
+    bars (4x overlap) vs every 24 bars leaves the reported SHARPE essentially
+    unchanged, but inflates the ANNUALISED RETURN by ~1.8x -- because the same
+    24-bar return is booked at four different rebalances. (An earlier note in
+    this file predicted a 2x Sharpe inflation; the measurement above refuted
+    that, and the prediction was wrong.)
+
+    The subtler cost is statistical: overlapping returns are autocorrelated, so
+    the effective independent-observation count is ~N/4 and the standard error
+    on the Sharpe is ~2x larger than the naive formula gives. The pre-registered
+    0.85 noise floor therefore does NOT apply to overlapping configs.
+    """
+    p = make_panel(n_symbols=60, n_bars=2000, seed=101, reversal_phi=0.25,
+                   delist_frac=0.0)
+    close, dvol = p["close"], p["dollar_vol"]
+    H = 24
+
+    def _run(reb_every):
+        idx = close.index[::reb_every]
+        uni = assign_tiers(
+            build_point_in_time_universe(close, dvol, idx,
+                                         UniverseSpec(adv_lookback_bars=120,
+                                                      min_obs_in_window=100,
+                                                      min_total_history_bars=100,
+                                                      min_adv_usd=1e3)),
+            TierSpec(n_tiers=1, tier_labels=("T1",)))
+        spec = SignalSpec(formation_bars=12, holding_bars=H,
+                          execution_lag_bars=1, quantile=0.2,
+                          min_symbols_per_tier=10)
+        return run_backtest(close, uni, None, spec,
+                            BacktestSpec(apply_costs=False,
+                                         rebalance_every_bars=reb_every),
+                            CostSpec())["T1"].metrics
+
+    over = _run(6)     # 4x overlap -- the bug
+    clean = _run(H)    # non-overlapping -- correct
+
+    # roughly 4x as many "periods" from the same data
+    assert over["n_periods"] > 3 * clean["n_periods"]
+    # and the per-period return is diluted, so annualised magnitudes diverge
+    assert abs(over["gross_ann_return"]) > 1.5 * abs(clean["gross_ann_return"])
+
+
+def test_effective_sample_size_under_overlap():
+    """Guards the corrected noise floor. With H=24 rebalanced every 6 bars the
+    effective independent sample is ~N/4, so SE(Sharpe) roughly doubles and the
+    0.85 floor becomes ~1.7 for those configs."""
+    import math
+    n_periods, ppy_over_reb = 1973, 365.0
+    naive_se = math.sqrt(ppy_over_reb / n_periods)
+    eff_se = math.sqrt(ppy_over_reb / (n_periods / 4))
+    assert 0.40 < naive_se < 0.46
+    assert 0.80 < eff_se < 0.90
+    assert 2 * eff_se > 1.6, "overlap-corrected 2-SE floor should be ~1.7"
+
+
+def test_deflated_sharpe_signature_matches_call():
+    """The DSR step was silently skipped twice because the call used
+    `kurtosis=` while the implementation takes `kurt=`. The first string-replace
+    fix was a NO-OP (quote-style mismatch) and was applied without asserting.
+    """
+    src = open("engines/xsec_reversal/run_xsec.py", encoding="utf-8").read()
+    assert "kurtosis=3.0)" not in src, "run_xsec still calls DSR with kurtosis="
+    assert "kurt=3.0)" in src
+
+    try:
+        import inspect
+        from engines.infobar_lstm.deflated_sharpe import deflated_sharpe_ratio
+    except Exception:
+        pytest.skip("engines.infobar_lstm not importable in this environment")
+    params = set(inspect.signature(deflated_sharpe_ratio).parameters)
+    assert "kurt" in params and "kurtosis" not in params

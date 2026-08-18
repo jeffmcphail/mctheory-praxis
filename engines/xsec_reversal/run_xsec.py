@@ -201,12 +201,28 @@ def cmd_backtest(args) -> int:
                               panels["low"], panels["dollar_vol"])
     print(f"panels loaded: close={close.shape}, span {close.index.min()} -> {close.index.max()}")
 
+    # *** THE SPLIT MUST ACTUALLY SLICE THE DATA. ***
+    # The first version computed is_close/oos_close, PRINTED them, and then ran
+    # the backtest on the full panel anyway -- so an "IS-only" grid silently
+    # consumed the sealed OOS window. See CYCLE60_COST_MODEL_FINDING.md.
     if args.train_end:
         cut = pd.Timestamp(args.train_end, tz="UTC")
-        is_close = close.loc[:cut]
-        oos_close = close.loc[cut:]
-        print(f"IS: {is_close.index.min()} -> {is_close.index.max()} ({len(is_close)} bars)")
-        print(f"OOS: {oos_close.index.min()} -> {oos_close.index.max()} ({len(oos_close)} bars)")
+        if args.oos:
+            close = close.loc[cut:]
+            high = high.loc[cut:]
+            low = low.loc[cut:]
+            dvol = dvol.loc[cut:]
+            print(f"*** OOS SLICE ACTIVE: {close.index.min()} -> {close.index.max()} "
+                  f"({len(close)} bars) ***")
+        else:
+            close = close.loc[:cut]
+            high = high.loc[:cut]
+            low = low.loc[:cut]
+            dvol = dvol.loc[:cut]
+            print(f"*** IS SLICE ACTIVE: {close.index.min()} -> {close.index.max()} "
+                  f"({len(close)} bars) ***")
+    else:
+        print("*** NO SPLIT: running on the FULL panel ***")
 
     cost_spec = CostSpec(
         spread_model=args.spread_model,
@@ -239,11 +255,36 @@ def cmd_backtest(args) -> int:
     )
     tspec = TierSpec(n_tiers=args.n_tiers)
 
-    reb_every = args.rebalance_every or args.holding
-    reb_index = close.index[::reb_every]
-    print(f"building point-in-time universe over {len(reb_index)} rebalances ...")
-    uni = build_point_in_time_universe(close, dvol, reb_index, uspec)
-    uni = assign_tiers(uni, tspec)
+    # ---- grid definition must come FIRST: the universe depends on the
+    # rebalance frequency, which follows each config's HOLDING period.
+    if args.grid:
+        formations = [3, 6, 12, 24]
+        holdings = [3, 6, 12, 24]
+        quantiles = [0.1, 0.2, 0.3]
+        resid = ["demean", "none"]
+    else:
+        formations = [args.formation]
+        holdings = [args.holding]
+        quantiles = [args.quantile]
+        resid = [args.residualize]
+
+    # *** NON-OVERLAPPING BY CONSTRUCTION. ***
+    # The first version pinned rebalance_every to args.holding (default 6) for
+    # every config in the grid. With h=24 that recomputed positions every 6 bars
+    # while measuring 24-bar forward returns -- each return counted 4x, and the
+    # Sharpe annualisation over-stated the independent-observation count by the
+    # same factor (x2 in Sharpe at h=24). Rebalancing on the holding period
+    # makes the return series non-overlapping.
+    reb_freqs = sorted({args.rebalance_every or h for h in holdings})
+    universes, reb_indices = {}, {}
+    for rf in reb_freqs:
+        idx = close.index[::rf]
+        print(f"building point-in-time universe for rebalance_every={rf} "
+              f"({len(idx)} rebalances) ...")
+        u = assign_tiers(build_point_in_time_universe(close, dvol, idx, uspec), tspec)
+        universes[rf], reb_indices[rf] = u, idx
+    uni = universes[reb_freqs[0]]
+    reb_every = reb_freqs[0]
 
     per_dt = uni[uni["eligible"]].groupby("dt").size()
     if per_dt.empty or per_dt.median() == 0:
@@ -261,18 +302,6 @@ def cmd_backtest(args) -> int:
         print("  Tiers would be too thin to rank. Loosen the filters or reduce "
               "--n-tiers / --min-names. Refusing to run.")
         return 1
-
-    # ---- grid ------------------------------------------------------------
-    if args.grid:
-        formations = [3, 6, 12, 24]
-        holdings = [3, 6, 12, 24]
-        quantiles = [0.1, 0.2, 0.3]
-        resid = ["demean", "none"]
-    else:
-        formations = [args.formation]
-        holdings = [args.holding]
-        quantiles = [args.quantile]
-        resid = [args.residualize]
 
     combos = [c for c in itertools.product(formations, holdings, quantiles, resid)]
 
@@ -294,23 +323,29 @@ def cmd_backtest(args) -> int:
     print()
 
     records, trial_sharpes = [], []
+    spread_cache = {}
     for mult in multipliers:
-      if cost_spec.spread_model == "tiered_fixed":
-        spread_bps = tiered_spread_panel(uni, close.index, close.columns,
-                                         tier_spreads, multiplier=mult)
       for (f, h, q, r) in combos:
+        rf = args.rebalance_every or h          # non-overlapping
+        uni_h = universes[rf]
+        if cost_spec.spread_model == "tiered_fixed":
+            key = (rf, mult)
+            if key not in spread_cache:
+                spread_cache[key] = tiered_spread_panel(
+                    uni_h, close.index, close.columns, tier_spreads, multiplier=mult)
+            spread_bps = spread_cache[key]
         sspec = SignalSpec(formation_bars=f, holding_bars=h, quantile=q,
                            residualize_mode=r,
                            execution_lag_bars=args.execution_lag,
                            min_symbols_per_tier=args.min_names)
         bspec = BacktestSpec(periods_per_year=args.periods_per_year,
-                             rebalance_every_bars=reb_every,
+                             rebalance_every_bars=rf,
                              apply_costs=True)
-        res = run_backtest(close, uni, spread_bps, sspec, bspec, cost_spec)
+        res = run_backtest(close, uni_h, spread_bps, sspec, bspec, cost_spec)
         for tier, r_ in res.items():
             rec = {"formation": f, "holding": h, "quantile": q,
-                   "residualize": r, "spread_mult": mult, "tier": tier,
-                   **r_.metrics}
+                   "residualize": r, "spread_mult": mult,
+                   "rebalance_every": rf, "tier": tier, **r_.metrics}
             records.append(rec)
             if mult == 1.0 and not np.isnan(r_.metrics.get("net_sharpe", np.nan)):
                 trial_sharpes.append(r_.metrics["net_sharpe"])
@@ -363,7 +398,7 @@ def cmd_backtest(args) -> int:
             dsr = deflated_sharpe_ratio(
                 observed_sr=best_sr / np.sqrt(args.periods_per_year / reb_every),
                 var_sr_across_trials=stats["var"] / (args.periods_per_year / reb_every),
-                n_trials=stats["n"], n_obs=n_periods, skew=0.0, kurtosis=3.0)
+                n_trials=stats["n"], n_obs=n_periods, skew=0.0, kurt=3.0)
             print("\n" + "=" * 78)
             print("DEFLATED SHARPE (multiple-testing correction)")
             print("=" * 78)
@@ -532,7 +567,10 @@ def build_argparser() -> argparse.ArgumentParser:
     b.add_argument("--panel-dir", default="data/external/xsec")
     b.add_argument("--interval", default="4h")
     b.add_argument("--out-dir", default="outputs/xsec_reversal")
-    b.add_argument("--train-end", default=None, help="IS/OOS split date")
+    b.add_argument("--train-end", default=None,
+                   help="split date; data IS ACTUALLY SLICED at this point")
+    b.add_argument("--oos", action="store_true",
+                   help="run on the OOS slice (after --train-end) instead of IS")
     b.add_argument("--grid", action="store_true", help="run the pre-registered grid")
     b.add_argument("--formation", type=int, default=6)
     b.add_argument("--holding", type=int, default=6)
