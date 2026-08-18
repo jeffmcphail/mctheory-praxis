@@ -732,3 +732,34 @@ def test_deflated_sharpe_signature_matches_call():
         pytest.skip("engines.infobar_lstm not importable in this environment")
     params = set(inspect.signature(deflated_sharpe_ratio).parameters)
     assert "kurt" in params and "kurtosis" not in params
+
+
+def test_demean_is_a_noop_for_rank_based_positions():
+    """REGRESSION / DESIGN DEFECT D4 (Cycle 60).
+
+    Cross-sectional demeaning subtracts the same scalar from every symbol at a
+    timestamp, and positions are built by RANKING the signal. Ranking is
+    invariant to a constant shift, so 'demean' and 'none' are identical -- which
+    silently made the pre-registered beta-dispersion control inert and halved
+    the effective trial count in the deflated-Sharpe correction.
+
+    Only 'beta' (a per-symbol adjustment) can actually change the ranking.
+    """
+    p = make_panel(n_symbols=40, n_bars=600, seed=123, delist_frac=0.0)
+    form = compute_formation_returns(p["close"], 6)
+    mask = p["close"].notna()
+
+    sig_none = residualize(form, p["close"], SignalSpec(residualize_mode="none"))
+    sig_dm = residualize(form, p["close"], SignalSpec(residualize_mode="demean"))
+
+    pos_none = build_positions(sig_none, mask, SignalSpec(quantile=0.2))
+    pos_dm = build_positions(sig_dm, mask, SignalSpec(quantile=0.2))
+    pd.testing.assert_frame_equal(pos_none, pos_dm)
+
+    # 'beta' uses a PER-SYMBOL adjustment, so it must differ from raw.
+    sig_beta = residualize(form, p["close"],
+                           SignalSpec(residualize_mode="beta",
+                                      beta_lookback_bars=120))
+    pos_beta = build_positions(sig_beta, mask, SignalSpec(quantile=0.2))
+    assert not pos_beta.equals(pos_none), \
+        "'beta' must change the ranking, otherwise there is no working control"

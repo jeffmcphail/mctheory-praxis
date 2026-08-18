@@ -108,8 +108,16 @@ def residualize(form_ret: pd.DataFrame,
                 market_proxy: Optional[pd.Series] = None) -> pd.DataFrame:
     """Remove the common factor from formation returns.
 
-    'demean' : subtract the cross-sectional mean at each timestamp (equal-weight
-               index proxy). Simple, robust, no estimation risk.
+    'demean' : subtract the cross-sectional mean at each timestamp.
+
+               *** WARNING: THIS IS A NO-OP FOR RANK-BASED POSITIONS. ***
+               Demeaning subtracts the SAME scalar from every symbol at a given
+               timestamp, and build_positions ranks the signal. Ranking is
+               invariant to a constant shift, so 'demean' and 'none' produce
+               IDENTICAL positions and identical P&L. Measured in Cycle 60:
+               best and median net Sharpe matched to 3 decimals in all three
+               tiers. Use 'beta' if you need an actual market-neutrality
+               control -- only a PER-SYMBOL adjustment changes the ranking.
     'beta'   : subtract beta_i * market_return, with beta estimated on a
                TRAILING window (causal). More precise, adds estimation noise.
     'none'   : raw returns (kept as a pre-registered control -- it tests
