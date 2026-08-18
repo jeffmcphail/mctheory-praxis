@@ -1,0 +1,115 @@
+{
+  "phase": "cycle59_phase3_layer_a",
+  "ambiguities": {
+    "zscore_denominator": "var",
+    "return_mode": "simple",
+    "adjustment": "unadj",
+    "eighth_indicator": "n/a"
+  },
+  "engineering": {
+    "price_source": "trade",
+    "bar_universe": "rth",
+    "ewma_reset": "none",
+    "flat_days": "include",
+    "execution_lag": 0
+  },
+  "winner": {
+    "gdx_weight": 2.0,
+    "entry_threshold": 1.0,
+    "lookback": 30
+  },
+  "targets": {
+    "annual_return": 0.1729,
+    "sharpe": 1.947,
+    "calmar": 0.984,
+    "cumulative_3y": 0.73
+  },
+  "test_round_trips": {
+    "sessions": 756,
+    "total_round_trips": 37879,
+    "mean_per_day": 50.104497354497354,
+    "median_per_day": 49.0,
+    "p95_per_day": 70.0,
+    "max_per_day": 91.0,
+    "sessions_with_a_trade": 756,
+    "share_of_sessions_traded": 1.0,
+    "mean_per_active_day": 50.104497354497354
+  },
+  "test_trip_economics": {
+    "trips": 37879,
+    "mean_gross_bps": 0.4250826144100277,
+    "median_gross_bps": 0.5931758930954878,
+    "std_gross_bps": 7.534972000286224,
+    "win_rate": 0.5552680904986932,
+    "mean_hold_bars": 7.396129781673222,
+    "median_hold_bars": 3.0,
+    "breakeven_cost_bps_per_round_trip": 0.4250826144100277
+  },
+  "test_performance": {
+    "n_days": 756,
+    "cumulative": 3.9355125768852393,
+    "annual_arithmetic": 0.5367234783745813,
+    "annual_cagr": 0.7025926502994735,
+    "vol_annual": 0.08985058624349654,
+    "sharpe": 5.97351114571531,
+    "max_drawdown": 0.041438772538480384,
+    "calmar_cagr": 16.95495805642023,
+    "calmar_arithmetic": 12.952205036386527,
+    "hit_rate": 0.6759259259259259,
+    "best_day": 0.03571306510422734,
+    "worst_day": -0.020601596840544634
+  },
+  "train_performance": {
+    "n_days": 2080,
+    "cumulative": 108.78529485021427,
+    "annual_arithmetic": 0.575201642324487,
+    "annual_cagr": 0.7669317504338895,
+    "vol_annual": 0.10326195184258674,
+    "sharpe": 5.5703154168665,
+    "max_drawdown": 0.08106219274239079,
+    "calmar_cagr": 9.46102892714903,
+    "calmar_arithmetic": 7.095806600648371,
+    "hit_rate": 0.6673076923076923,
+    "best_day": 0.03577876143786307,
+    "worst_day": -0.03196711422465259
+  },
+  "benchmarks": {
+    "buy_and_hold": {
+      "n_days": 756,
+      "cumulative": 0.4311389256629392,
+      "annual_arithmetic": 0.12967437719832048,
+      "annual_cagr": 0.12692219220637124,
+      "vol_annual": 0.14247860387134012,
+      "sharpe": 0.9101322842510303,
+      "max_drawdown": 0.1401397988135158,
+      "calmar_cagr": 0.9056827059903716,
+      "calmar_arithmetic": 0.9253215595869261,
+      "hit_rate": 0.5459387483355526,
+      "best_day": 0.04825700615174311,
+      "worst_day": -0.05353386621792178
+    },
+    "intraday_long": {
+      "n_days": 756,
+      "cumulative": -0.06161020196062761,
+      "annual_arithmetic": -0.0166988705707554,
+      "annual_cagr": -0.02097354836852494,
+      "vol_annual": 0.0948622106920437,
+      "sharpe": -0.17603290550507875,
+      "max_drawdown": 0.15867467309513572,
+      "calmar_cagr": -0.13217955934246636,
+      "calmar_arithmetic": -0.10523967212299437,
+      "hit_rate": 0.5039893617021277,
+      "best_day": 0.03236128281579531,
+      "worst_day": -0.041406632444245806
+    },
+    "buy_and_hold_total": 0.4311389256629392,
+    "intraday_long_total": -0.06161020196062761,
+    "correlation_to_intraday_long": 0.013968735663763152,
+    "long_bar_share": 0.4964948350573605,
+    "short_bar_share": 0.5035051649426395,
+    "time_in_market": 0.955717253589594,
+    "long_trip_share": 0.499617202143668,
+    "beats_intraday_long": true
+  },
+  "warnings": []
+}
