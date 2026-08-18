@@ -159,3 +159,6 @@ outputs/funding_studio_sessions/
 # Standing rule: never commit SQLite DB files.
 *.db
 .ruff_cache/
+praxis_delta_*.zip
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
