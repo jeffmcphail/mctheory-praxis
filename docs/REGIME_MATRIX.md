@@ -34,6 +34,66 @@ The regime matrix is a principled hierarchical feature selection protocol:
 
 ---
 
+## Live Status (measured, Cycle 61 T5 / Cycle 62A)
+
+The table above is the DESIGN. This one is what the collectors actually
+support. The distinction matters: an axis documented as 3-state but always
+returning 0 is worse than an axis documented as absent, because the feature
+vector looks complete either way. Cycle 61 T5 measured only 8 of 12 axes
+carrying information; Cycle 62A repairs two of the four.
+
+Status values:
+- **LIVE** — computes and varies on current data.
+- **DEGENERATE** — computes, but is constant or near-constant over the
+  available sample. Not broken; uninformative as a feature until the data
+  widens.
+- **DEGRADED** — computes at reduced fidelity because an input is missing, and
+  now says so (announced in `RegimeState.missing` + `RegimeState.degraded`).
+- **UNCOMPUTABLE** — cannot be computed at all; forced to 0 and listed in
+  `RegimeState.missing`.
+- **STUB** — permanently returns a constant because the required data source
+  does not exist in this project.
+
+| Class | Status | Evidence | Cycle 62A |
+|---|---|---|---|
+| A Trend | LIVE | computes and varies | — |
+| B Vol level | LIVE | computes and varies | — |
+| C Vol trend | LIVE | computes and varies | — |
+| D Serial correlation | LIVE | computes and varies | — |
+| E Microstructure | DEGENERATE | computable, constant over sample (Cycle 61 T5) | not addressed |
+| F Funding/positioning | **LIVE (was DEGRADED)** | 3 of 5 states reachable without OI; 90.2% of observations on state 0 | **REPAIRED** — `open_interest` table seeded (7,368 rows, 6 assets x 2 venues); T5 makes the OI-less case announce itself |
+| G Liquidity | LIVE | computes and varies | — |
+| H Cross-asset corr | DEGENERATE | computable, constant over sample (Cycle 61 T5) | indirectly improved — universe went 2 → 20 assets |
+| I Volume participation | LIVE | computes and varies | — |
+| J Term structure | LIVE | needs funding only | — |
+| K Cross-sectional dispersion | **LIVE (was UNCOMPUTABLE)** | needs ≥3 universe assets; every OHLCV table held exactly BTC+ETH, so K was in `missing` on 100% of evaluations | **REPAIRED** — `ohlcv_daily` now holds 20 assets; verified at the acting layer (state=1, absent from `missing`) |
+| L RV / IV spread | **STUB (permanent)** | returns 0 whenever `dvol is None`; no options data source exists in this project | not addressed — needs a DVOL feed, not a code change |
+
+### The class F mechanism (Cycle 61 T4, fixed in Cycle 62A T5)
+
+`compute_funding_regime` initialises `oi_change_7d = 0.0` and only overwrites
+it when an OI series of at least `OI_MIN_PAYMENTS` (22) observations is
+supplied. States ±2 require `abs(oi_change_7d) > 0.10`, so without OI they are
+unreachable:
+
+| | Reachable states |
+|---|---|
+| Declared | `[-2, -1, 0, +1, +2]` |
+| With OI | `[-2, -1, 0, +1, +2]` |
+| Without OI | `[-1, 0, +1]` |
+
+Neither production caller supplied OI (`engines/cpo_training.py`,
+`engines/funding_rate_strategy.py`), nothing raised, and F never appeared in
+`RegimeState.missing` — so every regime feature vector Praxis has ever
+produced looked complete and was not.
+
+Cycle 62A T5 makes the OI-less case append `F` to `missing`, record a reason
+in `RegimeState.degraded`, and log a warning. The generalisable rule:
+**a degraded axis that does not announce its degradation is worse than an
+absent one.**
+
+---
+
 ## Relevance Matrix
 
 | Strategy | A | B | C | D | E | F | G | H | I | J | K | L |
