@@ -83,6 +83,45 @@ and adopting them changes what scenario A2 is measured against. Deliberately
 left as a decision rather than made silently -- the Cycle 57 basis-blind P&L
 is what silent substitution costs.
 
+THE ARCHIVE PATH IS ALSO CLOSED (Cycle 62A, measured)
+------------------------------------------------------
+data.binance.vision was checked as a same-venue, historical alternative to the
+stream. It cannot serve this purpose either:
+
+  data/futures/um/daily/liquidationSnapshot/   DOES NOT EXIST -- 0 keys.
+      There is no USD-margined liquidation dataset in the public archive.
+  data/futures/cm/daily/liquidationSnapshot/   EXISTS -- 118 COIN-margined
+      symbols (BTCUSD_PERP and quarterlies), but the whole dataset stops at
+      2024-10-14. Binance discontinued it.
+
+Our `trades` coverage begins 2026-04-29, so the overlap with the archive is
+ZERO -- a gap of roughly 18.5 months. No cross-check of the Cycle 61 A2
+flow-burst detector against archive labels is possible at any date.
+
+No liquidation dataset exists anywhere else in the bucket (cm/monthly,
+spot/daily and option/daily were all enumerated).
+
+Two properties of the archive were measured anyway, because they bound any
+future use of it:
+
+  1. IT IS A SAMPLED LOWER BOUND. Across every file checked, the maximum
+     number of DISTINCT liquidations in any one second was exactly 1 -- the
+     archive inherits the documented "largest order per symbol per 1000ms"
+     stream throttle. Event counts and volumes taken from it are a floor,
+     never a complete record.
+  2. EVERY ROW IS WRITTEN TWICE. Duplication factor was exactly 2.00 in every
+     file (BTCUSD_PERP 2024-10-14: 100 rows / 50 unique; 2024-09-02: 112 / 56;
+     ETHUSD_PERP 2024-08-05: 1146 / 573). A naive row count DOUBLES the true
+     event count.
+
+Those two errors run in opposite directions, which is why the `source` column
+exists: a count is only interpretable next to the provenance that produced it.
+
+Archive layout, for whenever it matters (10 columns, header row present):
+    time,side,order_type,time_in_force,original_quantity,price,
+    average_price,order_status,last_fill_quantity,accumulated_fill_quantity
+`time` is epoch MILLISECONDS (1728866962145 -> 2024-10-14), not microseconds.
+
 Usage:
     python -m engines.liquidation_collector collect --duration 3550
     python -m engines.liquidation_collector report --hours 24
@@ -120,12 +159,18 @@ DEFAULT_MIN_ROWS_PER_HOUR = 1.0
 # Runs shorter than this are too brief to draw any conclusion from.
 DEFAULT_MIN_WINDOW_SECONDS = 300
 
+# Provenance travels with the row. The archive path is a sampled, duplicated
+# view of the same event class (Cycle 62A: <=1 distinct event per symbol per
+# second, every row written twice), so counts are only interpretable next to
+# the source that produced them.
+SOURCE = "stream:binance"
+
 INSERT_SQL = """
     INSERT OR IGNORE INTO liquidations
         (venue, symbol, timestamp, datetime, side, price, quantity,
          quote_qty, order_status, order_type, avg_price, event_time,
-         ingested_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ingested_at, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -196,7 +241,7 @@ def insert_rows(conn, rows):
     payload = [
         (r["venue"], r["symbol"], r["timestamp"], r["datetime"], r["side"],
          r["price"], r["quantity"], r["quote_qty"], r["order_status"],
-         r["order_type"], r["avg_price"], r["event_time"], ingested)
+         r["order_type"], r["avg_price"], r["event_time"], ingested, SOURCE)
         for r in rows
     ]
     cur = conn.cursor()
