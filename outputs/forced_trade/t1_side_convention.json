@@ -1,0 +1,44 @@
+{
+  "BTC": {
+    "scope": "SAMPLED (14d over 3 windows: start/mid/end)",
+    "rows_checked": 9690240,
+    "violations": 0,
+    "consistent": true,
+    "elapsed_sec": 41.9,
+    "windows_ms": [
+      [
+        1777490653900,
+        1777893853900
+      ],
+      [
+        1782306726426,
+        1782709926426
+      ],
+      [
+        1786719598953,
+        1787122798953
+      ]
+    ]
+  },
+  "ETH": {
+    "scope": "SAMPLED (14d over 3 windows: start/mid/end)",
+    "rows_checked": 7688645,
+    "violations": 0,
+    "consistent": true,
+    "elapsed_sec": 11.6,
+    "windows_ms": [
+      [
+        1777490634464,
+        1777893834464
+      ],
+      [
+        1782306736643,
+        1782709936643
+      ],
+      [
+        1786719638822,
+        1787122838822
+      ]
+    ]
+  }
+}

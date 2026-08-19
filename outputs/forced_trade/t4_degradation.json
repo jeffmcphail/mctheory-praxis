@@ -1,0 +1,27 @@
+{
+  "declared_states": [
+    -2,
+    -1,
+    0,
+    1,
+    2
+  ],
+  "reachable_with_oi": [
+    -2,
+    -1,
+    0,
+    1,
+    2
+  ],
+  "reachable_without_oi": [
+    -1,
+    0,
+    1
+  ],
+  "lost_states": [
+    -2,
+    2
+  ],
+  "errors_when_oi_missing": false,
+  "silently_degrades": true
+}

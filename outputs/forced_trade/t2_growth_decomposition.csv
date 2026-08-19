@@ -1,0 +1,6 @@
+asset,n_obs,total_growth_pct,sum_positive_chg_pct,n_periods_increase,n_periods_flat,n_periods_decrease,median_daily_chg_pct,max_daily_chg_pct,n_jumps,n_cliffs,jump_share_of_growth,cliff_share_of_growth
+ADA,18,1.2931,1.2864,12,5,0,0.030764,0.412,2,1,0.5829,0.2627
+BTC,109,0.2411,0.2408,99,9,0,0.002245,0.0125,0,0,0.0,0.0
+ETH,109,-0.0047,0.0,0,0,108,-3e-05,-0.0,0,0,,
+SOL,108,1.1599,1.9473,61,0,46,0.018542,0.2575,1,1,0.1322,0.1322
+XRP,83,1.3234,1.3163,7,75,0,0.0,0.3615,3,3,0.6788,0.6788

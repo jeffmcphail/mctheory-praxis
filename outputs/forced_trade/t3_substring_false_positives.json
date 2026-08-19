@@ -1,0 +1,18 @@
+{
+  "patterns": [
+    "UPUSDT",
+    "DOWNUSDT",
+    "BULLUSDT",
+    "BEARUSDT"
+  ],
+  "false_positives": [
+    {
+      "symbol": "JUPUSDT",
+      "reason": "parses as J+UP+USDT but JUSDT does not trade -- ordinary spot asset"
+    },
+    {
+      "symbol": "SYRUPUSDT",
+      "reason": "parses as SYR+UP+USDT but SYRUSDT does not trade -- ordinary spot asset"
+    }
+  ]
+}

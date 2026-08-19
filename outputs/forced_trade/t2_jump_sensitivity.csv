@@ -1,0 +1,16 @@
+setting,params,asset,n_jumps,n_cliffs,jumps_per_year
+loose,jump>0.20% cliff>median+3MAD (lookback=30),ADA,2,1,6.6
+loose,jump>0.20% cliff>median+3MAD (lookback=30),BTC,0,0,0.0
+loose,jump>0.20% cliff>median+3MAD (lookback=30),ETH,0,0,0.0
+loose,jump>0.20% cliff>median+3MAD (lookback=30),SOL,1,1,3.3
+loose,jump>0.20% cliff>median+3MAD (lookback=30),XRP,3,3,10.0
+base,jump>1.00% cliff>median+5MAD (lookback=30),ADA,0,0,0.0
+base,jump>1.00% cliff>median+5MAD (lookback=30),BTC,0,0,0.0
+base,jump>1.00% cliff>median+5MAD (lookback=30),ETH,0,0,0.0
+base,jump>1.00% cliff>median+5MAD (lookback=30),SOL,0,0,0.0
+base,jump>1.00% cliff>median+5MAD (lookback=30),XRP,0,0,0.0
+strict,jump>3.00% cliff>median+8MAD (lookback=30),ADA,0,0,0.0
+strict,jump>3.00% cliff>median+8MAD (lookback=30),BTC,0,0,0.0
+strict,jump>3.00% cliff>median+8MAD (lookback=30),ETH,0,0,0.0
+strict,jump>3.00% cliff>median+8MAD (lookback=30),SOL,0,0,0.0
+strict,jump>3.00% cliff>median+8MAD (lookback=30),XRP,0,0,0.0

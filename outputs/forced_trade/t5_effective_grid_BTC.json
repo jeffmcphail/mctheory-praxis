@@ -1,0 +1,13 @@
+{
+  "nominal_joint_cells": 5832000,
+  "effective_joint_cells": 9720,
+  "nominal_marginal_cells": 45,
+  "effective_marginal_cells": 30,
+  "degenerate_axes": [
+    "E",
+    "H",
+    "K",
+    "L"
+  ],
+  "informative_axes": 8
+}

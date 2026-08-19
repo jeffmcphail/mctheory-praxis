@@ -1,0 +1,7 @@
+setting,direction,n,matched,matched_frac,chance_frac,lift
+loose,BTC->ETH,2092,581,27.8%,7.29%,3.81
+loose,ETH->BTC,1142,500,43.8%,12.60%,3.48
+base,BTC->ETH,229,13,5.7%,0.48%,11.85
+base,ETH->BTC,72,9,12.5%,1.49%,8.36
+strict,BTC->ETH,26,0,0.0%,0.03%,0.00
+strict,ETH->BTC,5,1,20.0%,0.17%,114.65

@@ -1,0 +1,7 @@
+asset,granularity,cells,empty,estimable,pct_estimable,buildable
+BTC,marginal(12 axes),45,15,24,53.3%,True
+BTC,joint B x G (4x4),16,8,4,25.0%,False
+BTC,collapsed B x G (3x3),9,3,5,55.6%,True
+ETH,marginal(12 axes),45,20,21,46.7%,False
+ETH,joint B x G (4x4),16,11,2,12.5%,False
+ETH,collapsed B x G (3x3),9,4,2,22.2%,False

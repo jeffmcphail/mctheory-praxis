@@ -1,0 +1,7 @@
+setting,asset,params,events,events_per_year,candidate_windows,candidate_rate,median_duration_sec,max_duration_sec,mean_dir_agree
+loose,BTC,K=3 I=0.6 M=2 L=1440,2092,6855,"2,199",1.370%,60,240,99.5%
+loose,ETH,K=3 I=0.6 M=2 L=1440,1142,3742,"1,176",0.733%,60,180,99.3%
+base,BTC,K=5 I=0.8 M=3 L=1440,229,750,234,0.146%,60,120,100.0%
+base,ETH,K=5 I=0.8 M=3 L=1440,72,236,72,0.045%,60,60,100.0%
+strict,BTC,K=10 I=0.9 M=4 L=1440,26,85,26,0.016%,60,60,100.0%
+strict,ETH,K=10 I=0.9 M=4 L=1440,5,16,5,0.003%,60,60,100.0%

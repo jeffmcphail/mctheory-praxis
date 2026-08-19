@@ -1,0 +1,1 @@
+asset,timestamp,date,prev_date,gap_days,supply_before,supply_after,jump_frac,background_median,background_mad,cliff_score,scorable,is_cliff

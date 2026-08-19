@@ -1,0 +1,103 @@
+{
+  "ccxt_version": "4.5.51",
+  "venues": {
+    "binance": {
+      "symbol": "BTC/USDT:USDT",
+      "has": {
+        "fetchOpenInterest": true,
+        "fetchOpenInterestHistory": true
+      },
+      "spot_reading": {
+        "openInterestAmount": 104944.819,
+        "datetime": "2026-08-19T07:01:53.386Z"
+      },
+      "timeframes": {
+        "5m": {
+          "n": 1000,
+          "first": "2026-08-15T19:45:00.000Z",
+          "last": "2026-08-19T07:00:00.000Z"
+        },
+        "1h": {
+          "n": 744,
+          "first": "2026-07-19T08:00:00.000Z",
+          "last": "2026-08-19T07:00:00.000Z"
+        },
+        "1d": {
+          "n": 31,
+          "first": "2026-07-20T00:00:00.000Z",
+          "last": "2026-08-19T00:00:00.000Z"
+        }
+      },
+      "retention_1d": {
+        "since_-30d": {
+          "n": 30,
+          "first": "2026-07-21T00:00:00.000Z"
+        },
+        "since_-90d": {
+          "error": "BadRequest: binance {\"msg\":\"parameter 'startTime' is invalid.\",\"code\":-1130}"
+        },
+        "since_-200d": {
+          "error": "BadRequest: binance {\"msg\":\"parameter 'startTime' is invalid.\",\"code\":-1130}"
+        },
+        "since_-400d": {
+          "error": "BadRequest: binance {\"msg\":\"parameter 'startTime' is invalid.\",\"code\":-1130}"
+        },
+        "since_-730d": {
+          "error": "BadRequest: binance {\"msg\":\"parameter 'startTime' is invalid.\",\"code\":-1130}"
+        }
+      },
+      "n_active_linear_swaps": 740
+    },
+    "bybit": {
+      "symbol": "BTC/USDT:USDT",
+      "has": {
+        "fetchOpenInterest": true,
+        "fetchOpenInterestHistory": true
+      },
+      "spot_reading": {
+        "openInterestAmount": 60201.609,
+        "datetime": "2026-08-19T07:00:00.000Z"
+      },
+      "timeframes": {
+        "5m": {
+          "n": 200,
+          "first": "2026-08-18T14:25:00.000Z",
+          "last": "2026-08-19T07:00:00.000Z"
+        },
+        "1h": {
+          "n": 200,
+          "first": "2026-08-11T00:00:00.000Z",
+          "last": "2026-08-19T07:00:00.000Z"
+        },
+        "1d": {
+          "n": 200,
+          "first": "2026-02-01T00:00:00.000Z",
+          "last": "2026-08-19T00:00:00.000Z"
+        }
+      },
+      "retention_1d": {
+        "since_-30d": {
+          "n": 30,
+          "first": "2026-07-21T00:00:00.000Z"
+        },
+        "since_-90d": {
+          "n": 90,
+          "first": "2026-05-22T00:00:00.000Z"
+        },
+        "since_-200d": {
+          "n": 200,
+          "first": "2026-02-01T00:00:00.000Z"
+        },
+        "since_-400d": {
+          "n": 200,
+          "first": "2026-02-01T00:00:00.000Z"
+        },
+        "since_-730d": {
+          "n": 200,
+          "first": "2026-02-01T00:00:00.000Z"
+        }
+      },
+      "n_active_linear_swaps": 785
+    }
+  }
+}

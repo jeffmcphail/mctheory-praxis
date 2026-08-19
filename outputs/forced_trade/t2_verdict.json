@@ -1,0 +1,23 @@
+{
+  "assets_with_supply": 5,
+  "max_span_days": 110.0,
+  "counts_by_setting": {
+    "loose": {
+      "jumps": 6,
+      "cliffs": 5
+    },
+    "base": {
+      "jumps": 0,
+      "cliffs": 0
+    },
+    "strict": {
+      "jumps": 0,
+      "cliffs": 0
+    }
+  },
+  "pattern_setting": "loose",
+  "n_cliffs_at_pattern_setting": 5,
+  "cliffs_per_year_all_assets": 16.6,
+  "dominant_pattern": "DRIFT",
+  "basis": "median cliff share of positive supply growth = 0.197 at setting 'loose'"
+}

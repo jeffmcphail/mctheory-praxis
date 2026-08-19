@@ -1,0 +1,24 @@
+{
+  "n_tables": 16,
+  "tables": [
+    "fear_greed",
+    "funding_alerts",
+    "funding_rates",
+    "funding_signals",
+    "info_bars",
+    "market_data",
+    "ohlcv_1m",
+    "ohlcv_4h",
+    "ohlcv_daily",
+    "onchain_btc",
+    "order_book_snapshots",
+    "paper_position_exits",
+    "paper_trades",
+    "sqlite_sequence",
+    "trades",
+    "trading_sessions"
+  ],
+  "oi_table_hits": [],
+  "oi_column_hits": [],
+  "oi_present": false
+}

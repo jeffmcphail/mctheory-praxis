@@ -1,0 +1,15 @@
+{
+  "callsites": [
+    {
+      "file": "engines/cpo_training.py",
+      "line": 176,
+      "passes_oi": false
+    },
+    {
+      "file": "engines/funding_rate_strategy.py",
+      "line": 359,
+      "passes_oi": false
+    }
+  ],
+  "any_passes_oi": false
+}

@@ -1,0 +1,13 @@
+asset,setting,metric,n_events,event_median,control_median,event_over_control,event_frac_below_1,control_frac_below_1
+BTC,loose,depth,2085,1.07,1.05,1.03,40.4%,42.4%
+BTC,loose,spread_bps,2085,1.00,1.00,1.00,51.9%,52.3%
+BTC,base,depth,228,1.06,1.03,1.02,40.8%,44.9%
+BTC,base,spread_bps,228,1.00,1.00,1.00,54.8%,50.2%
+BTC,strict,depth,26,1.01,1.04,0.97,46.2%,44.6%
+BTC,strict,spread_bps,26,1.00,1.00,1.00,53.8%,54.6%
+ETH,loose,depth,1140,1.04,1.05,0.98,44.6%,39.8%
+ETH,loose,spread_bps,1140,1.00,1.00,1.00,54.7%,52.7%
+ETH,base,depth,72,1.03,1.03,1.00,44.4%,43.3%
+ETH,base,spread_bps,72,1.00,1.00,1.00,45.8%,55.1%
+ETH,strict,depth,5,1.03,1.05,0.98,40.0%,40.7%
+ETH,strict,spread_bps,5,1.00,1.00,1.00,60.0%,50.2%
