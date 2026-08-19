@@ -110,6 +110,12 @@ def _make_funding_rates(n_payments: int = 270, mean_rate: float = 0.0001) -> np.
     return mean_rate + 0.00005 * np.random.randn(n_payments)
 
 
+def _make_oi_series(n_payments: int = 270, start: float = 1000.0,
+                    end: float = 1100.0) -> np.ndarray:
+    """Generate synthetic open-interest series aligned to funding payments."""
+    return np.linspace(start, end, n_payments)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # HELPER FUNCTION TESTS
 # ═══════════════════════════════════════════════════════════════════════
@@ -323,6 +329,39 @@ class TestFundingRegime:
         state, raw = compute_funding_regime(np.array([0.0001]))
         assert state == 0
 
+    def test_oi_available_flag_false_without_oi(self):
+        """Cycle 62A T5: raw features must record that OI was absent."""
+        rates = np.ones(100) * 0.001
+        state, raw = compute_funding_regime(rates)
+        assert raw["oi_available"] == 0.0
+        assert raw["oi_change_7d"] == 0.0
+
+    def test_oi_available_flag_true_with_oi(self):
+        rates = np.ones(100) * 0.001
+        oi = _make_oi_series(100)
+        state, raw = compute_funding_regime(rates, oi)
+        assert raw["oi_available"] == 1.0
+
+    def test_oi_available_false_when_oi_too_short(self):
+        """An OI series below the 7d window is no better than none."""
+        rates = np.ones(100) * 0.001
+        oi = _make_oi_series(10)
+        state, raw = compute_funding_regime(rates, oi)
+        assert raw["oi_available"] == 0.0
+
+    def test_extreme_states_unreachable_without_oi(self):
+        """The bug Cycle 61 T4 found: ±2 need OI, and silently never fire.
+
+        This is the regression guard — if someone rewrites the classifier so
+        ±2 no longer depends on OI, this test fails and the degradation
+        warning in RegimeEngine.compute must be revisited.
+        """
+        reachable = set()
+        for fr in np.linspace(-0.005, 0.005, 201):
+            state, _ = compute_funding_regime(np.ones(100) * fr)
+            reachable.add(state)
+        assert reachable == {-1, 0, 1}, f"expected 3 states without OI, got {sorted(reachable)}"
+
 
 class TestLiquidityRegime:
     def test_normal_liquidity(self):
@@ -469,7 +508,11 @@ class TestRegimeEngine:
             assert c in state.missing
 
     def test_with_funding_data(self):
-        """Engine should compute F and J when funding data provided."""
+        """Engine should compute F and J when funding data provided.
+
+        F still computes without OI, but only at 3-of-5 fidelity, so it is
+        reported as degraded rather than complete (Cycle 62A T5).
+        """
         engine = RegimeEngine(bars_per_day=24)
         df = _make_ohlcv_hourly(n_days=60)
         fr = _make_funding_rates(n_payments=270)
@@ -477,8 +520,41 @@ class TestRegimeEngine:
         state = engine.compute(ohlcv_hourly=df, funding_rates=fr)
         assert "F" in state.states
         assert "J" in state.states
-        assert "F" not in state.missing
         assert "J" not in state.missing
+
+    def test_f_announces_degradation_without_oi(self):
+        """F MUST appear in missing when OI is absent (Cycle 62A T5)."""
+        engine = RegimeEngine(bars_per_day=24)
+        df = _make_ohlcv_hourly(n_days=60)
+        fr = _make_funding_rates(n_payments=270)
+
+        state = engine.compute(ohlcv_hourly=df, funding_rates=fr)
+        assert "F" in state.missing, "OI-less F must announce its degradation"
+        assert "F" in state.degraded
+        assert "open-interest" in state.degraded["F"]
+        # Degraded is not absent: the axis still carries a usable state.
+        assert "F" in state.states
+
+    def test_f_not_missing_when_oi_supplied(self):
+        """F MUST NOT appear in missing when OI is supplied (Cycle 62A T5)."""
+        engine = RegimeEngine(bars_per_day=24)
+        df = _make_ohlcv_hourly(n_days=60)
+        fr = _make_funding_rates(n_payments=270)
+        oi = _make_oi_series(n_payments=270)
+
+        state = engine.compute(ohlcv_hourly=df, funding_rates=fr, oi_series=oi)
+        assert "F" not in state.missing
+        assert "F" not in state.degraded
+        assert state.raw_features["F_oi_available"] == 1.0
+
+    def test_degraded_keys_are_subset_of_missing(self):
+        """Documented invariant of RegimeState."""
+        engine = RegimeEngine(bars_per_day=24)
+        df = _make_ohlcv_hourly(n_days=60)
+        fr = _make_funding_rates(n_payments=270)
+
+        state = engine.compute(ohlcv_hourly=df, funding_rates=fr)
+        assert set(state.degraded).issubset(set(state.missing))
 
     def test_with_universe_data(self):
         """Engine should compute H and K when universe data provided."""

@@ -51,6 +51,11 @@ logger = logging.getLogger(__name__)
 
 REGIME_CLASSES = list("ABCDEFGHIJKL")
 
+# Minimum OI observations for a 7d change: ~21 funding payments (3/day x 7).
+# Below this, class F silently collapses from 5 states to 3 — see
+# compute_funding_regime and Cycle 62A T5.
+OI_MIN_PAYMENTS = 22
+
 REGIME_CLASS_NAMES = {
     "A": "trend",
     "B": "vol_level",
@@ -85,10 +90,20 @@ REGIME_STATE_RANGES = {
 
 @dataclass
 class RegimeState:
-    """Complete regime state at a point in time."""
+    """Complete regime state at a point in time.
+
+    `missing` lists classes that could not be computed at full fidelity —
+    either the inputs were absent entirely (state forced to 0) or an input
+    was absent that collapses the class to a subset of its declared states
+    (see `degraded`). Cycle 62A: a degraded axis that does not announce its
+    degradation is worse than an absent one, so both land in `missing`.
+    `degraded` carries the reason, and its keys are always a subset of
+    `missing`.
+    """
     states: dict[str, int]          # class letter → integer state
     raw_features: dict[str, float]  # all computed sub-features
-    missing: list[str]              # classes that couldn't be computed
+    missing: list[str]              # classes not computed at full fidelity
+    degraded: dict[str, str] = field(default_factory=dict)  # class → reason
 
     @property
     def vector(self) -> list[int]:
@@ -519,16 +534,24 @@ def compute_funding_regime(
 
     States: -2 (heavily short), -1 (mildly short), 0 (neutral),
             +1 (mildly long), +2 (heavily long)
+
+    NOTE: the ±2 states are reachable ONLY when `oi_values` supplies at least
+    `OI_MIN_PAYMENTS` observations — they require abs(oi_change_7d) > 0.10 and
+    oi_change_7d pins to 0.0 without OI. Callers that omit OI get a 3-state
+    axis (-1/0/+1) dressed as a 5-state one; `oi_available` in the returned
+    raw features records which of the two happened, and RegimeEngine.compute
+    marks the class degraded. See Cycle 61 T4 / Cycle 62A T5.
     """
     if len(funding_rates) < 3:
-        return 0, {"fr_ann": 0.0, "oi_change_7d": 0.0}
+        return 0, {"fr_ann": 0.0, "oi_change_7d": 0.0, "oi_available": 0.0}
 
     # Annualize: 8h rate × 3 × 365 × 100
     fr_ann = float(funding_rates[-1]) * 3 * 365 * 100
 
     # OI change (7d)
     oi_change_7d = 0.0
-    if oi_values is not None and len(oi_values) >= 22:
+    oi_available = oi_values is not None and len(oi_values) >= OI_MIN_PAYMENTS
+    if oi_available:
         # ~21 funding payments in 7 days (3/day × 7)
         oi_now = float(oi_values[-1])
         oi_7d = float(oi_values[-22])
@@ -551,6 +574,7 @@ def compute_funding_regime(
         "fr_ann": fr_ann,
         "fr_8h_pct": float(funding_rates[-1]) * 100,
         "oi_change_7d": oi_change_7d,
+        "oi_available": 1.0 if oi_available else 0.0,
     }
     return state, raw
 
@@ -929,6 +953,7 @@ class RegimeEngine:
         states: dict[str, int] = {}
         raw_features: dict[str, float] = {}
         missing: list[str] = []
+        degraded: dict[str, str] = {}
 
         # Extract arrays from DataFrame
         o = ohlcv_hourly["open"].values.astype(float)
@@ -997,6 +1022,19 @@ class RegimeEngine:
                 state_f, raw_f = compute_funding_regime(fr, oi)
                 states["F"] = state_f
                 raw_features.update({f"F_{k}": v for k, v in raw_f.items()})
+                # Cycle 62A T5: without OI, oi_change_7d pins to 0.0 and the
+                # +/-2 states become unreachable — the axis is a 3-state one
+                # wearing a 5-state label. It computes, so it is NOT absent,
+                # but it must not pass for complete either.
+                if not raw_f.get("oi_available", 0.0):
+                    reason = (
+                        "no open-interest series (>= %d obs required); "
+                        "states +/-2 unreachable, F is 3-state (-1/0/+1)"
+                        % OI_MIN_PAYMENTS
+                    )
+                    logger.warning("Regime F (funding) DEGRADED: %s", reason)
+                    missing.append("F")
+                    degraded["F"] = reason
             except Exception as e:
                 logger.warning("Regime F (funding) failed: %s", e)
                 states["F"] = 0
@@ -1103,7 +1141,12 @@ class RegimeEngine:
             states["L"] = 0
             missing.append("L")
 
-        return RegimeState(states=states, raw_features=raw_features, missing=missing)
+        return RegimeState(
+            states=states,
+            raw_features=raw_features,
+            missing=missing,
+            degraded=degraded,
+        )
 
     def _aggregate_daily(
         self,
