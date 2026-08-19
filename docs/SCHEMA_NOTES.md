@@ -291,6 +291,87 @@ server, all engines, and analysis scripts.
   in the program; subsequently joined by `onchain_btc` in Cycle
   31, closing the program at 11/11.
 
+#### Table: liquidations (CONFORMING by construction -- Cycle 62A)
+
+- Columns: `venue` (TEXT NOT NULL), `symbol` (TEXT NOT NULL),
+  `timestamp` (INTEGER NOT NULL, **ms** UTC), `datetime` (TEXT NOT
+  NULL, ISO `+00:00`), `side` (TEXT NOT NULL), `price` (REAL NOT
+  NULL), `quantity` (REAL NOT NULL), `quote_qty` (REAL),
+  `order_status` (TEXT), `order_type` (TEXT), `avg_price` (REAL),
+  `event_time` (INTEGER), `ingested_at` (INTEGER NOT NULL),
+  `source` (TEXT), `side_raw` (TEXT), `price_basis` (TEXT). PK:
+  `(venue, symbol, timestamp, side, price, quantity)`.
+- Writer: **`engines/bybit_liquidation_collector.py`** (active).
+  `engines/liquidation_collector.py` (Binance) exists and is correct
+  but is UNSCHEDULED -- see below.
+- Scheduled task: `PraxisBybitLiquidationCollector` (hourly, 3550s
+  per run so invocations never overlap).
+- Built forward-only, permanently. **No liquidation backfill exists
+  on any path**: Binance withdrew the public `allForceOrders` REST
+  endpoint (stream-only), and `data.binance.vision` has no
+  USD-margined liquidation dataset at all while its coin-margined one
+  ends 2024-10-14 against `trades` coverage starting 2026-04-29 --
+  zero overlap. An hour not recorded is unrecoverable.
+
+- **`venue` IS IN THE PK, AND COUNTS ARE NOT POOLABLE ACROSS IT.**
+  Bybit is the source of record because Binance's futures WS is
+  unreachable from this host (verified server-side: no TLS
+  interception, no firewall block, no proxy -- Binance ACKs a
+  subscribe and then withholds only market data). Bybit is a VENUE
+  SUBSTITUTION, not a drop-in, for three independent reasons that do
+  not cancel:
+  1. **Perp market share** -- Binance carries substantially more
+     perpetual OI and volume, so the same cascade yields a different
+     number of events at different sizes.
+  2. **Liquidation engine** -- margin tiers, partial-liquidation
+     rules, ADL and insurance-fund behaviour differ, so the same
+     position is closed at a different price in a different number of
+     pieces.
+  3. **Stream throttle (measured)** -- Binance's `!forceOrder@arr`
+     caps at ONE event per symbol per second; Bybit's
+     `allLiquidation` has no cap (up to 18 distinct events in one
+     BTCUSDT second). Bybit is the more complete record AND the less
+     comparable one.
+
+  Any Binance-derived prior on event **rates** must be re-estimated
+  on Bybit data. What transfers is the event **class**.
+
+- **`side` IS NORMALISED; THE VENUES DISAGREE ON WHAT `S` MEANS.**
+  Binance's `S` is the ORDER side (`SELL` => a long was liquidated);
+  Bybit's is the POSITION side (`Buy` => a long was liquidated).
+  Same letters, opposite meanings, both legal `{BUY, SELL}` values.
+  `side` therefore stores ONE convention for all venues -- the
+  Binance ORDER side -- and `side_raw` preserves what the venue
+  actually sent so the translation is auditable. The map lives in
+  `engines/liquidation_common.SIDE_MAP` and `validate` re-derives
+  every stored row against it. Verified empirically against
+  drift-controlled price impact, not taken from the docs:
+  `outputs/forced_trade/t1_bybit_side_convention.json`.
+
+- **`price_basis` -- the prices are different kinds of price.**
+  Binance sends an average FILL price (`quote_qty` ~ executed
+  notional, `price_basis='executed'`); Bybit sends only a BANKRUPTCY
+  price, so its `quote_qty` is an approximation with a known
+  directional bias (`price_basis='bankruptcy'`). Bybit also sends no
+  order status/type or average price -- those stay NULL, absent
+  rather than guessed.
+
+- **Coverage is a chosen subset.** Binance offered one all-market
+  topic; Bybit's `allLiquidation` is per-symbol, so coverage is
+  exactly the six-asset funding/OI universe subscribed (BTC ETH SOL
+  XRP ADA AVAX). Symbols outside it are UNOBSERVED -- a coverage
+  boundary, not a quiet market.
+
+- `source` distinguishes `stream:*` from any future `archive:*`
+  load, because the archive (should it ever be usable) is a sampled
+  AND doubled view: <=1 distinct event per symbol-second, every row
+  written exactly twice. Those two errors run in opposite directions,
+  so a provenance-free count is uninterpretable.
+
+- Gaps land in `collector_gaps` keyed `(collector, venue,
+  timestamp)`, open on disconnect and closed on reconnect. A gap
+  still open at exit is left open on purpose.
+
 ### live_collector.db (sidecar)
 
 Path: `data/live_collector.db`. Written by `PraxisLiveCollector`

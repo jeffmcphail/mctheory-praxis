@@ -44,6 +44,20 @@ One instance at a time. The scheduled .bat runs a bounded --duration and exits
 before the next trigger, the same handoff pattern trades_collector uses to
 dodge the MultipleInstances IgnoreNew race (Cycles 7-8, 10).
 
+SUPERSEDED AS THE T1 VENUE -- BYBIT COLLECTS INSTEAD
+-----------------------------------------------------
+engines/bybit_liquidation_collector.py is the ACTIVE T1 collector. This module
+stays in place, correct and tested, but UNSCHEDULED, for whenever fstream
+becomes reachable. It was not deleted because if the block ever lifts, Binance
+becomes the better source (larger perp share, and the venue every published
+liquidation prior is built on) and Bybit becomes the cross-venue check.
+
+Do not read Bybit rows and Binance rows as the same measurement -- perp market
+share, liquidation engine and stream throttle all differ. The comparison is
+spelled out in the Bybit module's docstring; the short version is that Binance
+throttles to one event per symbol per second and Bybit does not, so event RATES
+do not transfer in either direction.
+
 BLOCKED AS OF CYCLE 62A -- READ BEFORE SCHEDULING
 -------------------------------------------------
 This collector is correct and tested, but it currently receives NOTHING from
@@ -75,13 +89,56 @@ the Canadian CEX-perp constraint Cycle 56 established. There is no same-venue
 fallback: Binance withdrew the public GET /fapi/v1/allForceOrders REST
 endpoint, so forced orders are stream-only.
 
+WHERE THE BLOCK IS -- SETTLED, AND NOT WHERE CYCLE 62A FIRST GUESSED
+--------------------------------------------------------------------
+Cycle 62A's first reading was "a local middlebox, not a regional restriction",
+reasoning that geo-blocking would take REST and WS together. That reasoning was
+wrong, and the follow-up measurement says so plainly.
+
+The fstream endpoint ANSWERS CONTROL MESSAGES and then withholds only market
+data:
+
+    -> {"method":"LIST_SUBSCRIPTIONS","id":1}
+    <- {"result":[],"id":1}                     server replies
+    -> {"method":"SUBSCRIBE","params":["btcusdt@aggTrade"],"id":2}
+    <- {"result":null,"id":2}                   subscribe ACCEPTED
+    then: zero market-data frames, socket open, no close code.
+
+The identical exchange on spot returns the same two replies AND starts
+delivering aggTrade frames immediately. So the futures server is alive,
+parsing our JSON, and selectively sending everything except the data.
+
+Nothing on the path could do that. The three local candidates were checked and
+all are absent: Windows Firewall has NO enabled outbound Block rules (and a
+firewall block would refuse the connection, not ACK a subscribe); the only
+security product installed is Windows Defender, which does not intercept TLS;
+and no proxy is configured (WinHTTP direct, WinINET disabled, no PAC). Most
+decisively, fstream/fapi/stream all present a genuine DigiCert "GeoTrust TLS
+RSA CA G1" chain for *.binance.com -- there is no interception, so nothing
+on the path can read a WebSocket frame, let alone tell a subscribe ACK from an
+aggTrade and drop one of them.
+
+The suppression therefore happens inside the TLS tunnel, at the application
+layer, which only Binance can do. It is SERVER-SIDE -- an entitlement or
+regional restriction on futures market data for this egress IP.
+
+What follows from that: no local change fixes this. Firewall rules, AV
+settings and proxy configuration are all dead ends. Only a different egress
+(VPN, different network) would test it, and that is an infrastructure decision,
+not a code one.
+
 Bybit's allLiquidation topic IS reachable from this host and carries the same
 event class (129 liquidation events in 300s across BTC/ETH/SOL, against a
 31,763-event publicTrade control on the same connection). That is a VENUE
 SUBSTITUTION, not a drop-in: Bybit liquidations are not Binance liquidations,
-and adopting them changes what scenario A2 is measured against. Deliberately
-left as a decision rather than made silently -- the Cycle 57 basis-blind P&L
-is what silent substitution costs.
+and adopting them changes what scenario A2 is measured against.
+
+ADOPTED (Cycle 62A, revised) once the archive path was enumerated and closed.
+The substitution was made explicitly, not silently -- the Cycle 57 basis-blind
+P&L is what silent substitution costs -- and the warning above was carried
+forward into the Bybit collector, its .bat and the retro rather than dropped
+now that we are proceeding anyway. The deciding argument was asymmetry: the
+venue choice is reversible, the data loss is not.
 
 THE ARCHIVE PATH IS ALSO CLOSED (Cycle 62A, measured)
 ------------------------------------------------------
@@ -139,6 +196,9 @@ from collections import Counter
 from engines.collector_common import (
     assert_ms, ms_to_iso, now_ms, open_db, record_gap, setup_logging,
 )
+from engines.liquidation_common import (
+    PRICE_BASIS, cmd_report, cmd_validate, normalise_side,
+)
 
 logger = logging.getLogger("collector.liquidations")
 
@@ -169,8 +229,8 @@ INSERT_SQL = """
     INSERT OR IGNORE INTO liquidations
         (venue, symbol, timestamp, datetime, side, price, quantity,
          quote_qty, order_status, order_type, avg_price, event_time,
-         ingested_at, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ingested_at, source, side_raw, price_basis)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -221,8 +281,12 @@ def parse_force_order(msg: dict) -> dict | None:
         "venue": VENUE,
         "symbol": symbol,
         "timestamp": ts,
+        # Binance already reports the ORDER side, so this is the identity
+        # translation -- but it goes through the same shared map as Bybit's
+        # inverted one, so a venue can never quietly bypass the convention.
+        "side": normalise_side(VENUE, side),
+        "side_raw": str(side),
         "datetime": ms_to_iso(ts),
-        "side": side,
         "price": price,
         "quantity": quantity,
         "quote_qty": quote_qty,
@@ -230,6 +294,9 @@ def parse_force_order(msg: dict) -> dict | None:
         "order_type": o.get("o"),
         "avg_price": avg_price,
         "event_time": event_time,
+        # avg fill price x filled qty where available, so a real executed
+        # notional -- unlike Bybit's bankruptcy-price approximation.
+        "price_basis": PRICE_BASIS[VENUE],
     }
 
 
@@ -241,7 +308,8 @@ def insert_rows(conn, rows):
     payload = [
         (r["venue"], r["symbol"], r["timestamp"], r["datetime"], r["side"],
          r["price"], r["quantity"], r["quote_qty"], r["order_status"],
-         r["order_type"], r["avg_price"], r["event_time"], ingested, SOURCE)
+         r["order_type"], r["avg_price"], r["event_time"], ingested, SOURCE,
+         r["side_raw"], r["price_basis"])
         for r in rows
     ]
     cur = conn.cursor()
@@ -443,149 +511,10 @@ def report_run(args, stats, started_ms):
     return 0
 
 
-# ---------------------------------------------------------------- report ---
-
-def cmd_report(args):
-    conn = open_db()
-    try:
-        cutoff = now_ms() - int(args.hours * 3600 * 1000)
-        total = conn.execute(
-            "SELECT COUNT(*) FROM liquidations WHERE timestamp >= ?",
-            (cutoff,)).fetchone()[0]
-
-        print("=" * 66)
-        print("LIQUIDATIONS -- last %gh" % args.hours)
-        print("=" * 66)
-
-        span = conn.execute(
-            "SELECT MIN(timestamp), MAX(timestamp), COUNT(*) FROM liquidations"
-        ).fetchone()
-        if span[2]:
-            print("  table span   : %s -> %s"
-                  % (ms_to_iso(span[0]), ms_to_iso(span[1])))
-        print("  table rows   : %d" % span[2])
-        print("  window rows  : %d" % total)
-        if not total:
-            print("\n  (no rows in window)")
-            return 0
-
-        print("\n  -- side split --")
-        for side, n, notional in conn.execute(
-            "SELECT side, COUNT(*), SUM(quote_qty) FROM liquidations "
-            "WHERE timestamp >= ? GROUP BY side ORDER BY 2 DESC", (cutoff,)
-        ):
-            print("    %-5s %7d  notional=%15.0f" % (side, n, notional or 0))
-
-        print("\n  -- symbol distribution (top 15) --")
-        nsym = conn.execute(
-            "SELECT COUNT(DISTINCT symbol) FROM liquidations "
-            "WHERE timestamp >= ?", (cutoff,)).fetchone()[0]
-        print("    distinct symbols: %d" % nsym)
-        for sym, n, notional in conn.execute(
-            "SELECT symbol, COUNT(*), SUM(quote_qty) FROM liquidations "
-            "WHERE timestamp >= ? GROUP BY symbol ORDER BY 2 DESC LIMIT 15",
-            (cutoff,)
-        ):
-            print("    %-14s %7d  notional=%15.0f" % (sym, n, notional or 0))
-
-        print("\n  -- size distribution (USD notional) --")
-        vals = [r[0] for r in conn.execute(
-            "SELECT quote_qty FROM liquidations WHERE timestamp >= ? "
-            "AND quote_qty IS NOT NULL ORDER BY quote_qty", (cutoff,))]
-        if vals:
-            def pct(p):
-                return vals[min(len(vals) - 1, int(len(vals) * p))]
-            print("    count  : %d" % len(vals))
-            print("    sum    : %.0f" % sum(vals))
-            print("    min    : %.2f" % vals[0])
-            print("    p25    : %.2f" % pct(.25))
-            print("    median : %.2f" % pct(.50))
-            print("    p75    : %.2f" % pct(.75))
-            print("    p95    : %.2f" % pct(.95))
-            print("    p99    : %.2f" % pct(.99))
-            print("    max    : %.2f" % vals[-1])
-
-        gaps = list(conn.execute(
-            "SELECT timestamp, gap_end, gap_seconds, reason "
-            "FROM collector_gaps WHERE collector=? AND timestamp >= ? "
-            "ORDER BY timestamp", (COLLECTOR, cutoff)))
-        print("\n  -- collection gaps in window: %d --" % len(gaps))
-        for ts, end, secs, reason in gaps[:20]:
-            end_s = ms_to_iso(end) if end else "STILL OPEN"
-            secs_s = ("%.1fs" % secs) if secs is not None else "open"
-            print("    %s -> %s (%s) %s" % (ms_to_iso(ts), end_s, secs_s, reason))
-        if len(gaps) > 20:
-            print("    ... and %d more" % (len(gaps) - 20))
-        return 0
-    finally:
-        conn.close()
-
-
-# -------------------------------------------------------------- validate ---
-
-def cmd_validate(args):
-    """Structural checks on what is stored. Exits non-zero on any failure."""
-    conn = open_db()
-    failures = []
-    try:
-        print("=" * 66)
-        print("LIQUIDATIONS -- VALIDATION")
-        print("=" * 66)
-
-        def check(name, sql, want_zero=True):
-            n = conn.execute(sql).fetchone()[0]
-            ok = (n == 0) if want_zero else (n > 0)
-            print("  [%s] %s: %d" % ("OK  " if ok else "FAIL", name, n))
-            if not ok:
-                failures.append(name)
-            return n
-
-        check("rows present", "SELECT COUNT(*) FROM liquidations",
-              want_zero=False)
-        check("timestamps outside epoch-ms range",
-              "SELECT COUNT(*) FROM liquidations WHERE timestamp < 1577836800000 "
-              "OR timestamp > 4102444800000")
-        check("timestamps in the future",
-              "SELECT COUNT(*) FROM liquidations WHERE timestamp > %d"
-              % (now_ms() + 60000))
-        check("non-positive price",
-              "SELECT COUNT(*) FROM liquidations WHERE price <= 0")
-        check("non-positive quantity",
-              "SELECT COUNT(*) FROM liquidations WHERE quantity <= 0")
-        check("side outside BUY/SELL",
-              "SELECT COUNT(*) FROM liquidations "
-              "WHERE side NOT IN ('BUY','SELL')")
-        check("datetime missing",
-              "SELECT COUNT(*) FROM liquidations "
-              "WHERE datetime IS NULL OR datetime = ''")
-        check("venue not set",
-              "SELECT COUNT(*) FROM liquidations "
-              "WHERE venue IS NULL OR venue = ''")
-
-        # Rule 35.3: datetime is a derived cache, so it must actually derive.
-        sample = list(conn.execute(
-            "SELECT timestamp, datetime FROM liquidations "
-            "ORDER BY RANDOM() LIMIT 200"))
-        bad = [(t, d) for t, d in sample if ms_to_iso(t) != d]
-        ok = not bad
-        print("  [%s] datetime cache matches timestamp (sampled %d): "
-              "%d mismatches"
-              % ("OK  " if ok else "FAIL", len(sample), len(bad)))
-        if bad:
-            failures.append("datetime cache")
-            for t, d in bad[:5]:
-                print("        %d stored=%s expected=%s" % (t, d, ms_to_iso(t)))
-
-        print("")
-        if failures:
-            print("[FAIL] %d check(s) failed: %s"
-                  % (len(failures), ", ".join(failures)), file=sys.stderr)
-            return 1
-        print("[OK] all validation checks passed.")
-        return 0
-    finally:
-        conn.close()
-
+# Report and validate are shared with the Bybit collector so the two
+# venues can never drift into different definitions of the same table.
+# See engines/liquidation_common.py -- in particular the side convention,
+# which is inverted between these two venues.
 
 def main():
     p = argparse.ArgumentParser(
@@ -613,6 +542,8 @@ def main():
 
     r = subs.add_parser("report", help="Capture statistics over a window")
     r.add_argument("--hours", type=float, default=24.0)
+    r.add_argument("--venue", default=None,
+                   help="Restrict to one venue (counts are not poolable)")
 
     subs.add_parser("validate", help="Structural checks on stored rows")
 
@@ -622,6 +553,7 @@ def main():
     if args.command == "collect":
         return asyncio.run(run_collect(args))
     if args.command == "report":
+        args.collector = COLLECTOR
         return cmd_report(args)
     if args.command == "validate":
         return cmd_validate(args)

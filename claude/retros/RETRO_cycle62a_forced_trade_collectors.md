@@ -2,14 +2,24 @@
 
 **Brief:** `BRIEF_cycle62a_forced_trade_collectors.md`
 **Date:** 2026-08-19
-**Status:** COMPLETE with one blocker (T1 -- no reachable data source, on either path)
+**Status:** COMPLETE. T1 revised — Bybit adopted as the liquidation venue and collecting.
+
+> **Revision (same day).** T1 originally closed as blocked, with Bybit recorded as an option
+> deliberately not taken. That rejection assumed the Binance archive existed as a fallback;
+> enumerating it proved it does not. With **no backfill available on any path**, the series
+> can only be built forward and every unrecorded hour is lost permanently — so Bybit
+> `allLiquidation` is now the T1 venue and is live. Two things changed with it: the
+> non-comparability warning was carried forward into the code and schema rather than
+> dropped, and the "local middlebox" egress claim was **measured and corrected** — the
+> block is server-side. Superseded sections are marked in place.
 
 ---
 
 ## Summary
 
-Five of six tasks landed and are running. **T1 is blocked on both of its paths, and the
-second one is the decisive finding of the cycle.**
+Five of six tasks landed and are running. **T1's Binance paths are both closed, and the
+second one is the decisive finding of the cycle** — which is what forced the venue
+substitution.
 
 The live stream is unreachable: Binance's futures WebSocket accepts a connection from this
 host and then never sends a frame, on any stream, including one that pushes unconditionally
@@ -41,7 +51,7 @@ archive-findings commit below.
 
 ---
 
-## T1 -- Binance forced-order stream: BLOCKED
+## T1 -- Liquidation labels: Binance BLOCKED, Bybit ADOPTED
 
 The collector is complete: parser unit-tested against Binance's documented payload
 including the Rule 35.4 seconds-vs-milliseconds foot-gun, reconnect with capped
@@ -160,38 +170,175 @@ the correct experiment — forced selling happens on futures, the impact lands o
 it is worth stating plainly so the two never blur in a later write-up. It is moot for this
 cycle only because the coverage gap bites first.
 
-### The Bybit option, not taken
+### The Bybit option — ADOPTED (revised)
+
+> Superseding the original "not taken". The rejection was predicated on the Binance archive
+> existing as a fallback; the enumeration above proved it does not.
 
 Bybit's `allLiquidation` topic is reachable and carries the same event class (**129 events
 in 300s** across BTC/ETH/SOL, against a 31,763-event `publicTrade` control on the same
-connection). Not adopted, per instruction. Recorded because it remains the only *live*
-liquidation feed reachable from this host, and because the `liquidations` PK already
-carries `venue`.
+connection). It is now the **T1 venue**.
+
+The argument is an asymmetry, not a preference. **No liquidation backfill exists anywhere**
+— Binance withdrew the `allForceOrders` REST endpoint, and the archive has no `um` dataset
+and a `cm` dataset with zero overlap. So this series can only ever be built *forward*, and
+every hour not recorded is gone permanently. The venue choice is reversible; the data loss
+is not. Waiting costs something irreplaceable to buy something reversible.
+
+**The original warning stands and is carried forward, not dropped.** It is written into
+`engines/bybit_liquidation_collector.py`, `services/bybit_liquidation_collector_service.bat`
+and the schema migration, so it cannot be lost by anyone who reads only one of them.
 
 One diagnostic trap worth keeping: an early Bybit probe subscribed to 13 topics in one
 request, received `success: true`, and then got nothing. Bybit ACKs and silently drops a
 batch that exceeds the per-request arg limit. The first read of that was "Bybit is blocked
 too", which was wrong. **A success ACK is not evidence of a working subscription** — only a
-control topic that must produce data is.
+control topic that must produce data is. The collector now encodes that lesson directly: it
+subscribes in batches of 5 and keeps a `kline.1` control topic whose silence, not the
+liquidation count, is what makes a run exit non-zero.
 
-### The egress finding, worth keeping
+### Bybit is NOT Binance — three reasons, and they do not cancel
 
-Binance futures **REST** works from this host while Binance futures **WS** completes the
-upgrade and then silently drops every frame. Geo-blocking would normally take both, or
-refuse the handshake outright. Accepting the upgrade and delivering zero bytes points at a
-**local middlebox** — something on the path terminating or stalling the WebSocket after
-negotiation — rather than Binance refusing the region. Bybit and Hyperliquid WS both work,
-so it is not "all WebSockets"; it is specific to `fstream.binance.com`. Worth knowing
-before anyone attributes it to Canadian perp restrictions and stops looking.
+Recorded here, in the schema migration and in the collector because a later reader will be
+tempted to pool these counts with a Binance-derived number:
+
+| | Difference | Effect on counts |
+|---|---|---|
+| 1 | **Perp market share.** Binance carries substantially more perpetual OI and volume. | The same cascade produces a different number of events, on different symbols, at different sizes. |
+| 2 | **Liquidation engine.** Margin tiers, partial-liquidation rules, ADL and insurance-fund behaviour differ. | The same position is force-closed at a different price, in a different number of pieces. |
+| 3 | **Stream throttle — measured.** Binance's `!forceOrder@arr` caps at **one event per symbol per second** (the archive inherits the same cap: max distinct events per symbol-second was exactly 1 in every file). Bybit applies **no cap** — up to **18 distinct events in a single BTCUSDT second** on this host. | Bybit is the *more complete* record and simultaneously the *less comparable* one, by a factor that varies with how bursty the moment was. |
+
+**Consequence:** any Binance-based prior on liquidation event *rates* — per-minute
+thresholds, burst-size percentiles, "events per cascade" — does not transfer and must be
+re-estimated on Bybit data. What does transfer is the event **class**: these are genuine
+forced closures, which is what scenario A2 needs.
+
+Coverage also narrows in kind: Binance offered one all-market topic; Bybit's is **per
+symbol**, so coverage is exactly the six-asset funding/OI universe subscribed
+(BTC ETH SOL XRP ADA AVAX). Anything outside it is *unobserved* — a coverage boundary, not
+a quiet market.
+
+### The side convention is INVERTED between the venues — caught before it corrupted anything
+
+The single highest-risk field in the swap, and it would have failed silently.
+
+- Binance `forceOrder.S` is the **ORDER** side. Closing a long sends a market SELL, so
+  **`SELL` ⇒ a long was liquidated**.
+- Bybit `allLiquidation.S` is the **POSITION** side. So **`Buy` ⇒ a long was liquidated**.
+
+Same two letters, opposite meanings, both legal members of `{BUY, SELL}`. Copying Bybit's
+`S` straight across would have inverted every Bybit row against every Binance row, and no
+type check, validator or unit test would have noticed.
+
+The docs were **not** taken on trust — this field is widely mis-documented. It was settled
+by physics: force-closing a long sends a market SELL and ticks price *down*; force-closing a
+short sends a market BUY and ticks it *up*. Liquidations and `publicTrade` were captured on
+one connection (5,286 liquidations against 709,885 trades) and the signed move around each
+event measured.
+
+**The first run nearly recorded the answer backwards.** The tape was rallying, so the raw
+mean move was *positive* around both sides. Adding a random-time baseline from the same tape
+and reporting the **excess over concurrent drift** separated them cleanly and consistently
+at every window:
+
+| Window | baseline drift | `S=Buy` excess (n=136) | `S=Sell` excess (n=5150) |
+|---|---|---|---|
+| ±250ms | +3.897 bps | **−3.008** | **+1.850** |
+| ±1000ms | +6.426 bps | **−5.311** | **+17.008** |
+| ±3000ms | +11.464 bps | **−9.438** | **+55.903** |
+
+`S=Buy` sits on *negative* excess (a market SELL hit) ⇒ a **long** was liquidated.
+`S=Sell` sits on *positive* excess (a market BUY hit) ⇒ a **short** was liquidated. The
+documentation is correct, and it is now correct *because it was measured*, not because it
+was read. Evidence: `outputs/forced_trade/t1_bybit_side_convention.json`.
+
+Storage decision: `side` holds **one** convention for all venues — the Binance ORDER side,
+because that is what the column already means and what the Cycle 61 A2 detector compares
+against — and the new **`side_raw`** column keeps whatever the venue actually sent, so the
+translation stays auditable and reversible. The map lives in exactly one place
+(`engines/liquidation_common.SIDE_MAP`) and `validate` re-derives every stored row against
+it, so a drift between the two collectors fails a check instead of silently skewing a study.
+
+### Bybit's price is a BANKRUPTCY price, not a fill price
+
+Binance sends an order price *and* an average fill price; the collector prefers `ap × z`, so
+its `quote_qty` is close to true executed notional. Bybit sends only `p`, documented as the
+**bankruptcy price** — where margin reaches zero, not where anything traded. A Bybit
+`quote_qty` is therefore an approximation with a known directional bias, recorded per row as
+**`price_basis`** (`'bankruptcy'` vs `'executed'`) rather than presented as a measurement.
+Bybit also sends no order status, order type or average fill price; those stay NULL —
+absent, not guessed.
+
+### The egress finding — CORRECTED, and it is not a local middlebox
+
+> The original entry read "points at a **local middlebox**, not a regional restriction."
+> **That was wrong.** The reasoning was that geo-blocking would take REST and WS together,
+> so a split must be local. The follow-up measurement refutes it.
+
+The fstream endpoint **answers control messages** and withholds only market data:
+
+```
+-> {"method":"LIST_SUBSCRIPTIONS","id":1}
+<- {"result":[],"id":1}                    server replies
+-> {"method":"SUBSCRIBE","params":["btcusdt@aggTrade"],"id":2}
+<- {"result":null,"id":2}                  subscribe ACCEPTED
+   then: zero market-data frames, socket open, no close code
+```
+
+The identical exchange on spot returns the same two replies **and** starts delivering
+aggTrade frames immediately. The futures server is alive, parsing our JSON, and selectively
+sending everything except the data.
+
+Nothing on the path can do that. All three local candidates were checked and are absent:
+
+- **Windows Firewall** — zero enabled outbound Block rules. (And a firewall block refuses the
+  connection; it does not ACK a subscribe.)
+- **Antivirus TLS inspection** — the only security product installed is Windows Defender,
+  which does not intercept TLS.
+- **Proxy** — WinHTTP direct, WinINET disabled, no PAC.
+
+Most decisively, `fstream` / `fapi` / `stream` all present a genuine **DigiCert "GeoTrust TLS
+RSA CA G1"** chain for `*.binance.com` (Bybit presents a genuine Amazon chain). There is **no
+interception**, so nothing on the path can read a WebSocket frame at all — let alone tell a
+subscribe ACK from an aggTrade and drop one of the two.
+
+The suppression therefore happens *inside* the TLS tunnel, at the application layer, which
+only Binance can do. It is **server-side** — an entitlement or regional restriction on
+futures market data for this egress IP, consistent with the Canadian CEX-perp constraint
+Cycle 56 established.
+
+**What follows:** no local change fixes this. Firewall, AV and proxy settings are dead ends.
+Only a different egress (VPN, different network) would test it — an infrastructure decision,
+not a code one. Binance therefore does **not** become the default; Bybit stays T1.
+
+*Method note:* the original error came from reasoning about what a block "would normally"
+look like instead of asking the server a question it had to answer. `LIST_SUBSCRIPTIONS`
+settled in one round-trip what a week of signature-matching would not have.
 
 ### What landed for T1
 
 - `liquidations` schema, unchanged from spec, plus a **`source` column** distinguishing
   `stream:*` from `archive:*` — added *before* any row is loaded, because the archive's
   two counting errors make provenance-free counts uninterpretable.
-- The stream collector stamps `source` on every row it writes.
-- `services/liquidation_collector_service.bat` stays in place, **unscheduled**, carrying
-  the evidence inline, for whenever `fstream` becomes reachable.
+- Plus **`side_raw`** and **`price_basis`** (migration
+  `cycle62a_liquidations_bybit_columns.py`), and an `(venue, timestamp)` index, because the
+  table is now genuinely multi-venue and every honest query filters on venue.
+- **`engines/bybit_liquidation_collector.py` — the ACTIVE T1 collector**, with
+  `services/bybit_liquidation_collector_service.bat` and
+  `services/register_bybit_liquidation_task.ps1`.
+- **`engines/liquidation_common.py`** — the side-convention map, `price_basis` map, and the
+  shared `report` / `validate` both collectors now use, so the two venues cannot drift into
+  different definitions of the same table.
+- `engines/liquidation_collector.py` (Binance) stays in place, **unscheduled**, now carrying
+  the corrected egress evidence, and writes `side_raw` / `price_basis` too so it validates
+  cleanly if the block ever lifts.
+
+**Live verification (400s, 2026-08-19):** 1 connect, 3/3 subscribes ACKed, **400 control
+frames**, 4,937 events received → **4,937 rows written**, 0 duplicates, 0 rejected, 0 bad
+frames, 0 gaps, all 6 symbols present, exit 0. All **13** validation checks pass, including
+the two new cross-venue ones (`side_raw` preserved; every stored row's `side` re-derived
+against the declared map). The window happened to catch a short squeeze — $180.7M notional,
+BUY 4,805 / SELL 132 on the canonical order-side convention.
 
 ---
 
@@ -435,9 +582,21 @@ schtasks /create /tn "PraxisOhlcvUniverseCollector" /tr "cmd.exe /c \"C:\Data\De
 schtasks /create /tn "PraxisUnlockMarketDataCollector" /tr "cmd.exe /c \"C:\Data\Development\Python\McTheoryApps\praxis\services\unlock_market_data_collector_service.bat\"" /sc daily /st 01:40 /ru jmcphail /f
 ```
 
-**4. Liquidations — hourly. DO NOT REGISTER YET.** The feed is blocked (see T1); this
-would produce an hourly stream of exit-2 runs. Register only after the feed is reachable
-or a venue decision is made.
+**4. Liquidations (Bybit) — hourly. REGISTER THIS ONE.** This is the active T1 collector,
+verified live. Every hour it is not running is permanently unrecoverable — there is no
+backfill on any path.
+```
+schtasks /create /tn "PraxisBybitLiquidationCollector" /tr "cmd.exe /c \"C:\Data\Development\Python\McTheoryApps\praxis\services\bybit_liquidation_collector_service.bat\"" /sc hourly /mo 1 /ru jmcphail /f
+```
+Or, with the matching execution-time-limit and overlap settings already filled in:
+```
+powershell -ExecutionPolicy Bypass -File "C:\Data\Development\Python\McTheoryApps\praxis\services\register_bybit_liquidation_task.ps1"
+```
+
+**5. Liquidations (Binance) — DO NOT REGISTER.** Still unreachable, and now known to be
+**server-side** (see the corrected egress finding), so no local change will fix it.
+Registering it would produce an hourly stream of exit-2 runs. It stays in place for
+whenever the egress changes.
 ```
 schtasks /create /tn "PraxisLiquidationCollector" /tr "cmd.exe /c \"C:\Data\Development\Python\McTheoryApps\praxis\services\liquidation_collector_service.bat\"" /sc hourly /mo 1 /ru jmcphail /f
 ```
@@ -451,19 +610,20 @@ schtasks /query /tn "PraxisOpenInterestCollector" /fo LIST /v
 
 ## Blockers, stated rather than worked around
 
-1. **T1 has no reachable source of Binance liquidation labels.** Two independent paths,
-   both closed:
-   - *Live stream:* `fstream.binance.com` accepts the WS upgrade and delivers zero frames.
-     Binance futures REST works from the same host, so this is almost certainly a local
-     middlebox terminating the WebSocket after negotiation, **not** geo-blocking — worth
-     knowing before anyone attributes it to Canadian perp restrictions and stops looking.
+1. **T1 has no reachable source of *Binance* liquidation labels — RESOLVED by venue
+   substitution, not by unblocking.** Two independent paths, both still closed:
+   - *Live stream:* `fstream.binance.com` accepts the WS upgrade, **answers control
+     messages**, ACKs a subscribe, and then delivers zero market-data frames. Verified
+     **server-side**, not local: no TLS interception (genuine DigiCert chain), no outbound
+     firewall block, no third-party AV, no proxy. Only an egress change would test it.
    - *Public archive:* no `um` liquidation dataset exists; the `cm` one ends 2024-10-14
      with **zero overlap** against our 2026-04-29-onward `trades`, and is coin-margined
      rather than USDT-margined.
 
    Binance withdrew the public `allForceOrders` REST endpoint, so there is no third path.
-   **Still open:** whether to accept Bybit `allLiquidation` (reachable, same event class,
-   different venue) — deliberately not taken this cycle.
+   **Closed:** Bybit `allLiquidation` is adopted as the T1 venue and is collecting. The
+   residual risk is not availability but **comparability** — see the three-reason table
+   above. Any Binance-derived prior on event rates must be re-estimated.
 2. **CoinGecko free-tier rate limits** made the per-asset genesis-date enrichment
    impractical (429s exhausting a 7-step backoff ladder). Worked around by making genesis
    optional and using the directly-measured overhang instead — but a paid key would make
@@ -488,6 +648,22 @@ The F fix is the direct application, but the same shape recurred three times thi
 
 In each case the failure mode was the same: a check that returns a plausible value whether
 or not the thing it measures actually happened.
+
+The T1 revision added three more, all of the same family:
+
+- **Ask the endpoint a question it is obliged to answer.** The "local middlebox" conclusion
+  came from reasoning about what a geo-block *would normally* look like. One
+  `LIST_SUBSCRIPTIONS` round-trip settled it in the opposite direction. Signature-matching
+  against expectations is a hypothesis; a control message is a measurement.
+- **A field can be present, well-typed, in-range and inverted.** Bybit's `S` and Binance's
+  `S` are both legal `{BUY, SELL}` values meaning opposite things. No schema constraint, no
+  type check and no unit test distinguishes them — only a semantic map, stored in one place
+  and re-derived at validation time.
+- **Measure an effect against the drift it sits in, not against zero.** The first
+  side-convention run showed price rising around *both* liquidation sides, because the whole
+  tape was rallying. The raw number was real and the inference from it would have been
+  backwards. A random-time baseline from the same tape flipped the sign for one side and
+  kept it for the other — and that contrast, not the level, is what carried the conclusion.
 
 ---
 

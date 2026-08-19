@@ -1,0 +1,88 @@
+{
+  "question": "Does Bybit allLiquidation `S` mean the ORDER side (Binance convention) or the POSITION side?",
+  "why_it_matters": "Binance forceOrder.S is the ORDER side (SELL => a long was liquidated). If Bybit's S is the POSITION side the two are inverted, and copying S across venues flips every row while remaining a legal BUY/SELL value that no validator would catch.",
+  "method": "Physics, not documentation. Force-closing a LONG sends a market SELL, ticking price DOWN around the event; force-closing a SHORT sends a market BUY, ticking it UP. Liquidations and publicTrade were captured on ONE connection, and the signed price move around each event was measured against a RANDOM-TIME BASELINE drawn from the same tape, because the window carried a strong upward drift that makes every raw move positive.",
+  "why_the_baseline_was_necessary": "Raw mean move around S=Buy events was POSITIVE at every window (+0.889 / +1.116 / +2.026 bps). Only after subtracting the concurrent drift does the true sign appear (-3.008 / -5.311 / -9.438). An uncontrolled read of this same tape would have recorded the convention backwards.",
+  "measurement": {
+    "duration_s": 480,
+    "liq_events": 5286,
+    "trades": {
+      "BTCUSDT": 293514,
+      "ETHUSDT": 266626,
+      "SOLUSDT": 66385,
+      "XRPUSDT": 46684,
+      "DOGEUSDT": 36676
+    },
+    "windows_ms": [
+      250,
+      1000,
+      3000
+    ],
+    "results": {
+      "250": {
+        "baseline_mean_bps": 3.8967,
+        "baseline_n": 2012,
+        "by_side": {
+          "Buy": {
+            "n": 136,
+            "mean_bps": 0.8891,
+            "excess_vs_baseline_bps": -3.0076,
+            "pct_price_fell": 44.9
+          },
+          "Sell": {
+            "n": 5150,
+            "mean_bps": 5.7471,
+            "excess_vs_baseline_bps": 1.8504,
+            "pct_price_fell": 29.6
+          }
+        }
+      },
+      "1000": {
+        "baseline_mean_bps": 6.4264,
+        "baseline_n": 2012,
+        "by_side": {
+          "Buy": {
+            "n": 136,
+            "mean_bps": 1.1155,
+            "excess_vs_baseline_bps": -5.3109,
+            "pct_price_fell": 47.1
+          },
+          "Sell": {
+            "n": 5150,
+            "mean_bps": 23.4346,
+            "excess_vs_baseline_bps": 17.0082,
+            "pct_price_fell": 10.7
+          }
+        }
+      },
+      "3000": {
+        "baseline_mean_bps": 11.4643,
+        "baseline_n": 2012,
+        "by_side": {
+          "Buy": {
+            "n": 136,
+            "mean_bps": 2.0262,
+            "excess_vs_baseline_bps": -9.4382,
+            "pct_price_fell": 60.3
+          },
+          "Sell": {
+            "n": 5150,
+            "mean_bps": 67.3671,
+            "excess_vs_baseline_bps": 55.9028,
+            "pct_price_fell": 10.2
+          }
+        }
+      }
+    }
+  },
+  "verdict": {
+    "S_is": "POSITION side -- the documentation is correct",
+    "bybit_Buy": "a LONG was liquidated  => the closing order SOLD  => canonical side SELL",
+    "bybit_Sell": "a SHORT was liquidated => the closing order BOUGHT => canonical side BUY",
+    "canonical_convention_stored": "Binance ORDER side; see engines/liquidation_common.SIDE_MAP",
+    "consistent_across_all_windows": true,
+    "n_buy": 136,
+    "n_sell": 5150
+  },
+  "docs_quote": "Bybit v5 allLiquidation: 'S | string | Position side. Buy,Sell. When you receive a Buy update, this means that a long position has been liquidated'"
+}
