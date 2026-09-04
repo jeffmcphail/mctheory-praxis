@@ -239,11 +239,84 @@ exit code: 0 (OK)
 gaps before: 2   gaps after: 2   (unchanged)
 ```
 
-### Production
+### Production — the scheduled 16:24 run exercised the new code end to end
 
-`staleness` and `gaps` run against the real `smart_money.db`: age 5.96h vs 8.00h limit →
-ok, exit 0; `collector_gaps` created and empty; `position_snapshots` schema unchanged, 504
-snapshots intact.
+Rather than simulate, the naturally scheduled `PraxisSmartMoney` run at 16:24 was allowed
+to execute the new code and was observed live:
+
+```
+STALENESS: latest=2026-09-04 14:24:08Z age=6.00h limit=8.00h -> ok
+POSITION SNAPSHOT - 20260904_202408
+Tracking 1594 wallets  (batch_size=50, commit every 50 wallets)
+  COMMIT through wallet 50/1594
+  COMMIT through wallet 100/1594
+```
+
+**The decisive observation.** Mid-run, a *separate read-only connection* could already see
+committed rows:
+
+```
+('20260904_202408', 727 rows, 84 distinct wallets)   <-- visible while the run continues
+```
+
+Under the old single-commit-at-the-end code that query returns **zero rows** until the
+final second. This is precisely the property whose absence cost all 1,586 wallets on
+09-03, demonstrated working against production data.
+
+The run then completed cleanly, which is the control that matters most in production:
+
+```
+Snapshot 20260904_202408: 48811 positions from 1594/1594 wallets (complete)
+committed through wallet: 1594/1594
+exit code: 0 (OK)
+VALIDATE (read-back):
+  latest snapshot_id : 20260904_202408
+  rows committed     : 12227
+  distinct wallets   : 1344
+  collector_gaps rows: 0
+[2026-09-04 16:52:36.83] Snapshot complete.
+```
+
+Exit 0 propagated through the bat, and **no gap was recorded on a healthy run** — the
+detection does not cry wolf.
+
+Also verified against the real `smart_money.db`: `staleness` → ok, exit 0; `gaps` → table
+created and empty; `position_snapshots` schema unchanged, 504 prior snapshots intact.
+
+### An unexpected timing result, and whether this cycle caused it
+
+That run took **28m33s** (16:24:03 → 16:52:36) against a prior ~20–21 min. Loop throughput
+fell from 77.3 to **55.8 wallets/min, a 28% slowdown**. Since this cycle added 31 commits
+to that loop, the honest question is whether the hardening caused it. It did not:
+
+- **The dips are not commit-aligned.** With `--batch-size 50`, a commit cost would show a
+  sawtooth at wallets 950, 1000, 1050… The 17 slow intervals land at 945, 1062, 1073,
+  1108, 1157, 1167, 1178, 1204, 1227, 1237, 1273… — scattered, and clustered in the second
+  half of the run. The median fell uniformly rather than periodically.
+- **Measured commit cost.** Benchmarking a representative ~384-row batch (12,227 rows ÷
+  1,594 wallets × 50):
+
+```
+mean 3.3 ms per commit, max 8.7 ms
+projected cost of 31 commits : 0.10 s
+slowdown to be explained     : ~480 s
+```
+
+Commits account for **0.02%** of the gap. (The benchmark ran on the scratch DB, but SQLite
+WAL commit cost scales with dirty pages in the transaction — which is identical either way
+— not with database size; even a 100× penalty would be 10 s, not 480 s.)
+
+Conclusion: the slowdown is **external Polymarket API latency at that hour**, not this
+cycle. Worth confirming across the next few runs rather than treating one run as a trend.
+
+### The operational risk that finding exposes — independent of its cause
+
+`PraxisSmartMoney` carries `ExecutionTimeLimit: PT30M`. A 28m33s run leaves **87 seconds of
+margin.** One more slow API hour and Task Scheduler terminates the run mid-loop.
+
+The irony is that this is now a much softer failure than it was this morning: the partial
+data survives, and the next run's staleness check reports it. But it should be raised
+anyway. **Not changed here** — modifying a scheduled task is outside this brief.
 
 ---
 
@@ -270,6 +343,24 @@ exactly, and verified by building the scratch DB through the fixed `init_db()`:
 
 ---
 
+## A second encoding defect, found while verifying — and why it mattered
+
+Verifying `discover` (which the service bat runs *before* `snapshot`, and whose failure
+increments `FAIL_COUNT`) reproduced the same `UnicodeEncodeError` class under a cp1252
+stdout. Production was masked from it only because the bat sets `PYTHONUTF8=1`; any ad-hoc
+invocation crashed at the separator.
+
+This is not cosmetic in a cycle about exit-code honesty: **an unhandled exception exits 1,
+which is also `EXIT_INCOMPLETE`**, so a display failure could forge or mask a run's real
+status. Fixed systemically rather than by hunting characters — `sys.stdout` / `sys.stderr`
+are reconfigured to UTF-8 with `errors="replace"` at import, covering every subcommand
+including `diff` / `signals` / `monitor` / `profile`. The ASCII-only snapshot display stays
+as defence in depth.
+
+Verified: `discover --category CRYPTO` under a cp1252 stdout now exits 0 with no traceback
+where it previously raised; the complete-run control still exits 0 at 12/12 with no
+traceback. Committed separately as `0757bd8`.
+
 ## Files changed
 
 | File | Change |
@@ -288,12 +379,22 @@ exactly, and verified by building the scratch DB through the fixed `init_db()`:
    treating as further reason to accelerate the handover.
 2. **Enable the Task Scheduler Operational log.** Currently disabled; with
    `MultipleInstances: IgnoreNew`, a skipped trigger leaves no trace anywhere.
-3. Consider `ExecutionTimeLimit` on `PraxisSmartMoney` — currently `PT30M` against a run
-   that legitimately takes ~21 min. That margin is thinner than it looks as the wallet
-   count grows; at ~2,200 wallets a healthy run would start being killed at 30 minutes.
+3. **Raise `ExecutionTimeLimit` on `PraxisSmartMoney` — now urgent, not theoretical.** It is
+   `PT30M`, and the 16:24 run took 28m33s: **87 seconds of margin.** Measured as external
+   API latency rather than anything this cycle changed, but the next slow hour terminates a
+   healthy run mid-loop. The wallet count is also growing (1,571 → 1,586 → 1,594 in two
+   days), so the margin shrinks on its own.
 4. The other collectors have the same single-commit-at-the-end shape and would lose the
    same way on the next host crash. Not audited this cycle.
 5. Cycle 63's T4 section should be read alongside the correction at the top of this retro.
+6. **A third live-order path exists in the repo.** Checking for callers turned up
+   `engines/smart_money_alerts.py`: `cmd_trade` reads `POLYMARKET_PRIVATE_KEY` and builds a
+   `py_clob_client.ClobClient` behind a `--live` flag. It is **not scheduled** — no service
+   bat references it — so Cycle 63's T1 and T2 conclusions are unaffected and the scheduled
+   set remains credential-free. But the handover quarantine list is now two items, not one:
+   `carry_executor` (Binance/ccxt, via `scripts/run_carry.py --live`) and
+   `smart_money_alerts` (Polymarket CLOB). Both travel with the repo to MCRMINI2 dormant
+   rather than disabled, and `POLYMARKET_PRIVATE_KEY` travels in `.env` alongside them.
 
 ---
 
