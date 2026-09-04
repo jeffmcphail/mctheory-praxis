@@ -26,11 +26,14 @@ Usage:
     python -m engines.smart_money profile 0xABC...             # Deep dive on a wallet
 """
 import argparse
+import contextlib
 import json
 import os
+import signal
 import sqlite3
 import sys
 import time
+import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -50,15 +53,79 @@ CONVERGENCE_THRESHOLD = 3    # N traders in same market = strong signal
 
 CATEGORIES = ["OVERALL", "POLITICS", "SPORTS", "CRYPTO", "CULTURE"]
 
+# ── Cycle 64: crash-safety / gap-detection constants ──────────────────────
+# Cycle 63 T4 found a run that stopped at wallet 416/1571 having committed
+# nothing, because the whole 1,586-wallet loop sat inside ONE transaction that
+# committed only at the end. Cycle 64 T1 then established the cause was a HOST
+# unexpected shutdown (System event 6008: "previous system shutdown at 4:25:57
+# AM on 9/3/2026 was unexpected"), not a fault in this module -- every collector
+# on the box stopped inside the same four minutes. A power loss never runs a
+# `finally` block, so a context manager alone would not have saved those rows.
+# Incremental commit would have: wallets 1-415 were lost only because nothing
+# had been written yet.
+COLLECTOR_NAME = "smart_money"
+COLLECTOR_VENUE = "polymarket"
+
+DEFAULT_BATCH_SIZE = 50      # wallets per commit; bounds loss to <= this many
+DEFAULT_CADENCE_HOURS = 6.0  # PraxisSmartMoney fires every 6h
+DEFAULT_STALENESS_MARGIN_HOURS = 2.0
+
+# Honest exit codes (memory #12 -- exit-code honesty). Task Scheduler records
+# LastTaskResult, so an incomplete run must be distinguishable from a complete
+# one WITHOUT reading the log.
+EXIT_OK = 0
+EXIT_INCOMPLETE = 1   # ran, but did not cover every wallet
+EXIT_STALE = 2        # most recent snapshot older than cadence + margin
+EXIT_FATAL = 3        # could not run at all (DB error, no wallets)
+
+# collector_gaps lives in smart_money.db, NOT crypto_data.db -- the Cycle 64
+# brief holds the 24 GiB main DB read-only. Column-for-column identical to the
+# Cycle 62A table so the two can be consolidated later without a migration.
+COLLECTOR_GAPS_DDL = """
+    CREATE TABLE IF NOT EXISTS collector_gaps (
+        collector   TEXT    NOT NULL,
+        venue       TEXT    NOT NULL,
+        timestamp   INTEGER NOT NULL,
+        datetime    TEXT    NOT NULL,
+        gap_end     INTEGER,
+        gap_seconds REAL,
+        reason      TEXT,
+        detected_at INTEGER NOT NULL,
+        PRIMARY KEY (collector, venue, timestamp)
+    )
+"""
+
+# smart_money has NO backfill path: the Polymarket data-api serves CURRENT
+# positions only, so position_snapshots can only ever be built by sampling
+# forward. A missed snapshot is gone permanently. Gaps are therefore recorded
+# CLOSED with this prefix rather than left open, so no retry logic ever treats
+# them as pending work.
+UNFILLABLE = "UNFILLABLE"
+
 
 # ═══════════════════════════════════════════════════════
 # DATABASE
 # ═══════════════════════════════════════════════════════
 
+# Cycle 64: set by main() from --db. Lets the deliberate-kill verification run
+# against a scratch database instead of writing partial snapshots into the
+# production table. None means "use DB_PATH".
+_DB_OVERRIDE = None
+
+
+def active_db_path():
+    return Path(_DB_OVERRIDE) if _DB_OVERRIDE else DB_PATH
+
+
 def init_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    path = active_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL")
+    # Cycle 64: the nightly mirror and this collector can touch the file at the
+    # same moment; wait rather than raising "database is locked" instantly.
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute(COLLECTOR_GAPS_DDL)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tracked_wallets (
@@ -76,11 +143,20 @@ def init_db():
         )
     """)
 
+    # Cycle 64 FIX: this DDL had drifted from the live table. It still described
+    # the pre-Cycle-25 shape -- an AUTOINCREMENT id, `timestamp` as TEXT, and no
+    # `datetime` column at all -- while _insert_position_row writes the migrated
+    # Rule 35 shape (ms `timestamp` + ISO `datetime`, compound PK). On the
+    # existing database CREATE TABLE IF NOT EXISTS is a no-op, so the drift was
+    # invisible. On a FRESH machine it would not be: init_db() would create the
+    # stale schema and every insert would fail with "table position_snapshots
+    # has no column named datetime". That is precisely the MCRMINI2 case, so it
+    # is fixed here to match the live schema exactly.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS position_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             snapshot_id TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            datetime TEXT NOT NULL,
             wallet TEXT NOT NULL,
             market_slug TEXT,
             market_title TEXT,
@@ -90,7 +166,7 @@ def init_db():
             current_price REAL,
             value_usd REAL,
             pnl_usd REAL,
-            UNIQUE(snapshot_id, wallet, market_slug, outcome)
+            PRIMARY KEY (snapshot_id, wallet, market_slug, outcome)
         )
     """)
 
@@ -136,6 +212,132 @@ def init_db():
     return conn
 
 
+# ── Cycle 64: gap recording, staleness, alerting ──────────────────────────
+
+def _now_ms():
+    return int(time.time() * 1000)
+
+
+def _ms_to_iso(ms):
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat()
+
+
+def record_gap(conn, start_ms, end_ms, reason, verbose=True):
+    """Persist a collection gap, mirroring engines/collector_common.record_gap.
+
+    Idempotent on (collector, venue, timestamp). Unlike the Cycle 62A
+    collectors these gaps are written CLOSED (gap_end set) and reason-prefixed
+    UNFILLABLE, because smart_money cannot be backfilled -- see the note on the
+    UNFILLABLE constant. Leaving them open would invite a retry that can never
+    succeed.
+    """
+    gap_seconds = None if end_ms is None else (end_ms - start_ms) / 1000.0
+    conn.execute(
+        """
+        INSERT INTO collector_gaps
+            (collector, venue, timestamp, datetime, gap_end, gap_seconds,
+             reason, detected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(collector, venue, timestamp) DO UPDATE SET
+            gap_end     = excluded.gap_end,
+            gap_seconds = excluded.gap_seconds,
+            reason      = excluded.reason
+        """,
+        (COLLECTOR_NAME, COLLECTOR_VENUE, start_ms, _ms_to_iso(start_ms),
+         end_ms, gap_seconds, reason, _now_ms()),
+    )
+    conn.commit()
+    if verbose:
+        span = "" if gap_seconds is None else f" ({gap_seconds/3600:.2f}h)"
+        print(f"  GAP RECORDED  {COLLECTOR_NAME}/{COLLECTOR_VENUE} "
+              f"{_ms_to_iso(start_ms)}{span}")
+        print(f"                reason: {reason}")
+
+
+def latest_snapshot_dt(conn):
+    """UTC datetime of the most recent committed snapshot, or None."""
+    row = conn.execute(
+        "SELECT MAX(snapshot_id) FROM position_snapshots").fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        return datetime.strptime(row[0], "%Y%m%d_%H%M%S").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def check_staleness(conn, cadence_hours, margin_hours, verbose=True):
+    """Is the most recent snapshot older than cadence + margin?
+
+    Returns (is_stale, age_hours, latest_dt). Cycle 63 T4's 34.7h outage went
+    unremarked for over a day because nothing ever asked this question.
+    """
+    latest = latest_snapshot_dt(conn)
+    if latest is None:
+        if verbose:
+            print("  STALENESS: no snapshots on record")
+        return True, None, None
+    age_h = (datetime.now(timezone.utc) - latest).total_seconds() / 3600.0
+    limit = cadence_hours + margin_hours
+    stale = age_h > limit
+    if verbose:
+        flag = "STALE" if stale else "ok"
+        print(f"  STALENESS: latest={latest:%Y-%m-%d %H:%M:%S}Z "
+              f"age={age_h:.2f}h limit={limit:.2f}h -> {flag}")
+    return stale, age_h, latest
+
+
+def resolve_alert_url():
+    """PRAXIS_ALERT_URL, falling back to legacy TEAMS_WEBHOOK_URL.
+
+    Same resolution order as scripts/funding_regime_alert.py.
+    """
+    url = os.getenv("PRAXIS_ALERT_URL", "").strip()
+    if url:
+        return url, "PRAXIS_ALERT_URL"
+    url = os.getenv("TEAMS_WEBHOOK_URL", "").strip()
+    if url:
+        return url, "TEAMS_WEBHOOK_URL (legacy fallback)"
+    return "", ""
+
+
+def post_alert(url, body, title):
+    """POST an ASCII push to the ntfy.sh-style backend. Returns (ok, msg)."""
+    req = urllib.request.Request(
+        url, data=body.encode("utf-8"),
+        headers={
+            "Content-Type": "text/plain; charset=utf-8",
+            "Title": title,
+            "Tags": "rotating_light",
+            "Priority": "4",
+            "Markdown": "yes",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            txt = resp.read().decode("utf-8", errors="replace")
+            return resp.status < 300, f"HTTP {resp.status}: {txt[:160]}"
+    except Exception as e:
+        return False, f"ERROR: {type(e).__name__}: {e}"[:200]
+
+
+def fire_alert(body, title, do_alert, verbose=True):
+    """Send an alert if --alert was passed. Returns True if a POST succeeded."""
+    if not do_alert:
+        if verbose:
+            print(f"  ALERT (dry-run, --alert not passed): {title}")
+        return False
+    url, src = resolve_alert_url()
+    if not url:
+        print("  ALERT: no PRAXIS_ALERT_URL / TEAMS_WEBHOOK_URL set; "
+              "cannot notify")
+        return False
+    ok, msg = post_alert(url, body, title)
+    print(f"  ALERT via {src}: {'sent' if ok else 'FAILED'} -- {msg}")
+    return ok
+
+
 def _insert_position_row(conn, snapshot_id, now_iso, now_ms, address,
                           slug, title, outcome, size, avg_price,
                           cur_price, value, pnl):
@@ -178,8 +380,14 @@ def fetch_leaderboard(category="OVERALL", period="MONTH", limit=25, offset=0):
         return []
 
 
-def fetch_positions(wallet_address):
-    """Fetch current positions for a wallet."""
+def fetch_positions(wallet_address, raise_on_error=False):
+    """Fetch current positions for a wallet.
+
+    Cycle 64: `raise_on_error` exists because the default swallow-and-return-[]
+    makes a failed fetch indistinguishable from a wallet that genuinely holds
+    no positions. The snapshot loop needs that distinction to report the failed
+    set (T2), so it passes True; every other caller keeps the old behaviour.
+    """
     try:
         r = requests.get(f"{DATA_API}/positions", params={
             "user": wallet_address,
@@ -187,8 +395,12 @@ def fetch_positions(wallet_address):
 
         if r.status_code == 200:
             return r.json()
+        if raise_on_error:
+            raise RuntimeError(f"HTTP {r.status_code}")
         return []
     except Exception as e:
+        if raise_on_error:
+            raise
         print(f"    ❌ Position fetch failed for {wallet_address[:10]}...: {e}")
         return []
 
@@ -340,99 +552,232 @@ def cmd_discover(args):
 
 
 def cmd_snapshot(args):
-    """Take a position snapshot for all tracked wallets."""
-    conn = init_db()
+    """Take a position snapshot for all tracked wallets. Returns an exit code.
 
-    wallets = conn.execute(
-        "SELECT address, username FROM tracked_wallets WHERE active=1"
-    ).fetchall()
+    Cycle 64 T2. Three properties the pre-Cycle-64 version lacked:
 
-    if not wallets:
-        print("  No tracked wallets. Run: python -m engines.smart_money discover")
-        return
+      1. The connection closes on EVERY exit path (contextlib.closing), so an
+         unhandled exception no longer leaves the WAL sidecars orphaned.
+      2. Rows commit every --batch-size wallets instead of once at the end. The
+         2026-09-03 host shutdown cost all 1,586 wallets because nothing had
+         been written when the power went; with batching the loss is bounded to
+         at most one batch. Note that this, not the context manager, is what
+         actually survives a power loss -- no `finally` runs when the machine
+         dies.
+      3. The process exits non-zero when the run is incomplete, so Task
+         Scheduler's LastTaskResult distinguishes "1,586 of 1,586" from
+         "416 of 1,586" without anyone reading the log.
+    """
+    batch_size = max(1, int(getattr(args, "batch_size", DEFAULT_BATCH_SIZE)))
+    verbose = int(getattr(args, "verbose", 2))
+    do_alert = bool(getattr(args, "alert", False))
+    wallet_limit = getattr(args, "limit", None)
+    cadence_h = float(getattr(args, "cadence_hours", DEFAULT_CADENCE_HOURS))
+    margin_h = float(getattr(args, "staleness_margin_hours",
+                             DEFAULT_STALENESS_MARGIN_HOURS))
 
-    snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    now_iso = datetime.now(timezone.utc).isoformat()
-    now_ms = int(time.time() * 1000)
+    # Cooperative stop flag. On Windows only SIGINT is reliably deliverable to
+    # a Python handler -- `taskkill /F` and a power loss terminate the process
+    # outright and no handler runs. That is deliberate in the design: the
+    # incremental commit below is what protects the data; these handlers only
+    # make a *polite* stop tidy.
+    state = {"stop": False, "reason": ""}
 
-    print(f"\n{'='*90}")
-    print(f"  POSITION SNAPSHOT — {snapshot_id}")
-    print(f"  Tracking {len(wallets)} wallets")
-    print(f"{'='*90}")
+    def _request_stop(signum, _frame):
+        state["stop"] = True
+        state["reason"] = f"signal {signum}"
+        print(f"\n  STOP REQUESTED (signal {signum}) -- "
+              f"committing current batch and closing cleanly")
 
-    total_positions = 0
-    last_progress = time.time()
+    for _sig in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        s = getattr(signal, _sig, None)
+        if s is not None:
+            try:
+                signal.signal(s, _request_stop)
+            except (ValueError, OSError):
+                pass  # not on the main thread, or unsupported on this platform
 
-    for i, (address, username) in enumerate(wallets):
-        positions = fetch_positions(address)
+    with contextlib.closing(init_db()) as conn:
+        stale, age_h, latest = check_staleness(conn, cadence_h, margin_h,
+                                               verbose=verbose >= 1)
 
-        if not positions:
-            time.sleep(0.3)
-            continue
+        wallets = conn.execute(
+            "SELECT address, username FROM tracked_wallets WHERE active=1"
+        ).fetchall()
+        if wallet_limit:
+            wallets = wallets[:int(wallet_limit)]
 
-        for p in positions:
-            title = p.get("title", p.get("market", {}).get("question", "?"))
-            slug = ""
-            if isinstance(p.get("market"), dict):
-                slug = p["market"].get("slug", "")
+        if not wallets:
+            print("  No tracked wallets. Run: "
+                  "python -m engines.smart_money discover")
+            return EXIT_FATAL
 
-            outcome = p.get("outcome", "?")
-            size = float(p.get("size", 0) or 0)
-            avg_price = float(p.get("avgPrice", p.get("averagePrice", 0)) or 0)
-            cur_price = float(p.get("curPrice", p.get("currentPrice", 0)) or 0)
+        snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        now_ms = int(time.time() * 1000)
+        started_ms = now_ms
+        total = len(wallets)
 
-            value = size * cur_price if cur_price > 0 else size * avg_price
-            pnl = (cur_price - avg_price) * size if avg_price > 0 else 0
+        print(f"\n{'='*90}")
+        print(f"  POSITION SNAPSHOT - {snapshot_id}")
+        print(f"  Tracking {total} wallets  (batch_size={batch_size}, "
+              f"commit every {batch_size} wallets)")
+        print(f"{'='*90}")
 
-            if value < MIN_POSITION_USD:
+        total_positions = 0
+        completed = 0
+        committed_through = 0
+        failed = []
+        last_progress = time.time()
+
+        for i, (address, username) in enumerate(wallets):
+            if state["stop"]:
+                break
+
+            try:
+                positions = fetch_positions(address, raise_on_error=True)
+            except Exception as e:
+                # T2: a per-wallet failure must not kill the run.
+                failed.append((address, f"{type(e).__name__}: {e}"[:120]))
+                if verbose >= 3:
+                    print(f"    WALLET FAILED {address[:12]}...: {e}")
+                time.sleep(0.3)
                 continue
 
-            _insert_position_row(
-                conn, snapshot_id, now_iso, now_ms,
-                address, slug, title, outcome, size, avg_price,
-                cur_price, value, pnl,
-            )
-            total_positions += 1
+            for p in (positions or []):
+                title = p.get("title", p.get("market", {}).get("question", "?"))
+                slug = ""
+                if isinstance(p.get("market"), dict):
+                    slug = p["market"].get("slug", "")
 
-        time.sleep(0.3)  # Rate limit
+                outcome = p.get("outcome", "?")
+                size = float(p.get("size", 0) or 0)
+                avg_price = float(p.get("avgPrice", p.get("averagePrice", 0)) or 0)
+                cur_price = float(p.get("curPrice", p.get("currentPrice", 0)) or 0)
 
-        # Progress
-        now_t = time.time()
-        if now_t - last_progress >= 15 or i == len(wallets) - 1:
-            print(f"    [{datetime.now().strftime('%H:%M:%S')}] "
-                  f"{i+1}/{len(wallets)} wallets | "
-                  f"{total_positions} positions captured")
-            last_progress = now_t
+                value = size * cur_price if cur_price > 0 else size * avg_price
+                pnl = (cur_price - avg_price) * size if avg_price > 0 else 0
 
-    conn.commit()
+                if value < MIN_POSITION_USD:
+                    continue
 
-    print(f"\n  Snapshot {snapshot_id}: {total_positions} positions from "
-          f"{len(wallets)} wallets")
+                _insert_position_row(
+                    conn, snapshot_id, now_iso, now_ms,
+                    address, slug, title, outcome, size, avg_price,
+                    cur_price, value, pnl,
+                )
+                total_positions += 1
 
-    # Show top holdings across all tracked wallets
-    top_markets = conn.execute("""
-        SELECT market_title, outcome, COUNT(DISTINCT wallet) as n_wallets,
-               SUM(value_usd) as total_value, AVG(current_price) as avg_price
-        FROM position_snapshots
-        WHERE snapshot_id=?
-        GROUP BY market_slug, outcome
-        HAVING n_wallets >= 2
-        ORDER BY n_wallets DESC, total_value DESC
-        LIMIT 20
-    """, (snapshot_id,)).fetchall()
+            completed = i + 1
 
-    if top_markets:
-        print(f"\n  Markets with multiple top traders:")
-        print(f"  {'Market':<45s} {'Side':<5s} {'Wallets':>8s} "
-              f"{'Total$':>10s} {'Price':>6s}")
-        print(f"  {'─'*80}")
-        for m in top_markets:
-            flag = "🚨" if m[2] >= CONVERGENCE_THRESHOLD else "  "
-            print(f"  {flag}{m[0][:43]:<45s} {m[1]:<5s} {m[2]:>8d} "
-                  f"${m[3]:>9,.0f} {m[4]:>5.0%}")
+            # T2: incremental commit. Bounds worst-case loss to one batch.
+            if completed % batch_size == 0:
+                conn.commit()
+                committed_through = completed
+                if verbose >= 3:
+                    print(f"    COMMIT through wallet {completed}/{total}")
 
-    conn.close()
-    print(f"\n{'='*90}")
+            time.sleep(0.3)  # Rate limit
+
+            now_t = time.time()
+            if now_t - last_progress >= 15 or completed == total:
+                print(f"    [{datetime.now().strftime('%H:%M:%S')}] "
+                      f"{completed}/{total} wallets | "
+                      f"{total_positions} positions captured")
+                last_progress = now_t
+
+        conn.commit()
+        committed_through = completed
+
+        incomplete = completed < total
+        print(f"\n  Snapshot {snapshot_id}: {total_positions} positions from "
+              f"{completed}/{total} wallets "
+              f"({'INCOMPLETE' if incomplete else 'complete'})")
+        if failed:
+            print(f"  Wallets failed (fetch error, skipped): {len(failed)}")
+            for addr, err in failed[:10]:
+                print(f"    {addr[:16]}...  {err}")
+            if len(failed) > 10:
+                print(f"    ... and {len(failed)-10} more")
+
+        # T3: an incomplete run leaves a durable, terminal trace.
+        exit_code = EXIT_OK
+        if incomplete:
+            exit_code = EXIT_INCOMPLETE
+            reason = (f"{UNFILLABLE}: incomplete run {snapshot_id} -- "
+                      f"{completed}/{total} wallets"
+                      + (f" (stopped: {state['reason']})" if state["reason"] else ""))
+            record_gap(conn, started_ms, _now_ms(), reason,
+                       verbose=verbose >= 1)
+            fire_alert(
+                f"**smart_money snapshot INCOMPLETE**\n"
+                f"snapshot_id: {snapshot_id}\n"
+                f"covered: {completed}/{total} wallets\n"
+                f"positions kept: {total_positions}\n"
+                f"failed fetches: {len(failed)}\n"
+                f"This gap is UNFILLABLE -- Polymarket serves current "
+                f"positions only.",
+                "SMART MONEY SNAPSHOT INCOMPLETE", do_alert,
+                verbose=verbose >= 1)
+        elif stale:
+            # The run completed, but it arrived late enough that at least one
+            # scheduled snapshot was missed. Record + notify, then report it.
+            exit_code = EXIT_STALE
+            reason = (f"{UNFILLABLE}: staleness -- previous snapshot "
+                      f"{latest:%Y-%m-%d %H:%M:%S}Z was {age_h:.2f}h old "
+                      f"(cadence {cadence_h}h + margin {margin_h}h)"
+                      if latest else f"{UNFILLABLE}: no prior snapshot")
+            if latest is not None:
+                record_gap(conn, int(latest.timestamp()*1000), started_ms,
+                           reason, verbose=verbose >= 1)
+            fire_alert(
+                f"**smart_money snapshots were STALE**\n"
+                f"previous: {latest:%Y-%m-%d %H:%M:%S}Z ({age_h:.2f}h ago)\n"
+                f"cadence {cadence_h}h + margin {margin_h}h exceeded\n"
+                f"This run ({snapshot_id}) completed {completed}/{total}."
+                if latest else "smart_money has no prior snapshot on record.",
+                "SMART MONEY SNAPSHOTS STALE", do_alert, verbose=verbose >= 1)
+
+        # Display top holdings (informational; never affects the exit code).
+        try:
+            top_markets = conn.execute("""
+                SELECT market_title, outcome, COUNT(DISTINCT wallet) as n_wallets,
+                       SUM(value_usd) as total_value, AVG(current_price) as avg_price
+                FROM position_snapshots
+                WHERE snapshot_id=?
+                GROUP BY market_slug, outcome
+                HAVING n_wallets >= 2
+                ORDER BY n_wallets DESC, total_value DESC
+                LIMIT 20
+            """, (snapshot_id,)).fetchall()
+        except Exception as e:
+            top_markets = []
+            print(f"  (top-holdings rollup skipped: {e})")
+
+        # ASCII-only, and exception-proof. Cycle 64 verification caught this the
+        # hard way: the box-drawing separator raised UnicodeEncodeError under a
+        # cp1252 stdout, and an unhandled exception exits 1 -- the same code as
+        # EXIT_INCOMPLETE. A cosmetic rollup must never be able to forge or mask
+        # the run's real exit status.
+        if top_markets and verbose >= 2:
+            try:
+                print("\n  Markets with multiple top traders:")
+                print(f"  {'Market':<45s} {'Side':<5s} {'Wallets':>8s} "
+                      f"{'Total$':>10s} {'Price':>6s}")
+                print(f"  {'-'*80}")
+                for m in top_markets:
+                    flag = "**" if m[2] >= CONVERGENCE_THRESHOLD else "  "
+                    print(f"  {flag}{str(m[0])[:43]:<45s} {m[1]:<5s} {m[2]:>8d} "
+                          f"${m[3]:>9,.0f} {m[4]:>5.0%}")
+            except Exception as e:
+                print(f"  (top-holdings display skipped: "
+                      f"{type(e).__name__}: {e})")
+
+        print(f"\n  committed through wallet: {committed_through}/{total}")
+        print(f"  exit code: {exit_code} "
+              f"({'OK' if exit_code == EXIT_OK else 'INCOMPLETE' if exit_code == EXIT_INCOMPLETE else 'STALE'})")
+        print(f"\n{'='*90}")
+        return exit_code
 
 
 def cmd_diff(args):
@@ -631,11 +976,11 @@ def cmd_diff(args):
 
 def cmd_signals(args):
     """Show historical convergence signals."""
-    if not DB_PATH.exists():
+    if not active_db_path().exists():
         print("  No data. Run discover + snapshot + diff first.")
         return
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(active_db_path()))
     conn.row_factory = sqlite3.Row
 
     signals = conn.execute("""
@@ -874,6 +1219,11 @@ def cmd_profile(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Smart Money Tracker")
+    parser.add_argument("--db", default=None,
+                        help="Override the database path (default: "
+                             "data/smart_money.db). Used by the Cycle 64 "
+                             "deliberate-kill verification so test runs do not "
+                             "write partial snapshots into production.")
     subs = parser.add_subparsers(dest="command")
 
     p_disc = subs.add_parser("discover", help="Find top traders")
@@ -883,7 +1233,43 @@ def main():
     p_disc.add_argument("--period", default="MONTH",
                         help="MONTH, WEEK, ALL")
 
-    subs.add_parser("snapshot", help="Snapshot all tracked positions")
+    p_snap = subs.add_parser("snapshot", help="Snapshot all tracked positions")
+    p_snap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                        help=f"Wallets per commit (default {DEFAULT_BATCH_SIZE}). "
+                             "Bounds worst-case row loss on a host crash.")
+    p_snap.add_argument("--cadence-hours", type=float,
+                        default=DEFAULT_CADENCE_HOURS,
+                        help=f"Expected schedule cadence (default "
+                             f"{DEFAULT_CADENCE_HOURS}h)")
+    p_snap.add_argument("--staleness-margin-hours", type=float,
+                        default=DEFAULT_STALENESS_MARGIN_HOURS,
+                        help="Grace beyond the cadence before a run counts as "
+                             f"stale (default {DEFAULT_STALENESS_MARGIN_HOURS}h)")
+    p_snap.add_argument("--alert", action="store_true",
+                        help="POST to PRAXIS_ALERT_URL on incomplete/stale. "
+                             "Without it the alert is computed but not sent.")
+    p_snap.add_argument("--limit", type=int, default=None,
+                        help="Only process the first N wallets (test aid)")
+    p_snap.add_argument("--verbose", type=int, default=3,
+                        help="0=quiet 1=gaps 2=normal 3=max (default 3)")
+    p_snap.add_argument("--validate", dest="validate",
+                        action="store_true", default=True,
+                        help="Re-read the DB after the run and verify the "
+                             "committed row count (default on)")
+    p_snap.add_argument("--no-validate", dest="validate", action="store_false",
+                        help="Skip the post-run read-back")
+
+    p_gaps = subs.add_parser("gaps", help="Show recorded collector_gaps rows")
+    p_gaps.add_argument("--limit", type=int, default=20)
+
+    p_stale = subs.add_parser("staleness",
+                              help="Check snapshot freshness; non-zero if stale")
+    p_stale.add_argument("--cadence-hours", type=float,
+                         default=DEFAULT_CADENCE_HOURS)
+    p_stale.add_argument("--staleness-margin-hours", type=float,
+                         default=DEFAULT_STALENESS_MARGIN_HOURS)
+    p_stale.add_argument("--alert", action="store_true")
+
     subs.add_parser("diff", help="Compare recent snapshots")
     subs.add_parser("signals", help="Show convergence signals")
 
@@ -895,10 +1281,22 @@ def main():
 
     args = parser.parse_args()
 
+    global _DB_OVERRIDE
+    if getattr(args, "db", None):
+        _DB_OVERRIDE = args.db
+        print(f"  DB OVERRIDE: {_DB_OVERRIDE}")
+
     if args.command == "discover":
         cmd_discover(args)
     elif args.command == "snapshot":
-        cmd_snapshot(args)
+        code = cmd_snapshot(args)
+        if getattr(args, "validate", False):
+            code = _validate_after_run(code, args)
+        return code
+    elif args.command == "gaps":
+        return cmd_gaps(args)
+    elif args.command == "staleness":
+        return cmd_staleness(args)
     elif args.command == "diff":
         cmd_diff(args)
     elif args.command == "signals":
@@ -909,7 +1307,76 @@ def main():
         cmd_profile(args)
     else:
         parser.print_help()
+    return EXIT_OK
+
+
+def _validate_after_run(code, args):
+    """Read the DB back after the run and report what actually landed.
+
+    Cycle 64 verification discipline: the brief requires proof by measurement,
+    so the collector states what it committed rather than what it believes it
+    committed. Never downgrades a failing exit code to success.
+    """
+    with contextlib.closing(init_db()) as conn:
+        latest = latest_snapshot_dt(conn)
+        row = conn.execute(
+            "SELECT snapshot_id, COUNT(*), COUNT(DISTINCT wallet) "
+            "FROM position_snapshots "
+            "WHERE snapshot_id = (SELECT MAX(snapshot_id) FROM position_snapshots)"
+        ).fetchone()
+        print("  VALIDATE (read-back):")
+        if row and row[0]:
+            print(f"    latest snapshot_id : {row[0]}")
+            print(f"    rows committed     : {row[1]}")
+            print(f"    distinct wallets   : {row[2]}")
+        else:
+            print("    no snapshot rows found")
+            code = code or EXIT_FATAL
+        n_gaps = conn.execute(
+            "SELECT COUNT(*) FROM collector_gaps WHERE collector=?",
+            (COLLECTOR_NAME,)).fetchone()[0]
+        print(f"    collector_gaps rows: {n_gaps}")
+    return code
+
+
+def cmd_gaps(args):
+    """List recorded gaps. All smart_money gaps are terminal by construction."""
+    with contextlib.closing(init_db()) as conn:
+        rows = conn.execute(
+            "SELECT datetime, gap_end, gap_seconds, reason, detected_at "
+            "FROM collector_gaps WHERE collector=? "
+            "ORDER BY timestamp DESC LIMIT ?",
+            (COLLECTOR_NAME, int(getattr(args, "limit", 20))),
+        ).fetchall()
+    print(f"\n  collector_gaps -- {COLLECTOR_NAME}/{COLLECTOR_VENUE} "
+          f"({len(rows)} shown)")
+    if not rows:
+        print("    (none)")
+        return EXIT_OK
+    for dt, gend, gsec, reason, det in rows:
+        span = f"{gsec/3600:.2f}h" if gsec is not None else "OPEN"
+        print(f"    {dt}  span={span:>8s}  {reason}")
+    return EXIT_OK
+
+
+def cmd_staleness(args):
+    """Standalone freshness probe. Non-zero + alert when stale."""
+    with contextlib.closing(init_db()) as conn:
+        stale, age_h, latest = check_staleness(
+            conn, float(args.cadence_hours),
+            float(args.staleness_margin_hours), verbose=True)
+        if stale:
+            fire_alert(
+                (f"**smart_money snapshots are STALE**\n"
+                 f"latest: {latest:%Y-%m-%d %H:%M:%S}Z ({age_h:.2f}h ago)\n"
+                 f"cadence {args.cadence_hours}h + margin "
+                 f"{args.staleness_margin_hours}h exceeded."
+                 if latest else "smart_money has no snapshots on record."),
+                "SMART MONEY SNAPSHOTS STALE",
+                bool(getattr(args, "alert", False)))
+            return EXIT_STALE
+    return EXIT_OK
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

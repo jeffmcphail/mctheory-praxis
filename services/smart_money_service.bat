@@ -31,15 +31,24 @@ if errorlevel 1 (
     set /a FAIL_COUNT+=1
     echo [%date% %time%]   STEP FAILED: discover ^(errorlevel !ERRORLEVEL!^) >> "%LOG_FILE%"
 )
-python -u -m engines.smart_money snapshot >> "%LOG_FILE%" 2>&1
-if errorlevel 1 (
+REM Cycle 64: --alert fires the PRAXIS_ALERT_URL push on an incomplete or stale
+REM run. The snapshot exit code is now meaningful and is preserved verbatim
+REM below (1=incomplete, 2=stale, 3=fatal) rather than collapsed to 1, so Task
+REM Scheduler's LastTaskResult distinguishes them without reading the log.
+python -u -m engines.smart_money snapshot --alert >> "%LOG_FILE%" 2>&1
+set SNAP_RC=!ERRORLEVEL!
+if !SNAP_RC! neq 0 (
     set /a FAIL_COUNT+=1
-    echo [%date% %time%]   STEP FAILED: snapshot ^(errorlevel !ERRORLEVEL!^) >> "%LOG_FILE%"
+    echo [%date% %time%]   STEP FAILED: snapshot ^(errorlevel !SNAP_RC!^) >> "%LOG_FILE%"
 )
 
+REM `exit /b` ends the batch, which implicitly ends setlocal -- so no explicit
+REM endlocal here. An explicit `endlocal & exit /b !SNAP_RC!` would discard the
+REM variable before the exit could read it, collapsing every failure back to 1.
 if !FAIL_COUNT! gtr 0 (
-    echo [%date% %time%] Snapshot completed with !FAIL_COUNT! step failure^(s^). >> "%LOG_FILE%"
-    endlocal & exit /b 1
+    echo [%date% %time%] Snapshot completed with !FAIL_COUNT! step failure^(s^); rc=!SNAP_RC!. >> "%LOG_FILE%"
+    if !SNAP_RC! neq 0 exit /b !SNAP_RC!
+    exit /b 1
 )
 echo [%date% %time%] Snapshot complete. >> "%LOG_FILE%"
 endlocal
