@@ -41,6 +41,19 @@ import requests
 from dotenv import load_dotenv
 load_dotenv()
 
+# Cycle 64: this module prints box-drawing characters and emoji throughout. Under
+# a cp1252 stdout (any invocation that does not set PYTHONUTF8=1 -- the service
+# bat does, an ad-hoc run does not) those raise UnicodeEncodeError and kill the
+# process mid-run. That matters beyond cosmetics: an unhandled exception exits 1,
+# which is also EXIT_INCOMPLETE, so a display failure could forge or mask the
+# run's real status. errors="replace" guarantees output can never crash the
+# collector, whatever the console can represent.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 DATA_API = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "smart_money.db"  # Cycle 47 (44h-bulk): anchor to repo root
