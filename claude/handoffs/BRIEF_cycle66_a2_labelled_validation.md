@@ -1,4 +1,11 @@
-# BRIEF — Cycle 66: A2 Validation Against Labelled Liquidations
+# BRIEF - Cycle 66: A2 Validation Against Labelled Liquidations
+
+**Version 2 (2026-10-15).** Supersedes v1 of the same date. Nothing in the specification
+has been withdrawn; v2 adds the five amendments below, which were agreed in chat after v1
+was written and existed nowhere on disk. A crashed session on the night of 2026-10-15 took
+the only copy of them with it and they had to be reconstructed from memory. That is the
+reason they now live in the brief: a brief that does not describe what was actually run is
+not an anchor.
 
 **Estimated Scope:** M (1–2 hr)
 **Estimated Cost:** none (read-only against `crypto_data.db`)
@@ -37,6 +44,51 @@ measurements said they were **not cascades**:
 bursts, not liquidation cascades.** Recording that before the measurement so the result is
 a test rather than a story. **A clean refutation is a result, not a failure** — it closes an
 open "cannot be determined" in the atlas, which is worth more than leaving it unresolved.
+
+---
+
+---
+
+## Amendments (v2) - these bind alongside everything below
+
+**a) The 2026-08-19 cascade is included, flagged, and censored by construction.** Report T2
+and T3 both with and without it. Constraint: the dataset's FIRST ROW IS the cascade
+(15:27 UTC). The collector started at or during the event, so there is no pre-event label
+baseline from that session. It may serve as an event; it must NOT contribute to any
+baseline, chance rate, control or mask validation computed from the `liquidations` table -
+that is selection on the dependent variable. Price, flow and book profiles around it are
+fine, because `trades` and `order_book_snapshots` are continuous and independent of the
+liquidation collector.
+
+**b) Mask the periodic handoff, not just the logged gaps.** Runs last ~3550 s on an hourly
+schedule, leaving a fixed blind spot of roughly 50 s near the top of each hour - on the
+order of 17-18 hours in total, and periodic rather than random. Cascades cluster by
+time-of-day, so a periodic blind spot biases both the event set and the control set.
+**Validation that can fail:** the `liquidations` table should show a deficit in that
+minute-of-hour. If it does not, the mask is wrong. If the observed deficit materially
+EXCEEDS what the mask predicts, that residual is itself a finding - settle it or bound it,
+and do not let it block the verdict.
+
+**c) Venue inventory, in T1.** State which venue and instrument type `trades` and
+`order_book_snapshots` actually cover. The labels are Bybit perp; the detector reads Binance
+spot, so recall is venue-confounded by construction. Check whether a Binance PERP trades
+table exists over the label span; if it does, run the unchanged detector against it as a
+second scoring pass, which removes most of the confound. If it does not exist, say so in one
+line and move on. Do not build one.
+
+**d) Recall bucketed by cluster size, and matching on interval overlap.** Pooled recall is
+uninterpretable under (c). Bucket recall by notional and by event count, with chance rates
+and lift. **This is the test that resolves the venue confound:** a nine-figure cascade should
+register on any venue, so near-zero recall in the top size bucket is detector failure rather
+than a venue artifact. Separately, the detector fires on sub-minute bursts (229 events at
+W=60 s, 1 at W=300 s) while labelled cascades run minutes - score "did the detector fire
+anywhere inside the labelled cluster" alongside the strict point match, to separate a wrong
+timescale from no signal. Neither requires retuning the detector.
+
+**e) Establish the bankruptcy-price bias direction from the data.** Bybit's liquidation price
+is the bankruptcy price, so its notional is biased. Compare it against spot mid at the same
+timestamp, split by side, and report the observed sign and magnitude rather than assuming
+them. Report event count and quantity x spot price alongside raw `quote_qty`.
 
 ---
 
@@ -165,6 +217,6 @@ Final step, standing:
 ---
 
 *Last updated: 2026-10-15 (Chat: praxis_main_current)*
-*Changes: Initial brief. Cycle 66 spends the eight weeks of Bybit liquidation labels on the
-false-positive rate Cycle 61 recorded as uncomputable, characterises real cascades against
-matched controls, and sizes the path-signature question without implementing it.*
+*Changes: v2 - the five amendments agreed in chat on 2026-10-15 are now part of the brief.
+They were implemented by Code against the chat text before a crash destroyed that session;
+recording them here makes the brief self-sufficient. v1 text is otherwise unchanged.*
