@@ -1,0 +1,29 @@
+=== iisignature pass 2: numpy preinstalled, --no-build-isolation
+  File "C:\Users\jmcphail\AppData\Local\Temp\claude\C--Data-Development-Python-McTheoryApps-praxis\c47f7a3d-7f35-4a28-bdc6-390f7429d725\scratchpad\sig_tooling\venv_iisignature\Lib\site-packages\pip\_vendor\pyproject_hooks\_impl.py", line 224, in prepare_metadata_for_build_wheel
+    return self._call_hook(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\jmcphail\AppData\Local\Temp\claude\C--Data-Development-Python-McTheoryApps-praxis\c47f7a3d-7f35-4a28-bdc6-390f7429d725\scratchpad\sig_tooling\venv_iisignature\Lib\site-packages\pip\_vendor\pyproject_hooks\_impl.py", line 402, in _call_hook
+    raise BackendUnavailable(
+pip._vendor.pyproject_hooks._impl.BackendUnavailable: Cannot import 'setuptools.build_meta'
+=== signatory pass 2: torch (CPU) preinstalled, --no-build-isolation
+C:\Users\jmcphail\AppData\Local\Temp\claude\C--Data-Development-Python-McTheoryApps-praxis\c47f7a3d-7f35-4a28-bdc6-390f7429d725\scratchpad\sig_tooling\venv_signatory\Lib\site-packages\torch\_subclasses\functional_tensor.py:368: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\torch\csrc\utils\tensor_numpy.cpp:84.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+torch 2.14.1+cpu
+Failed to build signatory
+error: failed-wheel-build-for-install
+
+Failed to build installable wheels for some pyproject.toml based projects
+
+signatory
+=== signax float64 check
+RESULT {"package": "signax", "version": "0.2.1", "terms": 155, "expected_terms": 155, "max_abs_err_vs_numpy_ref": 8.526512829121202e-14, "matches_reference": true, "computes": true}
+=== pip index versions
+iisignature (0.24)
+signatory (1.2.6.1.9.0)
+esig (1.0.0)
+roughpy (0.3.0)
+signax (0.2.1)
+pysiglib (4.0.0)
+=== Application Control state
+On
+1

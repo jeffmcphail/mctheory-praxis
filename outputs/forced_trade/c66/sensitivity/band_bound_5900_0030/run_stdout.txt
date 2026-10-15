@@ -1,0 +1,713 @@
+INFO    forced_trade.run_labelled: context ready in 1.1s (analysis end 2026-10-15 06:20:50)
+
+==============================================================================
+T1 -- INVENTORY OF THE LABELLED DATA
+==============================================================================
+
+VENUE INVENTORY (one line each):
+  trades               : Binance SPOT BTC/USDT, ETH/USDT -- ccxt REST fetch_trades, fromId cursor (engines/crypto_data_collector.py:1156 TRADES_SYMBOL_MAP); no venue column; BTC+ETH only
+  order_book_snapshots : Binance SPOT top-10 REST snapshots every 10s (crypto_data_collector.py:1003 fetch_order_book limit=10; ts = local clock when the venue sends none); BTC+ETH only
+  liquidations         : Bybit USDT-linear PERP allLiquidation stream, BTC ETH SOL XRP ADA AVAX (stream:bybit)
+  Binance PERP trades  : NO TABLE EXISTS in crypto_data.db or any data/*.db -- no third detector scan; the spot-vs-perp venue confound stands
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_venue_inventory.json
+
+LABEL ROWS (venue=bybit, analysis end 2026-10-15 06:20:50):
+symbol      rows                first                 last  manual_rows  forced_sell%  quote_raw  qty x spot
+--------  ------  -------------------  -------------------  -----------  ------------  ---------  ----------
+ADAUSDT    6,017  2026-08-19 15:27:30  2026-10-15 06:05:18           24         64.1%     $20.4M         n/a
+AVAXUSDT   3,602  2026-08-19 15:27:33  2026-10-15 06:05:18           10         62.7%      $5.4M         n/a
+BTCUSDT   77,957  2026-08-19 15:27:23  2026-10-15 06:05:22         3091         41.8%    $915.5M     $915.1M
+ETHUSDT   43,878  2026-08-19 15:27:23  2026-10-15 06:05:25         1455         48.5%    $510.2M     $510.4M
+SOLUSDT   30,816  2026-08-19 15:27:23  2026-10-15 06:06:49          292         51.7%    $128.5M         n/a
+XRPUSDT   29,532  2026-08-19 15:27:17  2026-10-15 06:06:50          101         64.2%    $133.1M         n/a
+  total 191,802 rows; Bybit has no all-market topic, so anything outside these 6 symbols is UNOBSERVED, not quiet.
+  quote_raw = Bybit bankruptcy price x qty (biased, see T1.4); qty x spot = Binance spot last trade (BTC/ETH only).
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_label_rows.csv
+
+==============================================================================
+T1.1  COVERAGE MASK (built from the collector LOG, not collector_gaps)
+==============================================================================
+  span (first scheduled connect -> end) : 1358.3 h  [2026-08-19 16:00:02 -> 2026-10-15 06:20:50]
+  observed per log                      : 1237.6 h
+  observed after hourly band            : 1223.9 h (90.1%)  -- band removed a further 13.69 h
+  runs                                  : 1274  {'ok': 1252, 'killed_or_running': 15, 'quiet_hour': 7}
+  hourly slots / with no run start      : 1358 / 85 (in 19 outages)
+  handoff holes between runs            : n=1237 total 17.65 h, p50 51.2s, p95 53.6s, max 94.4s
+  in-run outages (collector_gaps)       : 298 rows -> 266 outages after merging retry chains (32 open rows absorbed, 0 unresolved)
+  cross-check vs log outages            : 266/266 matched, max start diff 0 ms, max end diff 0 ms
+  pads: connect +1000 ms, disconnect -60000 ms (dead-socket detection latency); manual 62A segment ['2026-08-19 15:27:17', '2026-08-19 15:39:37'] (4973 rows, EVENT-ONLY)
+
+  Missing-run outages (hourly slots with no run start):
+first_slot                     last_slot  hours           prev_run  prev_log_line           next_start
+-------------------  -------------------  -----  -----------------  -------------  -------------------
+2026-08-28 07:00:00  2026-08-28 07:00:00      1                 ok           7092  2026-08-28 08:00:01
+2026-08-29 21:00:00  2026-08-30 00:00:00      4  killed_or_running           8317  2026-08-30 01:00:01
+2026-09-01 12:00:00  2026-09-01 12:00:00      1  killed_or_running          10125  2026-09-01 13:35:59
+2026-09-01 14:00:00  2026-09-01 14:00:00      1                 ok          10130  2026-09-01 15:00:01
+2026-09-03 09:00:00  2026-09-04 12:00:00     28  killed_or_running          11399  2026-09-04 13:05:23
+2026-09-04 14:00:00  2026-09-04 14:00:00      1                 ok          11404  2026-09-04 15:00:01
+2026-09-04 17:00:00  2026-09-04 17:00:00      1                 ok          11461  2026-09-04 18:00:01
+2026-09-06 10:00:00  2026-09-06 17:00:00      8  killed_or_running          12636  2026-09-06 18:42:58
+2026-09-11 18:00:00  2026-09-11 19:00:00      2  killed_or_running          16248  2026-09-11 20:40:31
+2026-09-11 21:00:00  2026-09-11 21:00:00      1                 ok          16253  2026-09-11 22:00:01
+2026-09-12 23:00:00  2026-09-13 16:00:00     18  killed_or_running          16926  2026-09-13 17:53:29
+2026-09-13 18:00:00  2026-09-13 18:00:00      1                 ok          16931  2026-09-13 19:00:01
+2026-09-15 00:00:00  2026-09-15 11:00:00     12  killed_or_running          17794  2026-09-15 12:16:40
+2026-09-15 13:00:00  2026-09-15 13:00:00      1                 ok          17799  2026-09-15 14:00:02
+2026-09-17 14:00:00  2026-09-17 14:00:00      1  killed_or_running          19229  2026-09-17 15:12:33
+2026-09-17 16:00:00  2026-09-17 16:00:00      1                 ok          19234  2026-09-17 17:00:01
+2026-09-18 01:00:00  2026-09-18 01:00:00      1                 ok          19430  2026-09-18 02:00:01
+2026-10-06 18:00:00  2026-10-06 18:00:00      1                 ok          33110  2026-10-06 19:00:01
+2026-10-08 00:00:00  2026-10-08 00:00:00      1                 ok          34027  2026-10-08 01:00:01
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_runs.csv
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_missing_run_outages.csv
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_gap_chains.csv
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_coverage.json
+
+==============================================================================
+T1.2  MASK VALIDATION
+==============================================================================
+  scheduled rows                       : 186,829
+  outside the log mask                 : 1,014
+    in the pre-disconnect pad (expected): 941
+    within 2000 ms of a mask edge        : 55
+    otherwise                           : 18  -> residue lies <= 4.0s BEFORE a logged (re)connect (73 of 73 within 5s)
+  READ: every out-of-mask row sits in time the mask EXCLUDED conservatively (pad / pre-connect fringe).
+  No row lands in a stretch the mask calls unobserved for any other reason.
+  pre-disconnect row lag p25/p50/p75   : ['83', '275', '636'] s vs random observed instant ['59', '205', '546'] s
+
+  HANDOFF BAND 3540.0s -> 30.0s of the hour (:59:00.0 -> :00:30.0), applied to EVERY hour
+  liquidation-row deficit inside the band: rows 1,289 vs 5,148 expected at the out-of-band rate -> deficit 75.0% (log mask predicts 60.2%)
+bin     rows  observed_frac  rows/obs_hour      
+------  ----  -------------  -------------  ----
+:00:00   307          0.615          132.3  BAND
+:00:10   275          0.920           79.2  BAND
+:00:20   423          0.921          121.7  BAND
+:58:20   500          0.926          143.2      
+:58:30   378          0.926          108.2      
+:58:40   206          0.927           58.9      
+:58:50   185          0.927           52.9      
+:59:00   257          0.924           73.8  BAND
+:59:10    24          0.167           38.1  BAND
+:59:20     0          0.013            0.0  BAND
+:59:30     0          0.011            0.0  BAND
+:59:40     2          0.007           80.0  BAND
+:59:50     1          0.007           40.0  BAND
+
+  Independent control -- Binance SPOT trade count by bin / hour mean (trades are cursor-collected, no handoff loss):
+asset  :57:30  :58:00  :58:30  :58:50  :59:00  :59:20  :59:40  :00:00  :00:10  :00:20
+-----  ------  ------  ------  ------  ------  ------  ------  ------  ------  ------
+BTC      0.78    0.85    0.80    0.74    0.89    0.77    0.75    1.65    1.23    1.12
+ETH      0.71    0.80    0.72    0.69    0.84    0.69    0.68    1.75    1.29    1.16
+  READ: the market itself is quiet before the hour and spikes at :00:00 -- the spike sits INSIDE the
+  blind spot, which is why the band is masked out of events and controls alike.
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_handoff_validation_bins.csv
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_mask_validation.json
+
+==============================================================================
+T1.2b  HANDOFF RESIDUAL -- deficit beyond the mask's prediction
+==============================================================================
+  TEST 1  leading-edge latency: 1248 on-schedule handoffs, 1228 with a row inside the run
+    connect line, second of hour p01/p50/p99 : 2.00 / 2.00 / 7.53 s
+    start line -> connect line p50/p99       : 0.69 / 4.04 s
+    first row, second of hour p01/p05/p10/p25/p50 : 3.3 / 8.6 / 16.4 / 55.3 / 153.3 s
+    first row - connect line p01/p05           : 0.67 / 6.42 s
+    FLOOR (p05 first row) :00:08.6 vs band edge :00:30.0 -> -21.4 s; 198 runs logged a row before the band edge
+    ramp: rows per run-second after the connect line vs the same 1200 runs at 120-600 s:
+after connect  rows   rel
+-------------  ----  ----
+-10..-5s          0  0.00
+-5..+0s          48  0.17
++0..+2s          63  0.54
++2..+4s          70  0.60
++4..+6s          54  0.47
++6..+8s          83  0.72
++8..+10s         42  0.36
++10..+15s       142  0.49
++15..+20s       102  0.35
++20..+30s       451  0.78
++30..+60s      1221  0.70
++60..+120s     3995  1.15
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_handoff_leading_edge_runs.csv
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_handoff_leading_edge_ramp.csv
+
+  TEST 2  band [3540s, 30s) against the adjacent seconds on the SAME hours; 90% CIs resample 58 UTC days
+    band 33.96 h, log-exposed 13.52 h (outgoing tail 4.25 h, incoming head 9.27 h)
+unit                  baseline    obs  exp|exposure       ratio [ci90]        tail [ci90]        head [ci90]  deficit obs vs mask
+----------  ------------------  -----  ------------  -----------------  -----------------  -----------------  -------------------
+rows        global hourly mean  1,289         2,050  0.63 [0.50, 0.77]  0.44 [0.30, 0.60]  0.72 [0.57, 0.89]       75.0% vs 60.2%
+rows               local +-60s  1,289         2,238  0.58 [0.41, 0.88]  0.77 [0.54, 1.11]  0.54 [0.35, 0.95]       73.7% vs 60.2%
+rows              local +-120s  1,289         2,076  0.62 [0.51, 0.77]  0.77 [0.59, 1.02]  0.59 [0.46, 0.79]       72.0% vs 60.2%
+rows              local +-300s  1,289         1,837  0.70 [0.60, 0.80]  0.82 [0.61, 1.07]  0.67 [0.56, 0.80]       68.6% vs 60.2%
+active_sec  global hourly mean    607           667  0.91 [0.80, 1.03]  0.65 [0.51, 0.80]  1.03 [0.90, 1.17]       63.8% vs 60.2%
+active_sec         local +-60s    607           657  0.92 [0.82, 1.03]  0.98 [0.75, 1.27]  0.91 [0.79, 1.04]       59.6% vs 60.2%
+active_sec        local +-120s    607           710  0.85 [0.76, 0.96]  1.01 [0.80, 1.27]  0.82 [0.71, 0.94]       61.9% vs 60.2%
+active_sec        local +-300s    607           704  0.86 [0.77, 0.97]  0.94 [0.74, 1.15]  0.84 [0.74, 0.96]       62.1% vs 60.2%
+  ratio = observed / expected given the log mask's exposure; 1.0 means the mask accounts for the whole deficit.
+  tail = outgoing run (yardstick: the window before the band); head = incoming run (the window after).
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_handoff_local_baseline.csv
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_handoff_residual.json
+
+==============================================================================
+T1.3  CLUSTERS (gap-based, per symbol; primary gap 30s pre-registered)
+==============================================================================
+
+  gap <= 10s:
+symbol      all  sched_unc  cens  man  n_p50  n_p90  n_p99  n_max  usd_p50  usd_p90  usd_max  dur_p90  >=$100.0k  >=$1.0M  >=$10.0M
+--------  -----  ---------  ----  ---  -----  -----  -----  -----  -------  -------  -------  -------  ---------  -------  --------
+ADAUSDT    3369       3305    63    1      1      3     12    136     $484   $11.2k  $814.3k        4         30        0         0
+AVAXUSDT   2144       2102    39    3      1      2     11     87     $411    $5.7k  $271.0k        3          5        0         0
+BTCUSDT   10862      10636   216   10      1     10    103   1607    $3.9k  $104.7k   $22.5M       11       1092      120         3
+ETHUSDT    9039       8839   192    8      1      7     59    887    $2.4k   $75.4k   $18.9M        9        739       60         5
+SOLUSDT    8460       8283   173    4      1      6     38    492    $1.2k   $31.2k    $7.4M        8        199        7         0
+XRPUSDT    9339       9162   172    5      1      6     27    576    $1.1k   $28.3k    $9.0M        8        174       11         0
+INFO    forced_trade.run_labelled: wrote C:\Users\jmcphail\AppData\Local\Temp\claude\C--Data-Development-Python-McTheoryApps-praxis\b53be603-ea9b-46a5-8d64-33da508c1f8a\scratchpad\rows_band_bound\t1_clusters_gap10.parquet
+
+  gap <= 30s:
+symbol     all  sched_unc  cens  man  n_p50  n_p90  n_p99  n_max  usd_p50  usd_p90  usd_max  dur_p90  >=$100.0k  >=$1.0M  >=$10.0M
+--------  ----  ---------  ----  ---  -----  -----  -----  -----  -------  -------  -------  -------  ---------  -------  --------
+ADAUSDT   2909       2815    93    1      1      3     17    160     $544   $13.2k  $857.9k       16         34        0         0
+AVAXUSDT  1885       1825    58    2      1      3     13    103     $463    $6.3k  $275.4k       15          5        0         0
+BTCUSDT   7994       7699   292    3      2     14    135   1730    $4.8k  $141.0k   $23.4M       34        961      139         4
+ETHUSDT   6956       6699   252    5      1      9     85   1682    $2.9k   $99.1k   $33.8M       29        668       71         4
+SOLUSDT   6494       6268   223    3      1      8     56    532    $1.6k   $38.2k    $7.7M       28        217        9         0
+XRPUSDT   7185       6949   232    4      1      8     39    883    $1.3k   $36.6k   $17.2M       29        184        9         1
+INFO    forced_trade.run_labelled: wrote C:\Users\jmcphail\AppData\Local\Temp\claude\C--Data-Development-Python-McTheoryApps-praxis\b53be603-ea9b-46a5-8d64-33da508c1f8a\scratchpad\rows_band_bound\t1_clusters_gap30.parquet
+
+  gap <= 60s:
+symbol     all  sched_unc  cens  man  n_p50  n_p90  n_p99  n_max  usd_p50  usd_p90  usd_max  dur_p90  >=$100.0k  >=$1.0M  >=$10.0M
+--------  ----  ---------  ----  ---  -----  -----  -----  -----  -------  -------  -------  -------  ---------  -------  --------
+ADAUSDT   2604       2444   159    1      1      4     21    161     $613   $14.6k  $858.0k       39         37        0         0
+AVAXUSDT  1694       1594    98    2      1      3     16    172     $490    $6.8k  $358.3k       35          6        0         0
+BTCUSDT   6415       5995   418    2      2     18    171   1029    $5.6k  $176.3k   $15.9M       71        844      127         3
+ETHUSDT   5729       5375   350    4      2     10     96   1684    $3.5k  $120.9k   $33.8M       63        609       72         4
+SOLUSDT   5289       4965   321    3      2     10     69    579    $1.9k   $45.1k    $7.7M       65        211       11         0
+XRPUSDT   5818       5477   337    4      2      9     49    940    $1.5k   $44.0k   $17.5M       63        187       10         1
+INFO    forced_trade.run_labelled: wrote C:\Users\jmcphail\AppData\Local\Temp\claude\C--Data-Development-Python-McTheoryApps-praxis\b53be603-ea9b-46a5-8d64-33da508c1f8a\scratchpad\rows_band_bound\t1_clusters_gap60.parquet
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_cluster_summary.csv
+  size basis: BTC/ETH = qty x Binance spot price; other symbols = Bybit quote_qty (bankruptcy price, see T1.4)
+
+  T3 GATE -- BTC+ETH uncensored scheduled clusters at gap 30s (threshold 50):
+floor    clusters         T3
+-------  --------  ---------
+$100.0k      1629     VIABLE
+$1.0M         210     VIABLE
+$10.0M          8  TOO SMALL
+
+==============================================================================
+T1.4  BANKRUPTCY PRICE -- direction measured, not asserted
+==============================================================================
+asset  side  liquidated      subset       n  med_bps     p25     p75  below_mid  dt_ms  offset  common
+-----  ----  ----------  ----------  ------  -------  ------  ------  ---------  -----  ------  ------
+BTC     BUY       SHORT         all  41,573    31.21   28.46   36.79       0.2%   2453   34.70   -3.49
+BTC     BUY       SHORT  dt<=1000ms   8,426    30.97   28.89   34.93       0.1%    512   34.49   -3.52
+BTC    SELL        LONG         all  31,296   -38.19  -40.93  -35.91     100.0%   2449   34.70   -3.49
+BTC    SELL        LONG  dt<=1000ms   6,116   -38.01  -39.73  -36.12     100.0%    506   34.49   -3.52
+ETH     BUY       SHORT         all  20,851    32.30   28.32   41.44       1.7%   2483   35.77   -3.47
+ETH     BUY       SHORT  dt<=1000ms   4,296    32.42   29.18   38.78       0.2%    508   35.47   -3.05
+ETH    SELL        LONG         all  20,309   -39.24  -44.92  -35.76      98.7%   2412   35.77   -3.47
+ETH    SELL        LONG  dt<=1000ms   4,192   -38.52  -42.00  -35.50      97.9%    492   35.47   -3.05
+  bias_bps = Bybit price vs Binance spot mid (nearest snapshot within 5s).
+  offset = half the between-side difference (isolates the bankruptcy offset);
+  common = mean of the sides (perp-spot basis + timing, same sign both sides).
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t1_bankruptcy_bias.csv
+
+==============================================================================
+T1.5  OVERLAP WITH FLOW / DEPTH DATA
+==============================================================================
+  BTC: trades buckets 2026-04-29 19:24:10 -> 2026-10-15 06:20:40; book in label window: 451,628 snaps, median gap 10.0s, 1286 gaps >30s totalling 108.2 h (max 28.6 h)
+  ETH: trades buckets 2026-04-29 19:23:50 -> 2026-10-15 06:20:40; book in label window: 451,638 snaps, median gap 10.0s, 1287 gaps >30s totalling 108.2 h (max 28.6 h)
+  SOL / XRP / ADA / AVAX: labels only -- no trades, no book, no 1m OHLCV in crypto_data.db.
+
+==============================================================================
+T2 -- THE CONFUSION MATRIX CYCLE 61 COULD NOT COMPUTE
+==============================================================================
+
+T2.0  REGRESSION CHECK (a control that can fail): Cycle 61 counts
+asset  setting  published  c61cache+code  c66cache_trunc  code  data  only_old  only_new  mismatch
+-----  -------  ---------  -------------  --------------  ----  ----  --------  --------  --------
+BTC      loose       2092           2092            2092  PASS  PASS         0         0         1
+BTC       base        229            229             229  PASS  PASS         0         0         1
+BTC     strict         26             26              26  PASS  PASS         0         0         1
+ETH      loose       1142           1142            1142  PASS  PASS         0         0         1
+ETH       base         72             72              72  PASS  PASS         0         0         1
+ETH     strict          5              5               5  PASS  PASS         0         0         1
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t2_regression_check.csv
+
+==============================================================================
+T2.1  WINDOW-LEVEL 2x2 (W=60s detector windows inside observed time; cluster gap 30s, tau 60s)
+==============================================================================
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t2_window_confusion_grid.csv
+asset  setting    floor   TP   FP    FN      TN  precision       prec_ci90  prevalence  lift     lift_ci90  recall     FPR
+-----  -------  -------  ---  ---  ----  ------  ---------  --------------  ----------  ----  ------------  ------  ------
+BTC      loose  $100.0k  162  685  2941  68,449      19.1%  [16.0%, 22.5%]       4.30%  4.45  [3.83, 5.20]    5.2%  0.991%
+BTC      loose    $1.0M   30  816   500  70,829       3.5%    [2.2%, 5.2%]       0.73%  4.83  [3.08, 7.26]    5.7%  1.139%
+BTC      loose   $10.0M    0  846    22  71,285       0.0%    [0.0%, 0.0%]       0.03%  0.00  [0.00, 0.00]    0.0%  1.173%
+ETH      loose  $100.0k   60  503  2127  69,593      10.7%   [7.9%, 13.6%]       3.03%  3.52  [2.60, 4.64]    2.7%  0.718%
+ETH      loose    $1.0M    2  559   276  71,387       0.4%    [0.0%, 0.8%]       0.38%  0.93  [0.00, 2.23]    0.7%  0.777%
+ETH      loose   $10.0M    0  561    28  71,628       0.0%    [0.0%, 0.0%]       0.04%  0.00  [0.00, 0.00]    0.0%  0.777%
+BTC       base  $100.0k   15   56  3088  69,078      21.1%  [14.3%, 29.0%]       4.30%  4.92  [3.26, 7.00]    0.5%  0.081%
+BTC       base    $1.0M    0   71   530  71,574       0.0%    [0.0%, 0.0%]       0.73%  0.00  [0.00, 0.00]    0.0%  0.099%
+BTC       base   $10.0M    0   71    22  72,060       0.0%    [0.0%, 0.0%]       0.03%  0.00  [0.00, 0.00]    0.0%  0.098%
+ETH       base  $100.0k    0   16  2187  70,080       0.0%    [0.0%, 0.0%]       3.03%  0.00  [0.00, 0.00]    0.0%  0.023%
+ETH       base    $1.0M    0   16   278  71,930       0.0%    [0.0%, 0.0%]       0.38%  0.00  [0.00, 0.00]    0.0%  0.022%
+ETH       base   $10.0M    0   16    28  72,173       0.0%    [0.0%, 0.0%]       0.04%  0.00  [0.00, 0.00]    0.0%  0.022%
+BTC     strict  $100.0k    0    2  3103  69,132       0.0%    [0.0%, 0.0%]       4.30%  0.00  [0.00, 0.00]    0.0%  0.003%
+BTC     strict    $1.0M    0    2   530  71,643       0.0%    [0.0%, 0.0%]       0.73%  0.00  [0.00, 0.00]    0.0%  0.003%
+BTC     strict   $10.0M    0    2    22  72,129       0.0%    [0.0%, 0.0%]       0.03%  0.00  [0.00, 0.00]    0.0%  0.003%
+ETH     strict  $100.0k    0    0  2187  70,096        n/a      [n/a, n/a]       3.03%   n/a    [n/a, n/a]    0.0%  0.000%
+ETH     strict    $1.0M    0    0   278  71,946        n/a      [n/a, n/a]       0.38%   n/a    [n/a, n/a]    0.0%  0.000%
+ETH     strict   $10.0M    0    0    28  72,189        n/a      [n/a, n/a]       0.04%   n/a    [n/a, n/a]    0.0%  0.000%
+  prevalence = chance precision (a detector firing at random with the same rate); CIs resample whole days.
+
+==============================================================================
+T2.2  DETECTOR -> LABEL (each detector event; tau 60s)
+==============================================================================
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t2_detector_to_label.csv
+asset  setting    floor  events  unobserved  matched  precision  chance  lift  side_agree
+-----  -------  -------  ------  ----------  -------  ---------  ------  ----  ----------
+BTC      loose  $100.0k     808         125      151      18.7%    4.5%  4.18       92.1%
+BTC      loose    $1.0M     808         125       29       3.6%    0.8%  4.60       86.2%
+BTC      loose   $10.0M     808         125        0       0.0%    0.0%  0.00         n/a
+ETH      loose  $100.0k     547          67       56      10.2%    3.1%  3.33       98.2%
+ETH      loose    $1.0M     547          67        2       0.4%    0.4%  0.98      100.0%
+ETH      loose   $10.0M     547          67        0       0.0%    0.0%  0.00         n/a
+BTC       base  $100.0k      70          15       15      21.4%    4.5%  4.79      100.0%
+BTC       base    $1.0M      70          15        0       0.0%    0.8%  0.00         n/a
+BTC       base   $10.0M      70          15        0       0.0%    0.0%  0.00         n/a
+ETH       base  $100.0k      16           2        0       0.0%    3.0%  0.00         n/a
+ETH       base    $1.0M      16           2        0       0.0%    0.4%  0.00         n/a
+ETH       base   $10.0M      16           2        0       0.0%    0.0%  0.00         n/a
+BTC     strict  $100.0k       2           1        0       0.0%    4.5%  0.00         n/a
+BTC     strict    $1.0M       2           1        0       0.0%    0.8%  0.00         n/a
+BTC     strict   $10.0M       2           1        0       0.0%    0.0%  0.00         n/a
+ETH     strict  $100.0k       0           0        0        n/a    3.0%   n/a         n/a
+ETH     strict    $1.0M       0           0        0        n/a    0.4%   n/a         n/a
+ETH     strict   $10.0M       0           0        0        n/a    0.0%   n/a         n/a
+
+==============================================================================
+T2.3  LABEL -> DETECTOR: RECALL BY CLUSTER SIZE (pooled BTC+ETH)
+==============================================================================
+  OVERLAP = detector fired anywhere inside the cluster span; STRICT = a detector event started within 60s of the cluster onset.
+  null = same spans re-placed at random observed times (chance recall).
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t2_recall_by_size.csv
+INFO    forced_trade.run_labelled: wrote C:\Users\jmcphail\AppData\Local\Temp\claude\C--Data-Development-Python-McTheoryApps-praxis\b53be603-ea9b-46a5-8d64-33da508c1f8a\scratchpad\rows_band_bound\t2_cluster_hits.parquet
+setting     size      n  recall_ovl  null_ovl  lift_ovl  recall_str  null_str  lift_str  dur_p50_s
+-------  -------  -----  ----------  --------  --------  ----------  --------  --------  ---------
+loose      <100k  12769        3.4%      1.1%      3.06        4.3%      1.9%      2.28          0
+loose    100k-1M   1419        9.7%      1.5%      6.51        9.9%      1.9%      5.24         25
+loose     1M-10M    202       11.9%      2.0%      5.85       10.4%      2.0%      5.12         53
+loose      >=10M      8        0.0%      2.5%      0.00        0.0%      1.2%      0.00        123
+loose        ALL  14398        4.1%      1.2%      3.56        5.0%      1.9%      2.61          0
+base       <100k  12769        0.2%      0.1%      3.01        0.2%      0.1%      1.95          0
+base     100k-1M   1419        1.0%      0.1%     11.20        1.0%      0.1%      8.00         25
+base      1M-10M    202        0.0%      0.1%      0.00        0.0%      0.1%      0.00         53
+base       >=10M      8        0.0%      0.0%       n/a        0.0%      0.0%       n/a        123
+base         ALL  14398        0.3%      0.1%      3.94        0.3%      0.1%      2.51          0
+strict     <100k  12769        0.0%      0.0%      0.00        0.0%      0.0%      0.00          0
+strict   100k-1M   1419        0.0%      0.0%       n/a        0.0%      0.0%       n/a         25
+strict    1M-10M    202        0.0%      0.0%       n/a        0.0%      0.0%       n/a         53
+strict     >=10M      8        0.0%      0.0%       n/a        0.0%      0.0%       n/a        123
+strict       ALL  14398        0.0%      0.0%      0.00        0.0%      0.0%      0.00          0
+
+  WITH the manual 62A cascade (event only; reported per cluster):
+setting                              cluster     size  overlap  strict  dur_s
+-------  -----------------------------------  -------  -------  ------  -----
+loose    BTCUSDT 2026-08-19 15:27:23 $144.0M    >=10M       no      no    245
+loose    BTCUSDT 2026-08-19 15:32:25 $327.2k  100k-1M       no      no     21
+loose    BTCUSDT 2026-08-19 15:39:25 $184.9k  100k-1M       no      no     11
+loose     ETHUSDT 2026-08-19 15:27:23 $33.2M    >=10M       no      no     54
+loose      ETHUSDT 2026-08-19 15:29:03 $3.6k    <100k       no      no      9
+loose     ETHUSDT 2026-08-19 15:30:22 $39.2k    <100k       no      no     35
+loose     ETHUSDT 2026-08-19 15:32:47 $10.7k    <100k       no      no     31
+loose     ETHUSDT 2026-08-19 15:39:31 $19.6k    <100k       no      no      5
+base     BTCUSDT 2026-08-19 15:27:23 $144.0M    >=10M       no      no    245
+base     BTCUSDT 2026-08-19 15:32:25 $327.2k  100k-1M       no      no     21
+base     BTCUSDT 2026-08-19 15:39:25 $184.9k  100k-1M       no      no     11
+base      ETHUSDT 2026-08-19 15:27:23 $33.2M    >=10M       no      no     54
+base       ETHUSDT 2026-08-19 15:29:03 $3.6k    <100k       no      no      9
+base      ETHUSDT 2026-08-19 15:30:22 $39.2k    <100k       no      no     35
+base      ETHUSDT 2026-08-19 15:32:47 $10.7k    <100k       no      no     31
+base      ETHUSDT 2026-08-19 15:39:31 $19.6k    <100k       no      no      5
+strict   BTCUSDT 2026-08-19 15:27:23 $144.0M    >=10M       no      no    245
+strict   BTCUSDT 2026-08-19 15:32:25 $327.2k  100k-1M       no      no     21
+strict   BTCUSDT 2026-08-19 15:39:25 $184.9k  100k-1M       no      no     11
+strict    ETHUSDT 2026-08-19 15:27:23 $33.2M    >=10M       no      no     54
+strict     ETHUSDT 2026-08-19 15:29:03 $3.6k    <100k       no      no      9
+strict    ETHUSDT 2026-08-19 15:30:22 $39.2k    <100k       no      no     35
+strict    ETHUSDT 2026-08-19 15:32:47 $10.7k    <100k       no      no     31
+strict    ETHUSDT 2026-08-19 15:39:31 $19.6k    <100k       no      no      5
+
+  base setting, by EVENT COUNT:
+events      n  recall_ovl  null_ovl  lift_ovl  recall_str  null_str
+------  -----  ----------  --------  --------  ----------  --------
+1-4     11136        0.2%      0.1%      2.61        0.2%      0.1%
+5-19     2332        0.6%      0.1%      5.42        0.6%      0.1%
+20-99     756        1.2%      0.1%     12.86        1.2%      0.1%
+>=100     174        0.0%      0.1%      0.00        0.0%      0.1%
+ALL     14398        0.3%      0.1%      3.94        0.3%      0.1%
+
+==============================================================================
+T2.4  WHAT THE DETECTOR SAW -- its own statistics inside clusters
+==============================================================================
+  max over the cluster's 60s windows (base K/I/M = 5 / 0.8 / 3); null = same durations at random observed times
+asset     size    n   burst  null  |imb|  null  |move_z|  null     K>5  I>.8     M>3  all3  K&M_1win  imb_sign_ok
+-----  -------  ---  ------  ----  -----  ----  --------  ----  ------  ----  ------  ----  --------  -----------
+BTC    100k-1M  822    6.46  1.30   0.46  0.50      2.08  0.65   60.8%  5.8%   31.3%  1.7%     27.1%        90.5%
+BTC     1M-10M  135   19.03  1.30   0.44  0.50      3.90  0.65   94.8%  0.0%   67.4%  0.0%     66.7%        97.0%
+BTC      >=10M    4   37.30  1.30   0.41  0.50      8.17  0.65  100.0%  0.0%  100.0%  0.0%    100.0%       100.0%
+ETH    100k-1M  597    9.47  1.24   0.37  0.43      2.30  0.62   75.4%  2.2%   37.7%  0.0%     35.3%        89.8%
+ETH     1M-10M   67   38.95  1.24   0.34  0.43      5.74  0.62   98.5%  0.0%   91.0%  0.0%     91.0%        98.5%
+ETH      >=10M    4  112.71  1.24   0.26  0.43     15.93  0.62  100.0%  0.0%  100.0%  0.0%    100.0%       100.0%
+  K&M_1win is a DIAGNOSTIC of which condition blocked the as-built rule (I alone when K&M hold in one window).
+  It is not a detector and is never scored.
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t2_detector_statistics_in_clusters.csv
+
+  The 15 largest BTC/ETH clusters (gap 30s), as the base detector saw them:
+asset                start    seg  dur_s     n     size  forced   burst  |imb|   |mz|  conds_met  base  loose
+-----  -------------------  -----  -----  ----  -------  ------  ------  -----  -----  ---------  ----  -----
+BTC    2026-08-19 15:27:23  manua    245  3040  $144.0M     BUY  337.20   0.36  54.52         KM    no     no
+ETH    2026-08-19 20:49:54  sched    152  1682   $33.8M     BUY  147.83   0.20  23.37         KM    no     no
+ETH    2026-08-19 15:27:23  manua     54  1442   $33.2M     BUY  334.03   0.16  41.39         KM    no     no
+BTC    2026-09-21 08:37:09  sched    137  1730   $23.4M     BUY  230.82   0.37  17.44         KM    no     no
+ETH    2026-10-15 02:21:35  sched    216  1032   $16.2M    SELL   77.60   0.24  13.25         KM    no     no
+BTC    2026-08-19 20:49:54  sched     99   673   $15.9M     BUY   50.79   0.67   7.71         KM    no     no
+BTC    2026-08-21 01:46:38  sched    100   985   $13.1M     BUY   23.81   0.45   8.64         KM    no     no
+BTC    2026-08-21 01:17:53  sched     32   827   $12.1M     BUY   21.78   0.21   5.62         KM    no     no
+ETH    2026-08-22 05:07:31  sched    301   528   $10.5M    SELL   50.86   0.56  18.61         KM    no     no
+ETH    2026-08-19 21:07:03  sched    110   658   $10.3M     BUY  180.46   0.27  12.32         KM    no     no
+BTC    2026-10-15 02:21:35  sched    202   644    $9.1M    SELL   39.31   0.55   7.01         KM    no     no
+BTC    2026-08-20 08:09:09  sched     25   521    $7.8M     BUY   14.44   0.30   6.51         KM    no     no
+ETH    2026-10-15 02:28:22  sched     34   450    $7.7M    SELL   60.34   0.22  17.15         KM    no     no
+BTC    2026-08-19 21:07:03  sched     28   420    $7.5M     BUY   35.02   0.21   4.27         KM    no     no
+BTC    2026-08-25 02:17:50  sched     22   813    $7.4M     BUY   53.31   0.47  16.15         KM    no     no
+INFO    forced_trade.run_labelled: wrote C:\Users\jmcphail\AppData\Local\Temp\claude\C--Data-Development-Python-McTheoryApps-praxis\b53be603-ea9b-46a5-8d64-33da508c1f8a\scratchpad\rows_band_bound\t2_cluster_diagnostics.parquet
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t2_top100_cluster_diagnostics.csv
+
+==============================================================================
+T2.5  WINDOW SWEEP (Cycle 61's own W sweep at base K/I/M): overlap recall
+==============================================================================
+DEBUG   forced_trade.cascade: to_windows W=30s: 1 empty windows materialised (0.0002%)
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t2_window_sweep_recall.csv
+  detector events inside the label window: W=30s BTC=420, W=30s ETH=212, W=60s BTC=85, W=60s ETH=18, W=300s BTC=0, W=300s ETH=1, W=900s BTC=0, W=900s ETH=0
+W        size      n  recall_ovl  null_ovl   lift
+----  -------  -----  ----------  --------  -----
+30s     <100k  12769        0.7%      0.3%   2.68
+30s   100k-1M   1419        2.7%      0.3%   8.04
+30s    1M-10M    202        1.0%      0.6%   1.67
+30s     >=10M      8        0.0%      0.6%   0.00
+30s       ALL  14398        0.9%      0.3%   3.30
+60s     <100k  12769        0.2%      0.1%   3.01
+60s   100k-1M   1419        1.0%      0.1%  11.20
+60s    1M-10M    202        0.0%      0.1%   0.00
+60s     >=10M      8        0.0%      0.0%    n/a
+60s       ALL  14398        0.3%      0.1%   3.94
+300s    <100k  12769        0.0%      0.0%   2.22
+300s  100k-1M   1419        0.1%      0.0%  20.00
+300s   1M-10M    202        0.0%      0.0%    n/a
+300s    >=10M      8        0.0%      0.0%    n/a
+300s      ALL  14398        0.0%      0.0%   5.45
+900s    <100k  12769        0.0%      0.0%    n/a
+900s  100k-1M   1419        0.0%      0.0%    n/a
+900s   1M-10M    202        0.0%      0.0%    n/a
+900s    >=10M      8        0.0%      0.0%    n/a
+900s      ALL  14398        0.0%      0.0%    n/a
+
+==============================================================================
+T2.6  ORDER-BOOK STRESS AT LABELLED CLUSTERS (vs Cycle 61's depth 1.02)
+==============================================================================
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t2_book_stress.csv
+asset                     set          metric    n  ev_med  unif_ctrl  ev/unif  match_ctrl  ev/MATCHED
+-----  ----------------------  --------------  ---  ------  ---------  -------  ----------  ----------
+BTC            labels 100k-1M           depth  820   1.032      1.088    0.949       1.111       0.929
+BTC            labels 100k-1M  hit_side_depth  820   1.178      1.247    0.945       1.325       0.889
+BTC            labels 100k-1M      spread_bps  820   0.997      0.999    0.998       0.999       0.999
+BTC             labels 1M-10M           depth  132   0.986      1.100    0.896       1.114       0.885
+BTC             labels 1M-10M  hit_side_depth  132   1.145      1.293    0.885       1.348       0.849
+BTC             labels 1M-10M      spread_bps  132   0.986      0.999    0.986       0.998       0.987
+BTC              labels >=10M           depth    4   1.035      1.087    0.953       1.090       0.949
+BTC              labels >=10M  hit_side_depth    4   1.184      1.220    0.970       1.340       0.883
+BTC              labels >=10M      spread_bps    4   0.962      0.999    0.963       0.996       0.965
+BTC       labels >=100k (all)           depth  956   1.024      1.089    0.940       1.110       0.922
+BTC       labels >=100k (all)  hit_side_depth  956   1.171      1.267    0.925       1.318       0.888
+BTC       labels >=100k (all)      spread_bps  956   0.997      0.999    0.997       0.999       0.998
+BTC    labels >=100k + MANUAL           depth  959   1.020      1.088    0.938       1.111       0.918
+BTC    labels >=100k + MANUAL  hit_side_depth  959   1.171      1.262    0.928       1.318       0.888
+BTC    labels >=100k + MANUAL      spread_bps  959   0.997      0.999    0.997       0.999       0.998
+BTC      detector base events           depth   70   1.022      1.099    0.930       1.068       0.957
+BTC      detector base events  hit_side_depth   70   0.754      1.244    0.606       1.264       0.597
+BTC      detector base events      spread_bps   70   0.998      0.999    0.999       0.999       0.998
+ETH            labels 100k-1M           depth  593   0.964      1.050    0.918       1.038       0.929
+ETH            labels 100k-1M  hit_side_depth  593   1.266      1.204    1.052       1.205       1.051
+ETH            labels 100k-1M      spread_bps  593   0.998      0.999    0.999       0.999       0.999
+ETH             labels 1M-10M           depth   66   0.869      1.060    0.819       1.040       0.835
+ETH             labels 1M-10M  hit_side_depth   66   1.154      1.231    0.937       1.206       0.957
+ETH             labels 1M-10M      spread_bps   66   1.017      0.999    1.018       0.999       1.018
+ETH              labels >=10M           depth    4   0.512      1.070    0.479       0.966       0.530
+ETH              labels >=10M  hit_side_depth    4   0.760      1.246    0.610       1.093       0.696
+ETH              labels >=10M      spread_bps    4   5.685      0.999    5.689       0.996       5.708
+ETH       labels >=100k (all)           depth  663   0.948      1.051    0.902       1.040       0.912
+ETH       labels >=100k (all)  hit_side_depth  663   1.246      1.209    1.030       1.195       1.042
+ETH       labels >=100k (all)      spread_bps  663   0.999      0.999    0.999       0.999       1.000
+ETH    labels >=100k + MANUAL           depth  664   0.949      1.051    0.902       1.040       0.912
+ETH    labels >=100k + MANUAL  hit_side_depth  664   1.246      1.205    1.034       1.195       1.043
+ETH    labels >=100k + MANUAL      spread_bps  664   0.999      0.999    0.999       0.999       1.000
+ETH      detector base events           depth   15   1.058      1.057    1.001       1.048       1.009
+ETH      detector base events  hit_side_depth   15   0.966      1.198    0.806       1.275       0.758
+ETH      detector base events      spread_bps   15   0.997      0.999    0.997       0.998       0.999
+  ratios are each span's mean vs its own trailing 24h median (Cycle 61's definition); hit side = bid under
+  forced selling, ask under forced buying. Controls: observed, cascade-free (>=$100k clusters +/-900s excluded).
+
+==============================================================================
+T3 -- WHAT A LABELLED CASCADE LOOKS LIKE (gap 30s, floor $1.0M)
+==============================================================================
+
+  GATE: 210 BTC+ETH uncensored scheduled clusters >= $1.0M (threshold 50)
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t3_event_moves_BTC_without_manual.csv
+
+  [without_manual] BTC: 139 events, 2780 matched controls (0 from thin cells); size p50 $1.6M, max $23.4M; duration p50 54s, p90 137s; forced-sell share 41%
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t3_event_moves_ETH_without_manual.csv
+
+  [without_manual] ETH: 71 events, 1420 matched controls (0 from thin cells); size p50 $1.7M, max $33.8M; duration p50 55s, p90 117s; forced-sell share 56%
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t3_event_moves_BTC_with_manual.csv
+
+  [with_manual] BTC: 140 events, 2800 matched controls (0 from thin cells); size p50 $1.6M, max $144.0M; duration p50 54s, p90 139s; forced-sell share 41%
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t3_event_moves_ETH_with_manual.csv
+
+  [with_manual] ETH: 72 events, 1440 matched controls (0 from thin cells); size p50 $1.7M, max $33.8M; duration p50 55s, p90 117s; forced-sell share 56%
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t3_reversion.csv
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t3_profiles.csv
+
+==============================================================================
+T3.1  EVENT-TIME PROFILE vs MATCHED CONTROL (medians; oriented to the forced flow)
+==============================================================================
+
+  BTC: offsets from cluster START
+offset  price bps ev/ctl        flow ev/ctl   depth ev/ctl  hit-depth ev/ctl  spread ev/ctl
+------  ----------------  -----------------  -------------  ----------------  -------------
+-600s        -27.3 / 0.4    $12.6k / $-2.8k  0.903 / 1.119     0.916 / 1.383  0.986 / 0.997
+-300s        -14.6 / 0.3      $6.8k / $-951  0.925 / 1.113     1.043 / 1.388  0.986 / 0.997
+-60s           0.0 / 0.0    $29.1k / $-1.1k  0.871 / 1.127     0.899 / 1.460  0.984 / 0.997
++0s           13.0 / 0.0   $446.9k / $-1.7k  0.941 / 1.105     0.663 / 1.366  0.983 / 0.997
++10s          16.1 / 0.1   $372.2k / $-4.5k  0.936 / 1.117     0.893 / 1.386  0.982 / 0.997
++30s          23.5 / 0.0   $236.5k / $-4.2k  0.827 / 1.132     0.567 / 1.429  0.981 / 0.997
++60s          29.2 / 0.0    $37.5k / $-1.4k  0.838 / 1.103     0.725 / 1.390  0.981 / 0.997
++120s         30.7 / 0.0    $50.3k / $-1.1k  0.789 / 1.138     0.649 / 1.451  0.980 / 0.997
++300s        26.1 / -0.0     $-8.8k / $5.0k  0.807 / 1.147     0.913 / 1.443  0.980 / 0.997
++900s        26.7 / -0.0   $-20.3k / $-7.0k  0.823 / 1.155     0.833 / 1.460  0.981 / 0.997
++1800s        23.1 / 0.2   $-15.4k / $-4.5k  0.855 / 1.134     0.937 / 1.451  0.979 / 0.997
++3600s       25.4 / -0.6  $-25.7k / $-12.9k  0.966 / 1.169     0.872 / 1.457  0.980 / 0.998
+
+  ETH: offsets from cluster START
+offset  price bps ev/ctl      flow ev/ctl   depth ev/ctl  hit-depth ev/ctl  spread ev/ctl
+------  ----------------  ---------------  -------------  ----------------  -------------
+-600s        -28.8 / 0.9   $14.5k / $3.1k  0.838 / 1.069     0.925 / 1.247  0.999 / 0.997
+-300s       -16.9 / -0.1  $18.4k / $-3.0k  0.884 / 1.057     1.030 / 1.319  0.996 / 0.997
+-60s           0.0 / 0.0   $29.7k / $4.9k  0.783 / 1.066     0.787 / 1.225  0.995 / 0.997
++0s          16.8 / -0.0   $380.6k / $504  0.804 / 1.070     0.622 / 1.162  0.997 / 0.997
++10s          31.6 / 0.1  $397.6k / $2.1k  0.755 / 1.079     0.744 / 1.247  1.004 / 0.997
++30s          44.7 / 0.1  $183.4k / $-606  0.815 / 1.068     1.062 / 1.247  1.006 / 0.997
++60s         56.3 / -0.1  $79.5k / $-8.3k  0.712 / 1.083     0.692 / 1.312  0.991 / 0.997
++120s        60.7 / -0.3   $6.8k / $-3.8k  0.718 / 1.062     0.779 / 1.241  0.997 / 0.997
++300s         52.9 / 0.2  $25.0k / $-1.3k  0.686 / 1.068     0.676 / 1.261  0.999 / 0.997
++900s        57.9 / -0.4  $29.7k / $-2.4k  0.793 / 1.093     0.934 / 1.315  0.995 / 0.996
++1800s       49.6 / -0.0  $17.3k / $-1.7k  0.769 / 1.073     0.894 / 1.330  0.993 / 0.997
++3600s       56.6 / -4.4    $-1.5k / $-88  0.797 / 1.126     0.837 / 1.327  0.997 / 0.998
+
+==============================================================================
+T3.2  SIZE, MOVE AND REVERSION -- GROSS bps FIRST
+==============================================================================
+
+  [without_manual] BTC  (rev_* measured from end + 30s, the first knowable instant; *_end is look-ahead reference)
+metric          n  ev_mean  ev_med  ctl_mean  EXCESS     sd  se_day      excess_ci90   ev>0
+------------  ---  -------  ------  --------  ------  -----  ------  ---------------  -----
+move_bps      139    38.59   32.59      0.15   38.44   24.6    2.56   [34.78, 43.07]  99.3%
+rev_1m        139    -1.46    1.19      0.10   -1.56   19.8    1.30    [-3.52, 0.72]  51.8%
+rev_1m_end    139     5.18    5.46      0.13    5.04   16.0    1.43     [2.79, 7.26]  67.6%
+rev_5m        139    -0.57    2.12     -0.10   -0.47   44.2    3.08    [-5.32, 4.91]  52.5%
+rev_5m_end    139     4.89    7.13      0.02    4.87   39.4    2.96    [0.34, 10.12]  64.0%
+rev_15m       139     1.04    3.76      0.14    0.91   55.1    3.50    [-4.86, 7.02]  55.4%
+rev_15m_end   139     7.12    9.95      0.00    7.11   55.1    3.57    [1.34, 13.33]  56.8%
+rev_30m       139     0.91    2.02      0.29    0.61   69.2    5.90   [-7.93, 11.23]  51.8%
+rev_30m_end   139     6.98    9.79      0.29    6.69   67.7    5.61   [-1.35, 16.91]  56.8%
+rev_60m       139    -3.81   -0.01      1.03   -4.84   81.8    9.88  [-19.31, 12.42]  49.6%
+rev_60m_end   139     2.19    5.34      1.10    1.09   82.8    9.73  [-12.80, 18.12]  54.7%
+rev_240m      137    14.42   16.81      5.21    9.54  113.2   14.20  [-11.98, 34.55]  59.7%
+rev_240m_end  137    20.26   25.55      5.16   15.44  112.4   13.96   [-5.63, 40.19]  61.2%
+
+  [without_manual] ETH  (rev_* measured from end + 30s, the first knowable instant; *_end is look-ahead reference)
+metric         n  ev_mean  ev_med  ctl_mean  EXCESS     sd  se_day      excess_ci90   ev>0
+------------  --  -------  ------  --------  ------  -----  ------  ---------------  -----
+move_bps      71    79.58   66.62      0.11   79.47   60.6    9.92   [65.28, 96.90]  98.6%
+rev_1m        71    -4.45   -0.04     -0.32   -4.13   32.8    4.32   [-10.96, 2.40]  49.3%
+rev_1m_end    71     7.62   10.52     -0.06    7.68   34.0    4.11    [1.35, 14.37]  67.6%
+rev_5m        71    -1.41   -0.54     -0.24   -1.17   60.5    4.81    [-8.26, 7.27]  49.3%
+rev_5m_end    71    10.55   11.28      0.12   10.43   63.3    5.37    [2.45, 19.94]  63.4%
+rev_15m       71    -9.58    0.21      0.34   -9.92   97.2    9.39   [-23.48, 6.21]  50.7%
+rev_15m_end   71     0.86   18.86      0.51    0.35   98.4   10.40  [-14.65, 17.89]  60.6%
+rev_30m       71    -7.34   -2.99      0.35   -7.69   93.5   12.40  [-24.58, 15.27]  47.9%
+rev_30m_end   71     4.88    7.34      0.39    4.48   93.3   12.87  [-13.72, 27.78]  52.1%
+rev_60m       71   -19.04   -5.01      2.13  -21.17  157.7   22.38  [-56.33, 15.73]  49.3%
+rev_60m_end   71    -8.76    9.49      2.46  -11.21  158.8   23.01  [-47.03, 26.59]  56.3%
+rev_240m      69    -3.15   33.05      6.37   -9.54  168.3   20.79  [-38.26, 27.90]  54.9%
+rev_240m_end  69     7.41   49.40      6.52    0.84  164.7   20.35  [-27.66, 36.76]  54.9%
+
+  [without_manual] BTC+ETH  (rev_* measured from end + 30s, the first knowable instant; *_end is look-ahead reference)
+metric          n  ev_mean  ev_med  ctl_mean  EXCESS     sd  se_day      excess_ci90   ev>0
+------------  ---  -------  ------  --------  ------  -----  ------  ---------------  -----
+move_bps      210    52.45   42.94      0.13   52.31   44.8    5.10   [45.05, 61.59]  99.0%
+rev_1m        210    -2.47    0.93     -0.04   -2.43   24.9    1.72    [-5.33, 0.38]  51.0%
+rev_1m_end    210     6.00    6.56      0.07    5.93   23.7    1.61     [3.39, 8.51]  67.6%
+rev_5m        210    -0.85    1.84     -0.15   -0.70   50.2    2.98    [-5.14, 4.72]  51.4%
+rev_5m_end    210     6.81    9.45      0.06    6.75   48.7    3.04    [2.26, 12.42]  63.8%
+rev_15m       210    -2.55    3.33      0.20   -2.75   72.1    4.52    [-9.91, 5.74]  53.8%
+rev_15m_end   210     5.00   12.50      0.18    4.83   72.5    4.48   [-2.21, 13.29]  58.1%
+rev_30m       210    -1.88    0.45      0.31   -2.19   78.1    6.90  [-12.27, 11.43]  50.5%
+rev_30m_end   210     6.27    9.58      0.32    5.94   77.1    6.79   [-3.79, 19.37]  55.2%
+rev_60m       210    -8.96   -0.90      1.40  -10.36  113.2   10.84   [-27.13, 9.70]  49.5%
+rev_60m_end   210    -1.51    5.45      1.56   -3.07  114.0   11.00  [-20.26, 17.20]  55.2%
+rev_240m      206     8.54   21.48      5.60    3.15  134.1   12.30  [-15.79, 25.59]  58.1%
+rev_240m_end  206    15.96   28.49      5.62   10.55  132.0   12.03   [-8.17, 32.56]  59.0%
+
+  [with_manual] BTC  (rev_* measured from end + 30s, the first knowable instant; *_end is look-ahead reference)
+metric          n  ev_mean  ev_med  ctl_mean  EXCESS     sd  se_day      excess_ci90   ev>0
+------------  ---  -------  ------  --------  ------  -----  ------  ---------------  -----
+move_bps      140    39.00   32.70      0.14   38.87   25.0    2.69   [35.01, 43.72]  99.3%
+rev_1m        140    -1.64    1.11      0.09   -1.73   19.8    1.28    [-3.68, 0.49]  51.4%
+rev_1m_end    140     5.01    5.43      0.11    4.90   16.1    1.42     [2.70, 7.15]  67.1%
+rev_5m        140    -1.09    2.04     -0.11   -0.98   44.5    3.01    [-5.74, 4.26]  52.1%
+rev_5m_end    140     4.67    6.93      0.00    4.66   39.4    2.91     [0.24, 9.75]  63.6%
+rev_15m       140     0.40    3.33      0.17    0.23   55.5    3.60    [-5.72, 6.52]  55.0%
+rev_15m_end   140     6.62    9.16      0.03    6.59   55.2    3.61    [0.68, 12.75]  56.4%
+rev_30m       140     0.11    1.44      0.28   -0.17   69.5    5.96   [-9.14, 10.88]  51.4%
+rev_30m_end   140     6.38    9.58      0.27    6.11   67.8    5.63   [-2.19, 16.65]  56.4%
+rev_60m       140    -4.71   -0.90      1.09   -5.80   82.3    9.78  [-20.09, 11.39]  49.3%
+rev_60m_end   140     1.39    5.30      1.16    0.23   83.1    9.64  [-13.81, 17.46]  54.3%
+rev_240m      138    14.02   15.01      5.14    9.21  112.8   14.08  [-12.20, 33.90]  59.3%
+rev_240m_end  138    19.98   25.01      5.09   15.24  112.0   13.84   [-5.65, 39.51]  60.7%
+
+  [with_manual] ETH  (rev_* measured from end + 30s, the first knowable instant; *_end is look-ahead reference)
+metric         n  ev_mean  ev_med  ctl_mean  EXCESS     sd  se_day      excess_ci90   ev>0
+------------  --  -------  ------  --------  ------  -----  ------  ---------------  -----
+move_bps      72    81.97   67.25      0.12   81.85   63.5   11.45  [65.84, 101.53]  98.6%
+rev_1m        72    -3.25    0.39     -0.31   -2.94   34.1    3.42    [-8.06, 2.52]  50.0%
+rev_1m_end    72     8.34   10.66     -0.06    8.40   34.4    3.56    [3.09, 14.45]  68.1%
+rev_5m        72    -0.08   -0.16     -0.18    0.10   61.0    5.09    [-7.43, 8.93]  50.0%
+rev_5m_end    72    11.95   11.35      0.16   11.79   63.9    5.53    [3.44, 21.34]  63.9%
+rev_15m       72    -9.40    1.64      0.42   -9.82   96.5    9.21   [-22.95, 6.10]  51.4%
+rev_15m_end   72     0.90   18.23      0.60    0.30   97.7   10.28  [-14.37, 17.65]  61.1%
+rev_30m       72    -7.11   -2.81      0.28   -7.38   92.9   12.14  [-23.79, 15.27]  48.6%
+rev_30m_end   72     5.03   10.85      0.33    4.70   92.7   12.62  [-12.90, 27.77]  52.8%
+rev_60m       72   -19.55   -6.01      1.87  -21.43  156.6   22.26  [-55.75, 15.73]  48.6%
+rev_60m_end   72    -9.36    7.82      2.21  -11.57  157.7   22.96  [-46.77, 26.59]  55.6%
+rev_240m      70    -3.55   29.25      6.07   -9.65  167.1   20.54  [-37.82, 27.83]  54.2%
+rev_240m_end  70     6.82   47.07      6.22    0.55  163.5   20.18  [-27.45, 36.76]  54.2%
+
+  [with_manual] BTC+ETH  (rev_* measured from end + 30s, the first knowable instant; *_end is look-ahead reference)
+metric          n  ev_mean  ev_med  ctl_mean  EXCESS     sd  se_day      excess_ci90   ev>0
+------------  ---  -------  ------  --------  ------  -----  ------  ---------------  -----
+move_bps      212    53.60   43.31      0.13   53.47   46.7    5.84   [45.23, 64.10]  99.1%
+rev_1m        212    -2.19    0.93     -0.05   -2.14   25.5    1.53    [-4.64, 0.41]  50.9%
+rev_1m_end    212     6.14    6.56      0.05    6.09   23.9    1.51     [3.77, 8.57]  67.5%
+rev_5m        212    -0.75    1.84     -0.13   -0.62   50.6    2.97    [-5.05, 4.74]  51.4%
+rev_5m_end    212     7.14    9.45      0.06    7.08   49.0    3.09    [2.43, 12.68]  63.7%
+rev_15m       212    -2.93    2.98      0.26   -3.19   72.0    4.69   [-10.71, 5.45]  53.8%
+rev_15m_end   212     4.68   11.68      0.22    4.45   72.3    4.61   [-2.89, 13.10]  58.0%
+rev_30m       212    -2.34    0.45      0.28   -2.62   78.1    6.96  [-12.78, 11.17]  50.5%
+rev_30m_end   212     5.92    9.58      0.29    5.63   76.9    6.81   [-4.11, 19.04]  55.2%
+rev_60m       212    -9.75   -1.88      1.35  -11.11  113.0   11.14   [-28.58, 9.50]  49.1%
+rev_60m_end   212    -2.26    5.34      1.52   -3.78  113.8   11.29  [-21.40, 17.10]  54.7%
+rev_240m      208     8.10   20.40      5.46    2.86  133.5   12.25  [-16.03, 25.33]  57.5%
+rev_240m_end  208    15.55   27.30      5.47   10.29  131.4   11.98   [-8.22, 32.39]  58.5%
+
+==============================================================================
+T3.3  NET OF A ROUND-TRIP COST GRID (event mean, knowable entry)
+==============================================================================
+
+  [without_manual]  costs: 2bp = maker~1bp/side; 9bp = HL taker (Cycle 57); 20bp = Binance spot taker 10bp/side; 30bp = Cycle 55 real-money est.
+asset     horizon   gross  net_2bps  net_9bps  net_20bps  net_30bps
+-------  --------  ------  --------  --------  ---------  ---------
+BTC        rev_1m   -1.46     -3.46    -10.46     -21.46     -31.46
+BTC        rev_5m   -0.57     -2.57     -9.57     -20.57     -30.57
+BTC       rev_15m    1.04     -0.96     -7.96     -18.96     -28.96
+BTC       rev_30m    0.91     -1.09     -8.09     -19.09     -29.09
+BTC       rev_60m   -3.81     -5.81    -12.81     -23.81     -33.81
+BTC      rev_240m   14.42     12.42      5.42      -5.58     -15.58
+ETH        rev_1m   -4.45     -6.45    -13.45     -24.45     -34.45
+ETH        rev_5m   -1.41     -3.41    -10.41     -21.41     -31.41
+ETH       rev_15m   -9.58    -11.58    -18.58     -29.58     -39.58
+ETH       rev_30m   -7.34     -9.34    -16.34     -27.34     -37.34
+ETH       rev_60m  -19.04    -21.04    -28.04     -39.04     -49.04
+ETH      rev_240m   -3.15     -5.15    -12.15     -23.15     -33.15
+BTC+ETH    rev_1m   -2.47     -4.47    -11.47     -22.47     -32.47
+BTC+ETH    rev_5m   -0.85     -2.85     -9.85     -20.85     -30.85
+BTC+ETH   rev_15m   -2.55     -4.55    -11.55     -22.55     -32.55
+BTC+ETH   rev_30m   -1.88     -3.88    -10.88     -21.88     -31.88
+BTC+ETH   rev_60m   -8.96    -10.96    -17.96     -28.96     -38.96
+BTC+ETH  rev_240m    8.54      6.54     -0.46     -11.46     -21.46
+
+  [with_manual]  costs: 2bp = maker~1bp/side; 9bp = HL taker (Cycle 57); 20bp = Binance spot taker 10bp/side; 30bp = Cycle 55 real-money est.
+asset     horizon   gross  net_2bps  net_9bps  net_20bps  net_30bps
+-------  --------  ------  --------  --------  ---------  ---------
+BTC        rev_1m   -1.64     -3.64    -10.64     -21.64     -31.64
+BTC        rev_5m   -1.09     -3.09    -10.09     -21.09     -31.09
+BTC       rev_15m    0.40     -1.60     -8.60     -19.60     -29.60
+BTC       rev_30m    0.11     -1.89     -8.89     -19.89     -29.89
+BTC       rev_60m   -4.71     -6.71    -13.71     -24.71     -34.71
+BTC      rev_240m   14.02     12.02      5.02      -5.98     -15.98
+ETH        rev_1m   -3.25     -5.25    -12.25     -23.25     -33.25
+ETH        rev_5m   -0.08     -2.08     -9.08     -20.08     -30.08
+ETH       rev_15m   -9.40    -11.40    -18.40     -29.40     -39.40
+ETH       rev_30m   -7.11     -9.11    -16.11     -27.11     -37.11
+ETH       rev_60m  -19.55    -21.55    -28.55     -39.55     -49.55
+ETH      rev_240m   -3.55     -5.55    -12.55     -23.55     -33.55
+BTC+ETH    rev_1m   -2.19     -4.19    -11.19     -22.19     -32.19
+BTC+ETH    rev_5m   -0.75     -2.75     -9.75     -20.75     -30.75
+BTC+ETH   rev_15m   -2.93     -4.93    -11.93     -22.93     -32.93
+BTC+ETH   rev_30m   -2.34     -4.34    -11.34     -22.34     -32.34
+BTC+ETH   rev_60m   -9.75    -11.75    -18.75     -29.75     -39.75
+BTC+ETH  rev_240m    8.10      6.10     -0.90     -11.90     -21.90
+
+==============================================================================
+T4 -- SIZING THE PATH-SIGNATURE QUESTION (no implementation)
+==============================================================================
+
+  Supervised sample (BTC+ETH labelled clusters, gap 30s, uncensored): >=$100.0k: 1629, >=$1.0M: 210, >=$10.0M: 8
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t4_term_counts.csv
+d                            channels  level    sig  logsig  sig/label >=$100.0k  sig/label >=$1.0M  sig/label >=$10.0M
+--  ---------------------------------  -----  -----  ------  -------------------  -----------------  ------------------
+4   price, signed flow, depth, spread      2     20      10                  0.0                0.1                 2.5
+4   price, signed flow, depth, spread      3     84      30                  0.1                0.4                10.5
+4   price, signed flow, depth, spread      4    340      90                  0.2                1.6                42.5
+5                 + time augmentation      2     30      15                  0.0                0.1                 3.8
+5                 + time augmentation      3    155      55                  0.1                0.7                19.4
+5                 + time augmentation      4    780     205                  0.5                3.7                97.5
+10                  lead-lag of the 5      2    110      55                  0.1                0.5                13.8
+10                  lead-lag of the 5      3   1110     385                  0.7                5.3               138.8
+10                  lead-lag of the 5      4  11110    2860                  6.8               52.9              1388.8
+  sig/label >= 10 means features outnumber labelled clusters by an order of magnitude.
+INFO    forced_trade.run_labelled: wrote outputs\forced_trade\c66\sensitivity\band_bound_5900_0030\t4_tooling_results.json
+
+  Tooling (throwaway venvs from the 3.12.10 base interpreter; .venv untouched):
+package      pip_rc  version  computes  matches_ref                                                         error
+-----------  ------  -------  --------  -----------  ------------------------------------------------------------
+iisignature       1                                                                                              
+esig              0    1.0.0     False               ValueError: Error occurred in D:\a\RoughPy\RoughPy\roughpy\s
+roughpy           0    0.3.0      True         True                                                              
+signax            0    0.2.1      True        False                                                              
+signatory         1                                                                                              
+pysiglib          0    4.0.0     False               OSError: [WinError 4551] An Application Control policy has b
+    iisignature  numpy+setuptools+wheel preinstalled, --no-build-isolation -> build error: Microsoft Visual C++ 14.0 or greater is required (no py3.12 Windows wheel for 0.24, latest release)
+    signatory    torch 2.14.1+cpu preinstalled, --no-build-isolation -> Failed to build signatory (latest release 1.2.6.1.9.0 targets torch 1.9; unmaintained)
+    esig         1.0.0 on RoughPy 0.3.0: stream2sig raises a RoughPy ValueError (row/index mismatch); with RoughPy 0.2.0 the _roughpy DLL is blocked by Smart App Control
+    signax       float32 by default (max abs err 3.7e-5); with JAX_ENABLE_X64=1 matches the numpy reference to 8.5e-14
+    pysiglib     4.0.0 installs (pulls torch 2.14.1), import fails: WinError 4551 Application Control policy blocked the DLL
+    roughpy      0.3.0 wheel installs, signature matches the numpy reference
+    env python: 3.12.10 (base interpreter of .venv, CPython, win_amd64)
+    env os: Windows 11 Pro 10.0.26200
+    env smart_app_control: On (VerifiedAndReputablePolicyState=1)
+    env msvc_build_tools: absent (no cl.exe, no Visual Studio install)
+    env project_venv_touched: False
+    env checked: 2026-10-15 ~02:40 local
+
+[done] all in 88s

@@ -1,0 +1,56 @@
+{
+  "coverage": {
+    "first_scheduled_connect": "2026-08-19 16:00:02",
+    "analysis_end": "2026-10-15 06:20:50",
+    "span_hours": 1358.3466666666666,
+    "observed_log_hours": 1237.6217708333334,
+    "observed_hours": 1233.1810511111112,
+    "observed_frac": 0.907854439056631,
+    "band_removed_beyond_log_hours": 4.440719722222222,
+    "n_runs": 1274,
+    "run_status": {
+      "ok": 1252,
+      "killed_or_running": 15,
+      "quiet_hour": 7
+    },
+    "ambiguous_local_times": 0,
+    "connect_pad_ms": 1000,
+    "disconnect_pad_ms": 60000,
+    "manual_segment": [
+      "2026-08-19 15:27:17",
+      "2026-08-19 15:39:37"
+    ],
+    "manual_rows": 4973
+  },
+  "band": {
+    "start_soh": 3546.947,
+    "end_soh": 10.3599999999999,
+    "n_end": 1251,
+    "n_start": 1265,
+    "end_soh_min": 3547.427,
+    "end_soh_p50": 3552.164,
+    "end_soh_max": 3580.302,
+    "start_soh_min": 1.0,
+    "start_soh_p50": 2.0,
+    "start_soh_max": 44.0,
+    "pad_sec": 2.0
+  },
+  "handoff_holes": {
+    "n": 1237,
+    "total_hours": 17.64797611111111,
+    "p50_sec": 51.165,
+    "p95_sec": 53.565999999999995,
+    "max_sec": 94.433
+  },
+  "missing_slots": 85,
+  "hourly_slots": 1358,
+  "gap_crosscheck": {
+    "chains": 266,
+    "log_outages": 266,
+    "matched": 266,
+    "max_start_diff_ms": 0,
+    "max_end_diff_ms": 0,
+    "unresolved_chains": 0,
+    "open_rows_absorbed": 32
+  }
+}

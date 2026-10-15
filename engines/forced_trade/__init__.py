@@ -21,6 +21,17 @@ oi_audit    T4  open-interest gap         (absence + degradation + collectabilit
 occupancy   T5  scenario x regime cell occupancy
 run_audit   CLI
 
+Cycle 66 -- A2 validated against Bybit liquidation LABELS (the confusion matrix
+Cycle 61 could not compute). The Cycle 61 modules above are imported, never
+edited; the detector is scored exactly as built.
+
+labels            input snapshot, coverage mask from the collector LOG
+label_inventory   T1  run accounting, mask validation, clusters, bankruptcy bias
+label_scoring     T2  2x2 / precision-recall both ways, detector internals, book stress
+cascade_profile   T3  event-time profiles + reversion vs matched controls
+signature_sizing  T4  signature term counts vs labelled sample (no implementation)
+run_labelled      CLI
+
 EVERY threshold is a parameter. Nothing is tuned to make event counts look
 better; each detector reports a sensitivity sweep, and the SPREAD across
 settings is the finding.
@@ -28,4 +39,6 @@ settings is the finding.
 READ-ONLY: every connection to crypto_data.db is opened with mode=ro.
 """
 
-__all__ = ["common", "cascade", "unlocks", "leveraged", "oi_audit", "occupancy"]
+__all__ = ["common", "cascade", "unlocks", "leveraged", "oi_audit", "occupancy",
+           "labels", "label_inventory", "label_scoring", "cascade_profile",
+           "signature_sizing"]

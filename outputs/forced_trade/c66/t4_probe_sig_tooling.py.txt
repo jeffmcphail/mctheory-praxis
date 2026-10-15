@@ -1,0 +1,152 @@
+"""Cycle 66 T4: does each path-signature package install and compute on 3.12?
+
+One throwaway venv PER PACKAGE (so one package's dependency pins cannot break
+another's verdict), created from the same base interpreter as the project
+.venv (3.12.10). The project .venv is never touched.
+
+For each package: create venv -> pip install -> import -> compute a level-3
+signature of a fixed 5-channel path -> compare against a pure-numpy reference
+(Chen's identity on piecewise-linear segments). Results to results.json.
+"""
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+BASE_PY = r"C:\Users\jmcphail\AppData\Local\Programs\Python\Python312\python.exe"
+ROOT = Path(__file__).resolve().parent
+PIP_TIMEOUT = 900
+
+PACKAGES = {
+    "iisignature": {"pip": ["iisignature"], "smoke": "iisignature"},
+    "esig": {"pip": ["esig"], "smoke": "esig"},
+    "roughpy": {"pip": ["roughpy"], "smoke": "roughpy"},
+    "signax": {"pip": ["signax"], "smoke": "signax"},
+    "signatory": {"pip": ["signatory"], "smoke": "signatory"},
+    "pysiglib": {"pip": ["pysiglib"], "smoke": "pysiglib"},
+}
+
+SMOKE = r'''
+import json, sys, importlib.metadata as md
+import numpy as np
+name = sys.argv[1]
+rng = np.random.default_rng(66)
+path = np.cumsum(rng.standard_normal((50, 5)), axis=0)
+
+def ref_sig(p, depth):
+    """Pure-numpy truncated signature via Chen: tensor exp of each linear
+    segment, multiplied left to right. Returns levels 1..depth flattened."""
+    d = p.shape[1]
+    def seg_exp(v):
+        out = [np.ones(())]
+        cur = np.ones(())
+        for k in range(1, depth + 1):
+            cur = np.multiply.outer(cur, v) / k
+            out.append(cur)
+        return out
+    def mul(a, b):
+        out = []
+        for k in range(depth + 1):
+            acc = np.zeros((d,) * k) if k else np.zeros(())
+            for i in range(k + 1):
+                acc = acc + np.multiply.outer(a[i], b[k - i])
+            out.append(acc)
+        return out
+    s = seg_exp(np.zeros(d))
+    for v in np.diff(p, axis=0):
+        s = mul(s, seg_exp(v))
+    return np.concatenate([s[k].ravel() for k in range(1, depth + 1)])
+
+ref = ref_sig(path, 3)
+res = {"package": name}
+try:
+    res["version"] = md.version(name)
+except Exception as e:
+    res["version"] = None
+try:
+    if name == "iisignature":
+        import iisignature
+        sig = np.asarray(iisignature.sig(path, 3))
+        prep = iisignature.prepare(5, 3)
+        res["logsig_terms"] = int(np.asarray(iisignature.logsig(path, prep)).size)
+    elif name == "esig":
+        import esig
+        sig = np.asarray(esig.stream2sig(path, 3))[1:]
+    elif name == "roughpy":
+        import roughpy as rp
+        ctx = rp.get_context(width=5, depth=3, coeffs=rp.DPReal)
+        st = rp.LieIncrementStream.from_increments(np.diff(path, axis=0), ctx=ctx)
+        sig = np.asarray(st.signature())[1:]
+    elif name == "signax":
+        import jax.numpy as jnp
+        import signax
+        sig = np.asarray(signax.signature(jnp.asarray(path), 3))
+        sig = sig.ravel() if sig.ndim > 1 else sig
+    elif name == "signatory":
+        import torch, signatory
+        sig = signatory.signature(torch.tensor(path)[None], 3).numpy().ravel()
+    elif name == "pysiglib":
+        import pysiglib
+        sig = np.asarray(pysiglib.signature(path, 3)).ravel()
+        if sig.size == ref.size + 1:
+            sig = sig[1:]
+    res["terms"] = int(sig.size)
+    res["expected_terms"] = int(ref.size)
+    if sig.size == ref.size:
+        res["max_abs_err_vs_numpy_ref"] = float(np.max(np.abs(sig - ref)))
+        res["matches_reference"] = bool(np.allclose(sig, ref, rtol=1e-6, atol=1e-6))
+    res["computes"] = True
+except Exception as e:
+    res["computes"] = False
+    res["error"] = (type(e).__name__ + ": " + str(e))[:400]
+print("RESULT " + json.dumps(res))
+'''
+
+
+def run(cmd, timeout):
+    t0 = time.time()
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return p.returncode, (p.stdout + p.stderr), round(time.time() - t0, 1)
+
+
+def main():
+    (ROOT / "smoke.py").write_text(SMOKE, encoding="utf-8")
+    only = sys.argv[1:] or list(PACKAGES)
+    out = {}
+    for name in only:
+        spec = PACKAGES[name]
+        venv = ROOT / f"venv_{name}"
+        py = venv / "Scripts" / "python.exe"
+        rec = {"package": name}
+        try:
+            rc, txt, sec = run([BASE_PY, "-m", "venv", str(venv)], 300)
+            rec["venv_rc"] = rc
+            run([str(py), "-m", "pip", "install", "-q", "--upgrade", "pip"], 300)
+            rc, txt, sec = run([str(py), "-m", "pip", "install"] + spec["pip"] + ["numpy"],
+                               PIP_TIMEOUT)
+            rec["pip_rc"] = rc
+            rec["pip_seconds"] = sec
+            rec["pip_tail"] = txt.strip().splitlines()[-6:]
+            rec["built_from_source"] = ("Building wheel" in txt) or ("setup.py" in txt)
+            if rc == 0:
+                rc2, txt2, _ = run([str(py), "-I", str(ROOT / "smoke.py"), spec["smoke"]], 300)
+                line = [ln for ln in txt2.splitlines() if ln.startswith("RESULT ")]
+                rec["smoke"] = json.loads(line[-1][7:]) if line else {"raw": txt2[-600:]}
+                rc3, txt3, _ = run([str(py), "-m", "pip", "list", "--format=freeze"], 120)
+                rec["installed"] = [ln for ln in txt3.splitlines()
+                                    if ln.split("==")[0].lower() in
+                                    ("numpy", "jax", "jaxlib", "equinox", "torch",
+                                     "iisignature", "esig", "roughpy", "signax",
+                                     "signatory", "pysiglib")]
+        except subprocess.TimeoutExpired as e:
+            rec["timeout"] = str(e)[:200]
+        except Exception as e:
+            rec["error"] = f"{type(e).__name__}: {e}"[:300]
+        out[name] = rec
+        print(json.dumps(rec)[:600], flush=True)
+        (ROOT / "results.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()

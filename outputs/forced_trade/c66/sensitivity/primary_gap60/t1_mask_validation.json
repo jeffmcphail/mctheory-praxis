@@ -1,0 +1,57 @@
+{
+  "outside_mask": {
+    "scheduled_rows": 186829,
+    "outside_log_mask": 1014,
+    "outside_in_disconnect_pad": 941,
+    "outside_within_tol_of_edge": 55,
+    "outside_UNEXPLAINED": 18,
+    "unexplained_examples": [
+      "2026-08-24 01:00:00",
+      "2026-09-08 02:59:59",
+      "2026-09-09 23:00:01",
+      "2026-09-15 22:00:01",
+      "2026-09-19 01:00:00",
+      "2026-09-21 02:00:00",
+      "2026-09-21 09:00:00",
+      "2026-09-28 01:00:01",
+      "2026-09-28 01:00:01",
+      "2026-09-28 01:00:01"
+    ],
+    "tol_ms": 2000,
+    "disconnect_pad_ms": 60000,
+    "residue_sec_before_next_segment": {
+      "n": 73,
+      "max": 3.954,
+      "n_within_5s": 73
+    },
+    "disconnect_latency": {
+      "n_disconnects": 298,
+      "pre_disconnect_lag_sec_p25_p50_p75": [
+        83.054,
+        274.7645,
+        636.0085
+      ],
+      "random_instant_lag_sec_p25_p50_p75": [
+        59.314,
+        204.745,
+        546.104
+      ]
+    }
+  },
+  "handoff": {
+    "bin_sec": 10,
+    "band": [
+      3546.947,
+      10.3599999999999
+    ],
+    "rate_rows_per_exposed_hour_outside_band": 151.51854230802135,
+    "rows_in_band": 866,
+    "rows_expected_in_band_if_collector_had_run": 4573.250491695829,
+    "rows_expected_in_band_given_log_exposure": 1522.0879344520233,
+    "band_exposure_frac": 0.33282409026486776,
+    "outside_band_exposure_frac": 0.9240787879510375,
+    "outside_band_rate_cv": 0.4956399229533276,
+    "observed_deficit_frac": 0.8106379693015953,
+    "mask_predicted_deficit_frac": 0.6671759097351322
+  }
+}

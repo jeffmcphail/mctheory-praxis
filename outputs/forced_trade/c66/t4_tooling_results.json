@@ -1,0 +1,167 @@
+{
+  "iisignature": {
+    "package": "iisignature",
+    "venv_rc": 0,
+    "pip_rc": 1,
+    "pip_seconds": 3.6,
+    "pip_tail": [
+      "    File \"<string>\", line 2, in <module>",
+      "  ModuleNotFoundError: No module named 'numpy'",
+      "  [end of output]",
+      "  ",
+      "  note: This error originates from a subprocess, and is likely not a problem with pip.",
+      "ERROR: Failed to build 'iisignature' when getting requirements to build wheel"
+    ],
+    "built_from_source": false
+  },
+  "esig": {
+    "package": "esig",
+    "venv_rc": 0,
+    "pip_rc": 0,
+    "pip_seconds": 9.8,
+    "pip_tail": [
+      "Downloading tcmlib-1.5.0-py2.py3-none-win_amd64.whl (366 kB)",
+      "Downloading roughpy-0.3.0-cp312-cp312-win_amd64.whl (3.3 MB)",
+      "   ---------------------------------------- 3.3/3.3 MB 6.7 MB/s  0:00:00",
+      "Installing collected packages: tcmlib, umf, numpy, roughpy, intel-cmplr-lib-ur, intel_openmp, pyrecombine, esig",
+      "",
+      "Successfully installed esig-1.0.0 intel-cmplr-lib-ur-2026.1.2 intel_openmp-2026.1.2 numpy-2.5.4 pyrecombine-1.0.1 roughpy-0.3.0 tcmlib-1.5.0 umf-1.1.0"
+    ],
+    "built_from_source": false,
+    "smoke": {
+      "package": "esig",
+      "version": "1.0.0",
+      "computes": false,
+      "error": "ValueError: Error occurred in D:\\a\\RoughPy\\RoughPy\\roughpy\\src\\streams\\lie_increment_stream.cpp at line 187(lie_increment_stream_from_increments):\nmismatch between number of rows in data and number of indices"
+    },
+    "installed": [
+      "esig==1.0.0",
+      "numpy==2.5.4",
+      "RoughPy==0.3.0"
+    ]
+  },
+  "roughpy": {
+    "package": "roughpy",
+    "venv_rc": 0,
+    "pip_rc": 0,
+    "pip_seconds": 3.6,
+    "pip_tail": [
+      "  Using cached numpy-2.5.4-cp312-cp312-win_amd64.whl.metadata (6.6 kB)",
+      "Using cached roughpy-0.3.0-cp312-cp312-win_amd64.whl (3.3 MB)",
+      "Using cached numpy-2.5.4-cp312-cp312-win_amd64.whl (12.6 MB)",
+      "Installing collected packages: numpy, roughpy",
+      "",
+      "Successfully installed numpy-2.5.4 roughpy-0.3.0"
+    ],
+    "built_from_source": false,
+    "smoke": {
+      "package": "roughpy",
+      "version": "0.3.0",
+      "terms": 155,
+      "expected_terms": 155,
+      "max_abs_err_vs_numpy_ref": 7.815970093361102e-14,
+      "matches_reference": true,
+      "computes": true
+    },
+    "installed": [
+      "numpy==2.5.4",
+      "RoughPy==0.3.0"
+    ]
+  },
+  "signax": {
+    "package": "signax",
+    "venv_rc": 0,
+    "pip_rc": 0,
+    "pip_seconds": 23.5,
+    "pip_tail": [
+      "Using cached typing_extensions-4.16.0-py3-none-any.whl (45 kB)",
+      "Downloading wadler_lindig-0.1.7-py3-none-any.whl (20 kB)",
+      "Downloading opt_einsum-3.4.0-py3-none-any.whl (71 kB)",
+      "Installing collected packages: wadler-lindig, typing-extensions, opt_einsum, numpy, scipy, ml_dtypes, jaxtyping, jaxlib, jax, equinox, signax",
+      "",
+      "Successfully installed equinox-0.13.8 jax-0.11.2 jaxlib-0.11.2 jaxtyping-0.3.11 ml_dtypes-0.6.0 numpy-2.5.4 opt_einsum-3.4.0 scipy-1.18.1 signax-0.2.1 typing-extensions-4.16.0 wadler-lindig-0.1.7"
+    ],
+    "built_from_source": false,
+    "smoke": {
+      "package": "signax",
+      "version": "0.2.1",
+      "terms": 155,
+      "expected_terms": 155,
+      "max_abs_err_vs_numpy_ref": 3.722251746296479e-05,
+      "matches_reference": false,
+      "computes": true
+    },
+    "installed": [
+      "equinox==0.13.8",
+      "jax==0.11.2",
+      "jaxlib==0.11.2",
+      "numpy==2.5.4",
+      "signax==0.2.1"
+    ]
+  },
+  "signatory": {
+    "package": "signatory",
+    "venv_rc": 0,
+    "pip_rc": 1,
+    "pip_seconds": 3.8,
+    "pip_tail": [
+      "    File \"<string>\", line 23, in <module>",
+      "  ImportError: PyTorch is not installed, and must be installed prior to installing Signatory.",
+      "  [end of output]",
+      "  ",
+      "  note: This error originates from a subprocess, and is likely not a problem with pip.",
+      "ERROR: Failed to build 'signatory' when getting requirements to build wheel"
+    ],
+    "built_from_source": false
+  },
+  "pysiglib": {
+    "package": "pysiglib",
+    "venv_rc": 0,
+    "pip_rc": 0,
+    "pip_seconds": 56.5,
+    "pip_tail": [
+      "  Created wheel for kauri: filename=kauri-2.3.0-py3-none-any.whl size=103517 sha256=7bf483454b31e1e7c1f8c09ff396b84e345dc04572f0c6ab18c943cee9ea91df",
+      "  Stored in directory: c:\\users\\jmcphail\\appdata\\local\\pip\\cache\\wheels\\29\\f2\\0f\\3c06d5caa7e2c67333ed0afefb0ce1a80c29c9252957e69e15",
+      "Successfully built kauri",
+      "Installing collected packages: mpmath, typing-extensions, sympy, setuptools, numpy, networkx, MarkupSafe, kauri, fsspec, filelock, jinja2, torch, pysiglib",
+      "",
+      "Successfully installed MarkupSafe-3.0.4 filelock-4.2.0 fsspec-2026.9.0 jinja2-3.1.6 kauri-2.3.0 mpmath-1.3.0 networkx-3.7 numpy-2.5.4 pysiglib-4.0.0 setuptools-84.0.0 sympy-1.14.0 torch-2.14.1 typing-extensions-4.16.0"
+    ],
+    "built_from_source": true,
+    "smoke": {
+      "package": "pysiglib",
+      "version": "4.0.0",
+      "computes": false,
+      "error": "OSError: [WinError 4551] An Application Control policy has blocked this file"
+    },
+    "installed": [
+      "numpy==2.5.4",
+      "pysiglib==4.0.0",
+      "torch==2.14.1"
+    ]
+  },
+  "_environment": {
+    "python": "3.12.10 (base interpreter of .venv, CPython, win_amd64)",
+    "os": "Windows 11 Pro 10.0.26200",
+    "smart_app_control": "On (VerifiedAndReputablePolicyState=1)",
+    "msvc_build_tools": "absent (no cl.exe, no Visual Studio install)",
+    "project_venv_touched": false,
+    "checked": "2026-10-15 ~02:40 local"
+  },
+  "_pass2": {
+    "iisignature": "numpy+setuptools+wheel preinstalled, --no-build-isolation -> build error: Microsoft Visual C++ 14.0 or greater is required (no py3.12 Windows wheel for 0.24, latest release)",
+    "signatory": "torch 2.14.1+cpu preinstalled, --no-build-isolation -> Failed to build signatory (latest release 1.2.6.1.9.0 targets torch 1.9; unmaintained)",
+    "esig": "1.0.0 on RoughPy 0.3.0: stream2sig raises a RoughPy ValueError (row/index mismatch); with RoughPy 0.2.0 the _roughpy DLL is blocked by Smart App Control",
+    "signax": "float32 by default (max abs err 3.7e-5); with JAX_ENABLE_X64=1 matches the numpy reference to 8.5e-14",
+    "pysiglib": "4.0.0 installs (pulls torch 2.14.1), import fails: WinError 4551 Application Control policy blocked the DLL",
+    "roughpy": "0.3.0 wheel installs, signature matches the numpy reference"
+  },
+  "_latest_pypi": {
+    "iisignature": "0.24",
+    "signatory": "1.2.6.1.9.0",
+    "esig": "1.0.0",
+    "roughpy": "0.3.0",
+    "signax": "0.2.1",
+    "pysiglib": "4.0.0"
+  }
+}

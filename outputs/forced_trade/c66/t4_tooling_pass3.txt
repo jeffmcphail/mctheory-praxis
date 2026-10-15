@@ -1,0 +1,10 @@
+=== iisignature pass 3: setuptools+wheel+numpy, --no-build-isolation
+  Building wheel for iisignature (pyproject.toml): finished with status 'error'
+  error: subprocess-exited-with-error
+  Building wheel for iisignature (pyproject.toml) did not run successfully.
+  error: Microsoft Visual C++ 14.0 or greater is required. Get it with "Microsoft C++ Build Tools": https://visualstudio.microsoft.com/visual-cpp-build-tools/
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+=== esig pass 2: roughpy<0.3
+esig==1.0.0
+RoughPy==0.2.0
+RESULT {"package": "esig", "version": "1.0.0", "computes": false, "error": "ImportError: DLL load failed while importing _roughpy: An Application Control policy has blocked this file."}

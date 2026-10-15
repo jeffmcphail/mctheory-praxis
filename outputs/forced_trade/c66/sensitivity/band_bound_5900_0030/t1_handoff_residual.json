@@ -1,0 +1,63 @@
+{
+  "leading_edge": {
+    "n_handoff_runs": 1248,
+    "n_with_first_row": 1228,
+    "band_end_soh": 30.0,
+    "connect_soh_q": {
+      "p01": 2.0,
+      "p50": 2.0,
+      "p99": 7.529999999999973
+    },
+    "connect_minus_start_sec_q": {
+      "p01": 0.02,
+      "p50": 0.69,
+      "p99": 4.035799999999977
+    },
+    "first_row_soh_q": {
+      "p01": 3.25209,
+      "p05": 8.57845,
+      "p10": 16.4498,
+      "p25": 55.311,
+      "p50": 153.3115,
+      "p75": 450.27375
+    },
+    "first_row_minus_start_sec_q": {
+      "p01": 1.48539,
+      "p05": 6.9436,
+      "p10": 14.857899999999999,
+      "p25": 53.966,
+      "p50": 151.7215,
+      "p75": 448.69875
+    },
+    "first_row_minus_connect_sec_q": {
+      "p01": 0.66589,
+      "p05": 6.41845,
+      "p10": 14.116200000000001,
+      "p25": 52.3945,
+      "p50": 150.8115,
+      "p75": 448.01125
+    },
+    "floor_q": 0.05,
+    "floor_first_row_soh": 8.57845,
+    "runs_first_row_before_band_end": 198,
+    "floor_past_band_end_sec": -21.42155,
+    "ramp_runs": 1200,
+    "ramp_ref_sec": [
+      120,
+      600
+    ],
+    "ramp_ref_rows_per_run_sec": 0.048269097222222224
+  },
+  "local_baseline": {
+    "band_seconds": [
+      3540,
+      30
+    ],
+    "days": 58,
+    "n_boot": 1000,
+    "band_calendar_hours": 33.95777777777778,
+    "band_log_exposed_hours": 13.52111111111111,
+    "tail_log_exposed_hours": 4.253888888888889,
+    "head_log_exposed_hours": 9.267222222222221
+  }
+}

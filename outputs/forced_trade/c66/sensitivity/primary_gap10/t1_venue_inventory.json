@@ -1,0 +1,26 @@
+{
+  "lines": [
+    "trades               : Binance SPOT BTC/USDT, ETH/USDT -- ccxt REST fetch_trades, fromId cursor (engines/crypto_data_collector.py:1156 TRADES_SYMBOL_MAP); no venue column; BTC+ETH only",
+    "order_book_snapshots : Binance SPOT top-10 REST snapshots every 10s (crypto_data_collector.py:1003 fetch_order_book limit=10; ts = local clock when the venue sends none); BTC+ETH only",
+    "liquidations         : Bybit USDT-linear PERP allLiquidation stream, BTC ETH SOL XRP ADA AVAX (stream:bybit)",
+    "Binance PERP trades  : NO TABLE EXISTS in crypto_data.db or any data/*.db -- no third detector scan; the spot-vs-perp venue confound stands"
+  ],
+  "spans": {
+    "trades:BTC": [
+      1777490653900,
+      1792045371388
+    ],
+    "trades:ETH": [
+      1777490634464,
+      1792045374212
+    ],
+    "order_book_snapshots:BTC": [
+      1777447634461,
+      1792045913433
+    ],
+    "order_book_snapshots:ETH": [
+      1777447634651,
+      1792045913733
+    ]
+  }
+}

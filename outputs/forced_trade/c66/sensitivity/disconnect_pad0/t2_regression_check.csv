@@ -1,0 +1,7 @@
+asset,setting,published,c61_cache_now_code,c66_cache_truncated,code_unchanged,data_reproduces,buckets_only_old,buckets_only_new,buckets_value_mismatch,c61_last_bucket
+BTC,loose,2092,2092,2092,True,True,0,0,1,2026-08-19 06:33:10
+BTC,base,229,229,229,True,True,0,0,1,2026-08-19 06:33:10
+BTC,strict,26,26,26,True,True,0,0,1,2026-08-19 06:33:10
+ETH,loose,1142,1142,1142,True,True,0,0,1,2026-08-19 06:38:50
+ETH,base,72,72,72,True,True,0,0,1,2026-08-19 06:38:50
+ETH,strict,5,5,5,True,True,0,0,1,2026-08-19 06:38:50

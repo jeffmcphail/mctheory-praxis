@@ -1,0 +1,14 @@
+INFO    forced_trade.run_labelled: context ready in 0.9s (analysis end 2026-10-15 06:20:50)
+
+==============================================================================
+CONTIGUITY -- trade_id completeness around labelled clusters (DB, mode=ro)
+==============================================================================
+INFO    forced_trade.run_labelled: wrote C:\Data\Development\Python\McTheoryApps\praxis\outputs\forced_trade\c66\contiguity_trade_ids.csv
+               windows   trades  missing  windows_with_missing
+asset kind                                                    
+BTC   cluster      149  2429143        0                     0
+      control      200   363751        0                     0
+ETH   cluster       75  1935602        0                     0
+      control      200   427252        0                     0
+
+[done] contiguity in 16s
