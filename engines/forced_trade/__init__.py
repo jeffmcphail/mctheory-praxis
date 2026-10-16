@@ -36,6 +36,9 @@ Cycle 62B -- D1 leveraged-token rebalance mechanism study.
 
 leveraged_class   T4  re-measure of the leveraged-name class the Cycle 60
                       substring rule deleted (fix lives in xsec_reversal/universe.py)
+blvt_mechanism    T1  locate rebalances from 1m market prices (token vs perp slope
+                      breaks) and test scheduled vs triggered; FTX BULL/BEAR as the
+                      positive control. Stops at the gate: measures no pressure.
 
 EVERY threshold is a parameter. Nothing is tuned to make event counts look
 better; each detector reports a sensitivity sweep, and the SPREAD across
@@ -46,4 +49,4 @@ READ-ONLY: every connection to crypto_data.db is opened with mode=ro.
 
 __all__ = ["common", "cascade", "unlocks", "leveraged", "oi_audit", "occupancy",
            "labels", "label_inventory", "label_scoring", "cascade_profile",
-           "signature_sizing", "leveraged_class"]
+           "signature_sizing", "leveraged_class", "blvt_mechanism"]

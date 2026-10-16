@@ -1,0 +1,26 @@
+{
+  "BTCUSDT": {
+    "perp_bookTicker_monthly": [
+      "BTCUSDT-bookTicker-2023-05.zip",
+      "BTCUSDT-bookTicker-2024-04.zip",
+      12
+    ],
+    "perp_bookDepth_daily": [
+      "BTCUSDT-bookDepth-2023-01-01.zip",
+      "BTCUSDT-bookDepth-2026-10-15.zip",
+      1380
+    ]
+  },
+  "ETHUSDT": {
+    "perp_bookTicker_monthly": [
+      "ETHUSDT-bookTicker-2023-05.zip",
+      "ETHUSDT-bookTicker-2024-04.zip",
+      12
+    ],
+    "perp_bookDepth_daily": [
+      "ETHUSDT-bookDepth-2023-01-01.zip",
+      "ETHUSDT-bookDepth-2026-10-15.zip",
+      1381
+    ]
+  }
+}

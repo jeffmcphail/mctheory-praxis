@@ -1,0 +1,29 @@
+"""Cycle 62B T1: what data TYPES does the Binance archive hold? (S3 prefix tree)"""
+import re
+from xml.etree import ElementTree
+import requests
+
+S3 = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+sess = requests.Session()
+
+def prefixes(prefix):
+    out, token = [], None
+    while True:
+        params = {"prefix": prefix, "delimiter": "/", "list-type": "2"}
+        if token:
+            params["continuation-token"] = token
+        r = sess.get(S3, params=params, timeout=60)
+        r.raise_for_status()
+        root = ElementTree.fromstring(r.content)
+        out += [p.find(f"{NS}Prefix").text for p in root.findall(f"{NS}CommonPrefixes")]
+        t = root.find(f"{NS}IsTruncated"); n = root.find(f"{NS}NextContinuationToken")
+        if t is not None and t.text == "true" and n is not None:
+            token = n.text
+        else:
+            return out
+
+for p in ["data/", "data/spot/", "data/futures/", "data/futures/um/", "data/option/"]:
+    print(p, "->", [x[len(p):] for x in prefixes(p)])
+for p in ["data/spot/monthly/", "data/spot/daily/", "data/futures/um/monthly/", "data/futures/um/daily/"]:
+    print(p, "->", [x[len(p):] for x in prefixes(p)])

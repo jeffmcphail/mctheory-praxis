@@ -1,0 +1,70 @@
+{
+  "token": "BEARUSDT",
+  "sign": -1,
+  "first": "2020-01-17 12:00:00+00:00",
+  "last": "2020-03-31 09:59:00+00:00",
+  "calendar_days": 73.9,
+  "minutes_with_both_prices_days": 56.3,
+  "n_events": 34,
+  "profile_peak_hour": 1,
+  "profile_peak_to_median": 1.93,
+  "profile_peak_z": 2.24,
+  "profile_hours_z_ge_4": [],
+  "sched_top_hour": 1,
+  "sched_top_z": -6.92,
+  "sched_top_beta": -1.984,
+  "sched_hours_z_ge_4_right_sign": [
+    0,
+    1,
+    23
+  ],
+  "sched_hours_z_ge_4_wrong_sign": [
+    5
+  ],
+  "sched_hours_right_sign": 17,
+  "sched_pooled_beta": -0.242,
+  "sched_homogeneity_Q_df23": 177.7,
+  "sched_homogeneity_p": 7.18e-26,
+  "sched_top_to_median_beta": 8.92,
+  "n_rebalances": 24,
+  "n_candidates_not_significant": 10,
+  "sign_agreement_with_drift": 0.913,
+  "n_redenomination_like": 0,
+  "rebalances_per_year": 118.6,
+  "median_days_between": 2.33,
+  "events_in_00utc_hour": 4,
+  "max_events_in_any_hour": 4,
+  "hour_of_day_chi2_df23": 26.0,
+  "L_pre_abs_q10_q50_q90": [
+    2.09,
+    3.45,
+    4.47
+  ],
+  "L_post_abs_q10_q50_q90": [
+    2.74,
+    2.94,
+    3.13
+  ],
+  "share_L_pre_outside_band": 0.167,
+  "delever_share": 0.583,
+  "median_abs_perp_move_since_prev": 0.024,
+  "L_median": 2.983,
+  "beta_theory": -3.983,
+  "share_h00": 0.502,
+  "share_h00_se": 0.098,
+  "share_h01": 0.451,
+  "share_h01_se": 0.073,
+  "share_max_hour": 0,
+  "share_max": 0.502,
+  "share_max_se": 0.098,
+  "params": {
+    "window_h": 12,
+    "profile_window_h": 3,
+    "jump_log": 0.1,
+    "min_cover": 0.5,
+    "min_rel_sd": 0.002,
+    "min_seg_min": 60,
+    "hac_lags": 120,
+    "min_z": 4.0
+  }
+}

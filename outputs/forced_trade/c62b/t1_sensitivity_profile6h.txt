@@ -1,0 +1,33 @@
+Sensitivity: schedule regression with 6h profile windows (default 3h). Run 2026-10-16 with the pre-batch code (detector identical; only the summary rate field differed).
+== BTCDOWNUSDT
+  "sched_top_hour": 16,
+  "sched_top_z": -6.73,
+  "sched_top_beta": -0.733,
+  "sched_hours_right_sign": 24,
+  "sched_homogeneity_Q_df23": 6.0,
+  "sched_homogeneity_p": 1.0,
+  "sched_top_to_median_beta": 1.13,
+== BTCUPUSDT
+  "sched_top_hour": 1,
+  "sched_top_z": 5.09,
+  "sched_top_beta": 0.334,
+  "sched_hours_right_sign": 24,
+  "sched_homogeneity_Q_df23": 16.9,
+  "sched_homogeneity_p": 0.812,
+  "sched_top_to_median_beta": 1.38,
+== BULLUSDT
+  "sched_top_hour": 1,
+  "sched_top_z": 20.18,
+  "sched_top_beta": 2.171,
+  "sched_hours_right_sign": 20,
+  "sched_homogeneity_Q_df23": 485.6,
+  "sched_homogeneity_p": 3.49e-88,
+  "sched_top_to_median_beta": 4.09,
+== ETHBEARUSDT
+  "sched_top_hour": 22,
+  "sched_top_z": -8.69,
+  "sched_top_beta": -1.974,
+  "sched_hours_right_sign": 19,
+  "sched_homogeneity_Q_df23": 137.7,
+  "sched_homogeneity_p": 2.45e-18,
+  "sched_top_to_median_beta": 3.06,

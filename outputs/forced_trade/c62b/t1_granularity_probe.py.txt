@@ -1,0 +1,64 @@
+"""Cycle 62B T1 sub-Q5/Q6 + T3 instrument feasibility: what granularity and which
+data types exist in the archive for the 50 genuine USDT leveraged tokens and
+their underlyings (spot AND USDT-M perp, since BLVT baskets hold perps)."""
+import json
+from xml.etree import ElementTree
+from pathlib import Path
+import pandas as pd
+import requests
+from engines.xsec_reversal.archive import ArchiveClient
+
+S3 = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+sess = requests.Session()
+
+def keys(prefix, max_pages=50):
+    out, token, pages = [], None, 0
+    while pages < max_pages:
+        params = {"prefix": prefix, "list-type": "2"}
+        if token: params["continuation-token"] = token
+        r = sess.get(S3, params=params, timeout=60); r.raise_for_status()
+        root = ElementTree.fromstring(r.content)
+        out += [c.find(f"{NS}Key").text for c in root.findall(f"{NS}Contents")]
+        t = root.find(f"{NS}IsTruncated"); n = root.find(f"{NS}NextContinuationToken")
+        pages += 1
+        if t is not None and t.text == "true" and n is not None: token = n.text
+        else: break
+    return [k for k in out if k.endswith(".zip")]
+
+cand = pd.read_csv("outputs/forced_trade/t3_candidates.csv")
+toks = cand[(cand.is_genuine) & (cand.quote == "USDT")]
+spot = ArchiveClient(market="spot")
+rows = []
+for _, r in toks.iterrows():
+    row = {"symbol": r.symbol, "suffix": r.suffix, "underlying": r.underlying}
+    for iv in ("1m", "1h", "1d"):
+        p = spot.list_symbol_periods(r.symbol, iv)
+        row[f"{iv}_months"] = len(p); row[f"{iv}_first"] = p[0] if p else None; row[f"{iv}_last"] = p[-1] if p else None
+    agg = keys(f"data/spot/monthly/aggTrades/{r.symbol}/")
+    row["aggTrades_months"] = len(agg)
+    rows.append(row)
+    print(row, flush=True)
+tok = pd.DataFrame(rows)
+tok.to_csv("claude/scratch/c62b_t1_token_granularity.csv", index=False)
+
+# Underlyings: spot 1m and USDT-M perp 1m over the token lifetimes; perp book data
+fut = ArchiveClient(market="futures/um")
+und = sorted(set(toks.underlying))
+urows = []
+for u in und:
+    sp = spot.list_symbol_periods(u, "1m"); fp = fut.list_symbol_periods(u, "1m")
+    urows.append({"underlying": u, "spot_1m_first": sp[0] if sp else None, "spot_1m_last": sp[-1] if sp else None,
+                  "perp_1m_first": fp[0] if fp else None, "perp_1m_last": fp[-1] if fp else None,
+                  "perp_1m_months": len(fp)})
+    print(urows[-1], flush=True)
+pd.DataFrame(urows).to_csv("claude/scratch/c62b_t1_underlying_granularity.csv", index=False)
+
+book = {}
+for u in ("BTCUSDT", "ETHUSDT"):
+    bt = keys(f"data/futures/um/monthly/bookTicker/{u}/")
+    bd = keys(f"data/futures/um/daily/bookDepth/{u}/", max_pages=20)
+    book[u] = {"perp_bookTicker_monthly": [bt[0].split("/")[-1], bt[-1].split("/")[-1], len(bt)] if bt else None,
+               "perp_bookDepth_daily": [bd[0].split("/")[-1], bd[-1].split("/")[-1], len(bd)] if bd else None}
+    print(u, book[u], flush=True)
+Path("claude/scratch/c62b_t1_book_availability.json").write_text(json.dumps(book, indent=2))

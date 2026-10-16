@@ -1,0 +1,24 @@
+"""Pooled timing of significant BLVT rebalances (8 tokens): is the 00:00 excess a
+funding-clock artifact (00/08/16 all elevated) or a daily one (00 only)?"""
+import numpy as np, pandas as pd
+from scipy.stats import poisson
+toks = ["BTCUPUSDT", "BTCDOWNUSDT", "ETHUPUSDT", "ETHDOWNUSDT", "BNBUPUSDT", "BNBDOWNUSDT", "ADAUPUSDT", "ADADOWNUSDT"]
+ev = pd.concat([pd.read_csv(f"outputs/forced_trade/c62b/t1_{t}_events.csv", parse_dates=["time"]).query("significant").assign(token=t) for t in toks])
+n = len(ev)
+mod = ev.time.dt.hour * 60 + ev.time.dt.minute
+c = pd.cut(mod, range(0, 1441, 30), right=False).value_counts().sort_index()
+e = n / 48
+print(f"n significant BLVT rebalances = {n}; uniform per 30-min bin = {e:.1f}")
+print(" ".join(f"{int(i.left)//60:02d}:{int(i.left)%60:02d}={v}" for i, v in c.items()))
+chi2 = float(((c - e) ** 2 / e).sum())
+from scipy.stats import chi2 as C
+print(f"48-bin chi2 = {chi2:.1f} (df 47, p = {C.sf(chi2, 47):.2g})")
+for h in (0, 8, 16):
+    k = int((ev.time.dt.hour == h).sum()); eh = n / 24
+    print(f"hour {h:02d}: {k} vs {eh:.1f} expected -> ratio {k/eh:.2f}, Poisson p(>=) = {poisson.sf(k-1, eh):.2g}")
+h0 = ev[ev.time.dt.hour == 0]
+print(f"hour-00 excess = {len(h0) - n/24:.0f} events = {100*(len(h0) - n/24)/n:.1f}% of all; "
+      f"minutes 00-09 hold {(h0.time.dt.minute < 10).sum()} of {len(h0)}")
+print("\nBNBDOWN schedule profile (beta, z by hour):")
+p = pd.read_csv("outputs/forced_trade/c62b/t1_BNBDOWNUSDT_boundary_profile.csv", index_col=0)
+print(" ".join(f"{h:02d}:{b:+.2f}({z:+.1f})" for h, b, z in zip(p.index, p.sched_beta, p.sched_z)))

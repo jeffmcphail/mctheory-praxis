@@ -116,11 +116,12 @@ Verified against `crypto_data.db` (2026-08-18):
 
 ## D. Product compulsion
 
-### D1 — Leveraged token daily rebalancing
-**Mechanism:** a 3× leveraged token **must** buy more exposure after a rise and sell after a fall, to reset leverage daily. Mechanical, price-insensitive, direction fully predictable from the day's return.
-**Trigger:** `SCHEDULED` (daily reset) · **Data:** `PARTIAL` — Binance UP/DOWN tokens are in the archive and we already have the collector path from Cycle 60 · **Crowding:** moderate
+### D1 — Leveraged token rebalancing
+**Mechanism:** a leveraged token **must** buy more exposure after a rise and sell after a fall to pull its leverage back. Mechanical and price-insensitive, and the direction follows from the move since the last rebalance.
+**Trigger:** `TRIGGERED` for Binance's own UP/DOWN tokens (BLVT), **corrected by Cycle 62B T1** — the row previously read `SCHEDULED` (daily reset), which describes US leveraged ETFs and FTX's BULL/BEAR tokens, not BLVT. Binance's documentation (now deleted) said BLVTs rebalance "on an as-needed basis only" against a target leverage that is "constantly changing and hidden from outside observation"; the data agrees — rebalances every few days, at any hour, undoing drift, with no fixed-hour component of any size. Binance also listed FTX's BULL/BEAR tokens (2020-Q1 only, 10 tokens, ~22 token-months), which were `SCHEDULED` + `TRIGGERED` and rebalanced on FTX, not Binance. See `claude/retros/RETRO_cycle62b_d1_mechanism.md`. · **Data:** `PARTIAL` — 1m klines and aggTrades for every token; **no NAV** (not archived; the NAV endpoint is gone); **no order book before 2023-01** (12.7% of BLVT token-months); every token delisted by 2024-02 · **Crowding:** moderate
 **The inversion worth noting:** Cycle 60 **excluded** leveraged tokens from its universe precisely because their rebalancing creates *artificial mean reversion* that would have manufactured a false positive. **What was contamination for that experiment is the signal for this one.** The exclusion list in `engines/xsec_reversal/universe.py` is a ready-made candidate list.
 **Priority: P1** — mechanism is unambiguous, direction is knowable in advance, data is one collector away.
+**Cycle 62B T1 (2026-10-16):** the P1 basis does not hold for BLVT. The rebalance is drift-triggered, so it inherits the A2 endogeneity (the move triggers the forcing) and the timing is not knowable in advance. Re-triage is Chat's call.
 
 ### D2 — Covered-call ETF systematic selling
 **Mechanism:** the fund must write calls on schedule regardless of pricing.
@@ -176,7 +177,7 @@ Verified against `crypto_data.db` (2026-08-18):
 |---|---|---|
 | **P1** | **A2 Liquidation cascades** | Purest compulsion; full tick + book data already collected |
 | **P1** | **F1 Token unlocks** | Scheduled months ahead, low crowding, detectable via `circulating_supply` |
-| **P1** | **D1 Leveraged token rebalance** | Mechanical and direction-predictable; Cycle 60's exclusion list is the candidate list |
+| **P1** | **D1 Leveraged token rebalance** | Mechanical and direction-predictable; Cycle 60's exclusion list is the candidate list. **62B T1: BLVT is drift-triggered, not scheduled -- P1 basis void, re-triage pending** |
 | P1 (passive) | A1 Funding carry | Validated, dormant, tripwire armed — no work required |
 | **P2** | B3 vol-target · B4 quarter-end · E3 miner selling · F3 delisting | Viable with modest data work |
 | **P3** | A3, B1, B2, C1, C2, D2, E1, E2, F2, F4 | Blocked on data, crowding, or sample size |
@@ -211,3 +212,9 @@ To be answered empirically before any grid is designed:
 with mechanism, trigger type, data availability against the live schema, crowding, and
 screen verdict. Three P1 candidates identified. Data gaps recorded, including the absent
 open-interest table that regime class F depends on.*
+
+*Last updated: 2026-10-16 (Code: Cycle 62B T1)*
+*Changes: D1 trigger corrected `SCHEDULED` -> `TRIGGERED` for Binance BLVT (UP/DOWN), established
+from Binance's own (now deleted) documentation and from the data, with FTX's daily-reset
+BULL/BEAR tokens as the positive control. D1's P1 basis annotated as void; the triage itself is
+left for Chat.*
