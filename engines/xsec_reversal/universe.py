@@ -23,7 +23,8 @@ EXCLUSIONS (all parameters, none hard-coded)
    - stablecoin pairs (no cross-sectional dispersion to trade)
    - leveraged tokens (UP/DOWN/BULL/BEAR): rebalancing mechanics create
      artificial mean reversion that is a product artifact, not a market effect.
-     Leaving these in would be a fake-positive generator.
+     Leaving these in would be a fake-positive generator. Identified
+     STRUCTURALLY (see is_leveraged_token), not by name pattern.
 """
 from __future__ import annotations
 
@@ -36,7 +37,22 @@ import pandas as pd
 
 logger = logging.getLogger("xsec.universe")
 
-# Substrings marking Binance leveraged tokens (artificial mean reversion).
+# Binance leveraged tokens are recognised STRUCTURALLY: <BASE> + one of these
+# suffixes + <QUOTE>, AND <BASE><QUOTE> must itself trade. Ported from
+# engines/forced_trade/leveraged.py:split_leveraged (Cycle 61), Cycle 62B T4.
+#
+# *** A name pattern CANNOT do this job, and neither can endswith. ***
+# JUPUSDT (Jupiter) and SYRUPUSDT (Maple) both END with "UPUSDT", exactly like
+# ETHUPUSDT. Any base name ending in UP/DOWN/BULL/BEAR is caught by a pattern,
+# so the Cycle 60 substring rule silently deleted real spot assets from the
+# study universe. What separates a leveraged token from a coincidental spelling
+# is its underlying: ETHUPUSDT -> ETHUSDT trades; JUPUSDT -> JUSDT does not.
+DEFAULT_LEVERAGED_SUFFIXES = ("DOWN", "BULL", "BEAR", "UP")
+# Quotes tried when UniverseSpec.quote is empty (the Cycle 61 set).
+DEFAULT_LEVERAGED_QUOTES = ("USDT", "BUSD", "USDC")
+# LEGACY -- the Cycle 60 substring rule. NOT used for filtering any more. Kept
+# only so the frozen Cycle 61 audit (forced_trade/run_audit.py t3) can still
+# reproduce what this rule deleted.
 DEFAULT_LEVERAGED_PATTERNS = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 # Stable/pegged bases -- no dispersion, pure noise in a reversal ranking.
 # Binance tokenized EQUITIES / ETFs (symbol pattern <TICKER>B + USDT).
@@ -111,7 +127,7 @@ class UniverseSpec:
     exclude_leveraged: bool = True
     exclude_stables: bool = True
     exclude_tokenized_equities: bool = True
-    leveraged_patterns: tuple = DEFAULT_LEVERAGED_PATTERNS
+    leveraged_suffixes: tuple = DEFAULT_LEVERAGED_SUFFIXES
     stable_bases: tuple = DEFAULT_STABLE_BASES
     tokenized_equity_symbols: tuple = DEFAULT_TOKENIZED_EQUITY_SYMBOLS
     require_full_window: bool = False     # if True, symbol must have EVERY bar
@@ -128,15 +144,59 @@ class UniverseSpec:
             )
 
 
-def filter_symbol_names(symbols, spec: UniverseSpec = UniverseSpec()) -> list[str]:
-    """Apply name-based exclusions (leveraged tokens, stablecoin pairs)."""
-    out = []
+def leveraged_underlying(symbol: str, spec: UniverseSpec = UniverseSpec()) -> Optional[str]:
+    """The underlying a leveraged-token SPELLING implies, or None.
+
+    Spelling only: JUPUSDT parses (J + UP + USDT -> JUSDT). Whether that
+    underlying trades is what is_leveraged_token decides.
+    """
+    su = symbol.upper()
+    quotes = (spec.quote,) if spec.quote else DEFAULT_LEVERAGED_QUOTES
+    for q in quotes:
+        if not su.endswith(q):
+            continue
+        stem = su[: -len(q)]
+        for suf in spec.leveraged_suffixes:
+            if stem.endswith(suf):
+                base = stem[: -len(suf)]
+                if base:
+                    return f"{base}{q}"
+                # Bare BULL/BEAR were the Binance-listed FTX 3x BTC tokens
+                # (Cycle 61 maps them to BTC). No BLVT was ever a bare UP/DOWN,
+                # so a bare UPUSDT would be some new spot asset, not leveraged.
+                return f"BTC{q}" if suf in ("BULL", "BEAR") else None
+    return None
+
+
+def is_leveraged_token(symbol: str, traded, spec: UniverseSpec = UniverseSpec()) -> bool:
+    """True iff `symbol` is spelled <BASE><UP|DOWN|BULL|BEAR><QUOTE> AND its
+    implied underlying is in `traded` (a set of upper-case symbols)."""
+    und = leveraged_underlying(symbol, spec)
+    return und is not None and und in traded
+
+
+def filter_symbol_names(symbols, spec: UniverseSpec = UniverseSpec(),
+                        traded=None) -> list[str]:
+    """Apply name-based exclusions (leveraged tokens, stablecoin pairs).
+
+    `traded` is the symbol set that confirms a leveraged token's underlying
+    trades. It defaults to `symbols`, which is right for the full archive
+    listing (cmd_symbols). When filtering a SUBSET, pass the full listing as
+    `traded`, or a genuine leveraged token whose underlying is not in the
+    subset is kept.
+    """
+    symbols = list(symbols)
+    traded_set = {s.upper() for s in (symbols if traded is None else traded)}
+    out, lookalikes = [], []
     for s in symbols:
         su = s.upper()
         if spec.quote and not su.endswith(spec.quote):
             continue
-        if spec.exclude_leveraged and any(p in su for p in spec.leveraged_patterns):
-            continue
+        lookalike = False
+        if spec.exclude_leveraged:
+            if is_leveraged_token(su, traded_set, spec):
+                continue
+            lookalike = leveraged_underlying(su, spec) is not None
         if spec.exclude_stables:
             base = su[: -len(spec.quote)] if spec.quote else su
             if base in spec.stable_bases:
@@ -144,9 +204,14 @@ def filter_symbol_names(symbols, spec: UniverseSpec = UniverseSpec()) -> list[st
         if spec.exclude_tokenized_equities and su in spec.tokenized_equity_symbols:
             continue
         out.append(s)
-    dropped = len(list(symbols)) - len(out)
+        if lookalike:
+            lookalikes.append(s)
+    if lookalikes:
+        logger.info("filter_symbol_names: kept %d leveraged-looking name(s) whose "
+                    "implied underlying does not trade (spot assets): %s",
+                    len(lookalikes), lookalikes)
     logger.info("filter_symbol_names: kept %d, dropped %d (leveraged/stable/quote)",
-                len(out), dropped)
+                len(out), len(symbols) - len(out))
     return out
 
 

@@ -1,0 +1,18 @@
+listing: 3738 symbols, all quotes, INCLUDING DELISTED (claude/scratch/c62b_archive_symbols_raw.txt)
+USDT-quoted: 755
+
+[USDT] Cycle 60 substring rule catches: 52
+  genuine leveraged tokens (underlying trades): 50
+  ordinary spot assets it deleted: 2 -> ['JUPUSDT', 'SYRUPUSDT']
+
+[all quotes] names spelled <BASE><UP|DOWN|BULL|BEAR><USDT|BUSD|USDC>: 64; genuine 60; lookalikes 4 -> ['JUPUSDC', 'JUPUSDT', 'SYRUPUSDC', 'SYRUPUSDT']
+
+full name filter on today's listing: old rule keeps 633, new rule keeps 635 (+2 ['JUPUSDT', 'SYRUPUSDT'], -0 [])
+
+vs Cycle 61 genuine USDT list (50): new=[] gone=[]
+
+restored names' 4h archive months inside the Cycle 60 window 2021-01..2026-06:
+  JUPUSDT      first=2024-01 last=2026-09 months_in_window=30
+  SYRUPUSDT    first=2025-05 last=2026-09 months_in_window=14
+
+wrote outputs\forced_trade\c62b\t4_leveraged_class.json

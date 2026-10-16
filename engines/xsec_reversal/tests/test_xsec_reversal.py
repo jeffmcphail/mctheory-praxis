@@ -19,8 +19,8 @@ from engines.xsec_reversal.archive import (
     month_range,
 )
 from engines.xsec_reversal.universe import (
-    TierSpec, UniverseSpec, assign_tiers, build_point_in_time_universe,
-    filter_symbol_names,
+    DEFAULT_LEVERAGED_PATTERNS, TierSpec, UniverseSpec, assign_tiers,
+    build_point_in_time_universe, filter_symbol_names, is_leveraged_token,
 )
 from engines.xsec_reversal.costs import (
     CostSpec, abdi_ranaldo_spread, corwin_schultz_spread, estimate_spread_bps,
@@ -145,9 +145,56 @@ def test_month_range():
 # universe.py
 # --------------------------------------------------------------------------- #
 def test_name_filters_exclude_leveraged_and_stables():
-    syms = ["BTCUSDT", "ETHUPUSDT", "ETHDOWNUSDT", "BUSDUSDT", "SOLUSDT", "ADABKRW"]
+    # ETHUSDT is listed because a leveraged token is only recognised when its
+    # underlying trades (Cycle 62B T4) -- as it always did in the real archive.
+    syms = ["BTCUSDT", "ETHUSDT", "ETHUPUSDT", "ETHDOWNUSDT", "BUSDUSDT",
+            "SOLUSDT", "ADABKRW"]
     kept = filter_symbol_names(syms, UniverseSpec())
-    assert set(kept) == {"BTCUSDT", "SOLUSDT"}
+    assert set(kept) == {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+
+
+def test_leveraged_filter_is_structural_jup_and_syrup_survive():
+    """Cycle 62B T4. JUPUSDT (Jupiter) and SYRUPUSDT (Maple) END with "UPUSDT",
+    so neither the Cycle 60 substring rule nor an endswith rule can tell them
+    from ETHUPUSDT. The underlying can: ETHUSDT trades, JUSDT/SYRUSDT do not."""
+    syms = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "ETHUPUSDT", "ETHDOWNUSDT",
+            "BNBBULLUSDT", "BNBBEARUSDT", "BULLUSDT", "BEARUSDT",
+            "JUPUSDT", "SYRUPUSDT"]
+    kept = filter_symbol_names(syms, UniverseSpec())
+    assert "JUPUSDT" in kept, "Jupiter is a spot asset and must survive"
+    assert "SYRUPUSDT" in kept, "Maple SYRUP is a spot asset and must survive"
+    for lev in ("ETHUPUSDT", "ETHDOWNUSDT", "BNBBULLUSDT", "BNBBEARUSDT",
+                "BULLUSDT", "BEARUSDT"):
+        assert lev not in kept, f"{lev} is a leveraged token and must go"
+    # Not vacuous: the old rule deleted both, and endswith would too.
+    for spot in ("JUPUSDT", "SYRUPUSDT"):
+        assert any(p in spot for p in DEFAULT_LEVERAGED_PATTERNS)
+        assert any(spot.endswith(p) for p in DEFAULT_LEVERAGED_PATTERNS)
+
+
+def test_leveraged_filter_catches_the_class_not_two_names():
+    """Any base ending in UP/DOWN/BULL/BEAR is a lookalike; only the underlying
+    decides. Invented names, so the test cannot pass by special-casing."""
+    syms = ["BTCUSDT", "ETHUSDT", "CATUSDT",
+            "CATDOWNUSDT",    # CAT trades -> leveraged
+            "MEGADOWNUSDT",   # MEGAUSDT absent -> spot asset
+            "TEDDYBEARUSDT",  # TEDDYUSDT absent -> spot asset
+            "REDBULLUSDT",    # REDUSDT absent -> spot asset
+            "UPUSDT"]         # bare UP was never a BLVT -> spot asset
+    kept = filter_symbol_names(syms, UniverseSpec())
+    assert "CATDOWNUSDT" not in kept
+    for spot in ("MEGADOWNUSDT", "TEDDYBEARUSDT", "REDBULLUSDT", "UPUSDT"):
+        assert spot in kept, f"{spot} has no traded underlying and must survive"
+
+
+def test_leveraged_filter_checks_underlying_against_traded_set():
+    """Filtering a subset: the underlying must be looked up in the full listing."""
+    full = ["ETHUSDT", "ETHUPUSDT", "SOLUSDT"]
+    subset = ["ETHUPUSDT", "SOLUSDT"]
+    assert "ETHUPUSDT" in filter_symbol_names(subset, UniverseSpec())
+    assert filter_symbol_names(subset, UniverseSpec(), traded=full) == ["SOLUSDT"]
+    assert is_leveraged_token("ETHUPUSDT", set(full))
+    assert not is_leveraged_token("ETHUPUSDT", {"SOLUSDT"})
 
 
 def test_universe_is_survivorship_aware():

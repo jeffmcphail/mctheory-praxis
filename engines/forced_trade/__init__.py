@@ -32,6 +32,11 @@ cascade_profile   T3  event-time profiles + reversion vs matched controls
 signature_sizing  T4  signature term counts vs labelled sample (no implementation)
 run_labelled      CLI
 
+Cycle 62B -- D1 leveraged-token rebalance mechanism study.
+
+leveraged_class   T4  re-measure of the leveraged-name class the Cycle 60
+                      substring rule deleted (fix lives in xsec_reversal/universe.py)
+
 EVERY threshold is a parameter. Nothing is tuned to make event counts look
 better; each detector reports a sensitivity sweep, and the SPREAD across
 settings is the finding.
@@ -41,4 +46,4 @@ READ-ONLY: every connection to crypto_data.db is opened with mode=ro.
 
 __all__ = ["common", "cascade", "unlocks", "leveraged", "oi_audit", "occupancy",
            "labels", "label_inventory", "label_scoring", "cascade_profile",
-           "signature_sizing"]
+           "signature_sizing", "leveraged_class"]
