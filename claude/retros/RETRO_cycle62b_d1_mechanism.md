@@ -404,7 +404,7 @@ Not committed: the per-token `window_slopes` series (about 1.7 MB each). They ar
 ## Commits
 
 - `8962646` -- Cycle 62B T4: leveraged-token filter made structural - JUP/SYRUP restored, class re-measured
-- *(this commit)* -- Cycle 62B T1: BLVT rebalance is drift-triggered, not scheduled - gate stops the cycle
+- `c08ad0f` -- Cycle 62B T1: BLVT rebalance is drift-triggered, not scheduled - gate stops the cycle (with this retro)
 
 Not pushed, per standing instruction.
 
