@@ -67,35 +67,49 @@ class Contribution:
 
 def _level_spec(
     level: Level,
+    scale_p: float = 1.0,
+    scale_b: float = 1.0,
 ) -> tuple[
     Callable[[Portfolio], ExposureVector],
     Callable[[Position], float],
     Callable[[Position], ExposureVector],
     Callable[[Position], ExposureVector],
 ]:
-    """(aggregate vector, position weight, position unweighted vector, position v_i)."""
+    """(aggregate vector, position weight, position unweighted vector, position v_i).
+
+    `scale_p` and `scale_b` are the per-side weight-basis factors from
+    `Portfolio.weight_scale`. They must reach the weights and the `v_i`, because the
+    aggregate being decomposed carries them: `sum(v_i)` has to equal that aggregate exactly
+    or the contributions sum to the wrong total. Under `WeightBasis.FULL` both are 1.0 and
+    every expression below reduces to its unscaled form.
+
+    The unweighted vector used for the *marginal* is deliberately left unscaled: it is a
+    derivative per unit of weight, and the weight it is per unit of is already the scaled one.
+    """
     if level is Level.PORTFOLIO:
         return (
             lambda p: p.exposure,
-            lambda q: q.weight,
+            lambda q: q.weight * scale_p,
             lambda q: q.exposure,
-            lambda q: q.weighted(),
+            lambda q: q.weighted() * scale_p,
         )
     if level is Level.BENCHMARK:
         return (
             lambda p: p.benchmark_exposure,
-            lambda q: q.benchmark_weight,
+            lambda q: q.benchmark_weight * scale_b,
             lambda q: q.benchmark_exposure,
-            lambda q: q.benchmark_weighted(),
+            lambda q: q.benchmark_weighted() * scale_b,
         )
     return (
         lambda p: p.active_exposure,
-        lambda q: q.active_weight,
+        lambda q: q.weight * scale_p - q.benchmark_weight * scale_b,
         # For the marginal, the security's own exposure. Exact whenever the two sides carry
         # the same vector, which is everything but a bucketed holding; `total` stays exact
         # in both cases because it is built from v_i.
         lambda q: q.exposure,
-        lambda q: q.active_weighted(),
+        # Not `q.active_weighted() * scale`: the two sides carry different factors, so the
+        # difference has to be taken after each side is scaled.
+        lambda q: q.weighted() * scale_p - q.benchmark_weighted() * scale_b,
     )
 
 
@@ -107,7 +121,11 @@ def contributions(
     Positions the risk model does not cover contribute nothing and are returned as zeros
     rather than omitted, so the list lines up with the portfolio and the absence is visible.
     """
-    aggregate_of, weight_of, vector_of, contribution_vector_of = _level_spec(level)
+    aggregate_of, weight_of, vector_of, contribution_vector_of = _level_spec(
+        level,
+        portfolio.weight_scale(lambda q: q.weight),
+        portfolio.weight_scale(lambda q: q.benchmark_weight),
+    )
     aggregate = aggregate_of(portfolio)
     variance = covariance(aggregate, aggregate, basis)
     risk = variance ** 0.5 if variance > _RISK_TOL else 0.0

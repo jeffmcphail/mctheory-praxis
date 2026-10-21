@@ -42,9 +42,16 @@ class WeightBasis(Enum):
     It is a deliberate trade of a small, flagged bias for numbers a reader will trust, and
     it should not be quietly "corrected".
 
-    `COVERED` renormalises each side over its covered names, so exposures are unscaled and
-    the weights no longer reconcile. Choose it when the risk number matters more than the
-    reconciliation.
+    `COVERED` redistributes the uncovered weight across the covered names, so the covered
+    exposures carry the book's full weight and the risk is no longer scaled down. Choose it
+    when the risk number matters more than the reconciliation.
+
+    Note what the factor is: `full / covered`, not `1 / covered`. The uncovered weight is
+    redistributed, which preserves the book's invested total; it is not a renormalisation to
+    one. For a book whose weights sum to one the two are identical -- which is why a fixture
+    that sums to one, as hand-built fixtures naturally do, cannot tell them apart. For a
+    60%-invested sleeve they differ by a factor of 1.67, and `1 / covered` would report the
+    sleeve as though it were fully invested.
     """
 
     FULL = "full"
@@ -218,18 +225,31 @@ class Portfolio:
     def _covered_weight(self, of) -> float:
         return float(sum(of(p) for p in self.positions if p.covered))
 
+    def weight_scale(self, weight_of) -> float:
+        """The factor this side's aggregate exposure is multiplied by under the current basis.
+
+        Public because anything that decomposes the aggregate has to apply the same factor to
+        its parts. Scaling the aggregate but not the per-position vectors leaves the
+        contributions summing to `risk / scale` instead of `risk` -- a real defect that lived
+        here until the parity harness found it, and which `check_sum` diagnoses correctly as
+        parts and whole "computed against different aggregates".
+        """
+        if self.weight_basis is not WeightBasis.COVERED:
+            return 1.0
+        covered = self._covered_weight(weight_of)
+        full = float(sum(weight_of(p) for p in self.positions))
+        if abs(covered) <= 1e-15 or abs(full - covered) <= 1e-15:
+            return 1.0
+        return full / covered
+
     def _sum(self, weighted, weight_of) -> ExposureVector:
         total = ExposureVector.zero()
         for position in self.positions:
             if not position.covered:
                 continue
             total = total + weighted(position)
-        if self.weight_basis is WeightBasis.COVERED:
-            covered = self._covered_weight(weight_of)
-            full = float(sum(weight_of(p) for p in self.positions))
-            if abs(covered) > 1e-15 and abs(full - covered) > 1e-15:
-                total = (full / covered) * total
-        return total
+        scale = self.weight_scale(weight_of)
+        return total * scale if scale != 1.0 else total
 
     @property
     def exposure(self) -> ExposureVector:

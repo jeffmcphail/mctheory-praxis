@@ -416,3 +416,70 @@ def test_a_fully_covered_book_is_identical_under_both_bases():
     assert portfolio_risk(full, full.basis(COV)).tracking_error == pytest.approx(
         portfolio_risk(covered, covered.basis(COV)).tracking_error
     )
+
+
+# --------------------------------------------------------------------------------------
+# The covered weight basis: which factor, and why a fixture summing to one cannot tell
+# --------------------------------------------------------------------------------------
+
+
+def _sleeve(total_weight, weight_basis="covered"):
+    """Two covered names and one uncovered, scaled to a chosen total weight."""
+    from praxis.midoffice.risk.exposures import ExposureVector, SpecificRisk
+    from praxis.midoffice.risk.portfolio import Portfolio, Position, WeightBasis
+
+    shares = (0.5, 0.3, 0.2)  # the last is the uncovered one
+    a, b, u = (s * total_weight for s in shares)
+    return Portfolio.of(
+        "Sleeve",
+        [
+            Position("A", ExposureVector({1: 1.0}, SpecificRisk.for_security("A", 0.1)),
+                     weight=a, benchmark_weight=a),
+            Position("B", ExposureVector({2: 1.0}, SpecificRisk.for_security("B", 0.2)),
+                     weight=b, benchmark_weight=b),
+            Position("U", ExposureVector({1: 0.5}, SpecificRisk.for_security("U", 0.3)),
+                     weight=u, benchmark_weight=u, covered=False),
+        ],
+        weight_basis=WeightBasis(weight_basis),
+    )
+
+
+def test_covered_scale_is_full_over_covered_not_one_over_covered():
+    """Pin the factor on a book that can distinguish the two.
+
+    A 60%-invested sleeve with 20% of its weight uncovered: `full / covered` is 0.6/0.48 =
+    1.25, while `1 / covered` would be 1/0.48 = 2.083 -- the latter reports the sleeve as if
+    it were fully invested, inflating every risk number by two thirds.
+    """
+    scale = _sleeve(0.6).weight_scale(lambda q: q.weight)
+    assert scale == pytest.approx(0.6 / 0.48)
+    assert scale != pytest.approx(1.0 / 0.48)
+
+
+def test_the_two_candidate_factors_coincide_when_the_book_sums_to_one():
+    """Why a hand-built fixture misses the distinction, recorded as a test.
+
+    This is not a property worth relying on -- it is the degenerate case that let a wrong
+    factor look right, and it is pinned here so the next reader knows the coincidence is
+    understood rather than assumed.
+    """
+    sleeve = _sleeve(1.0)
+    covered = sum(p.weight for p in sleeve.positions if p.covered)
+    full = sum(p.weight for p in sleeve.positions)
+    assert full == pytest.approx(1.0)
+    # The coincidence itself: with full == 1 the two candidate factors are the same number.
+    assert sleeve.weight_scale(lambda q: q.weight) == pytest.approx(full / covered)
+    assert full / covered == pytest.approx(1.0 / covered)
+
+
+def test_covered_basis_preserves_the_books_invested_total():
+    """The covered exposures should carry the book's weight, not a grossed-up one."""
+    sleeve = _sleeve(0.6)
+    scale = sleeve.weight_scale(lambda q: q.weight)
+    covered_weight = sum(p.weight for p in sleeve.positions if p.covered)
+    assert covered_weight * scale == pytest.approx(0.6)
+
+
+def test_full_basis_is_the_default_and_scales_nothing():
+    sleeve = _sleeve(0.6, weight_basis="full")
+    assert sleeve.weight_scale(lambda q: q.weight) == 1.0

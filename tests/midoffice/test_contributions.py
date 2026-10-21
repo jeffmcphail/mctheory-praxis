@@ -297,3 +297,79 @@ def test_rat_marginal_scale_is_documented_and_applied_consistently():
     for c in contributions(p, basis, Level.PORTFOLIO):
         rat_marginal = c.marginal * RAT_MARGINAL_SCALE
         assert 100 * rat_marginal * c.weight == pytest.approx(c.total)
+
+
+# --------------------------------------------------------------------------------------
+# Regression: the weight basis has to reach the parts, not only the whole
+# --------------------------------------------------------------------------------------
+
+
+def partly_invested_book(weight_basis):
+    """A book that does NOT sum to one, with an uncovered name carrying real weight.
+
+    Both properties matter. The uncovered name is what makes the covered basis do anything
+    at all, and the book summing to 0.75 rather than 1.0 is what distinguishes the scale
+    factor `full / covered` from `1 / covered`. Every other fixture in this file sums to one,
+    which is why the defect this exercises survived the original test suite: at a total
+    weight of one the two factors are equal and the wrong one looks right.
+    """
+    from praxis.midoffice.risk.portfolio import WeightBasis
+
+    return Portfolio.of(
+        "Sleeve",
+        [
+            Position("A", ExposureVector({1: 1.0}, SpecificRisk.for_security("A", 0.1)),
+                     weight=0.40, benchmark_weight=0.30),
+            Position("B", ExposureVector({2: 1.0}, SpecificRisk.for_security("B", 0.2)),
+                     weight=0.25, benchmark_weight=0.35),
+            Position("U", ExposureVector({1: 0.8}, SpecificRisk.for_security("U", 0.3)),
+                     weight=0.10, benchmark_weight=0.10, covered=False),
+        ],
+        benchmark_name="Index",
+        weight_basis=WeightBasis(weight_basis),
+    )
+
+
+@pytest.mark.parametrize("weight_basis", ["full", "covered"])
+@pytest.mark.parametrize("level", [Level.PORTFOLIO, Level.BENCHMARK, Level.ACTIVE])
+def test_contributions_sum_to_risk_under_either_weight_basis(weight_basis, level):
+    """The governing identity must survive the weight basis, at every level.
+
+    Under `COVERED` the aggregate exposure is multiplied by `full / covered`. If that factor
+    reaches the aggregate but not the per-position vectors, the contributions sum to
+    `risk / factor` -- every individual number looks plausible and only the total betrays it.
+    """
+    book_ = partly_invested_book(weight_basis)
+    basis = COV.basis_for((1, 2))
+    result = portfolio_risk(book_, basis)
+    risk = {
+        Level.PORTFOLIO: result.portfolio,
+        Level.BENCHMARK: result.benchmark,
+        Level.ACTIVE: result.active,
+    }[level].total_risk
+    residual = check_sum(contributions(book_, basis, level), risk)
+    assert abs(residual) < 1e-14
+
+
+def test_covered_basis_scales_reported_position_weights():
+    """The weights in the contribution rows must be the ones the risk was computed from."""
+    from praxis.midoffice.risk.portfolio import WeightBasis
+
+    book_ = partly_invested_book("covered")
+    basis = COV.basis_for((1, 2))
+    scale = book_.weight_scale(lambda q: q.weight)
+    assert scale == pytest.approx(0.75 / 0.65)
+
+    rows = {c.security_code: c for c in contributions(book_, basis, Level.PORTFOLIO)}
+    assert rows["A"].weight == pytest.approx(0.40 * scale)
+    assert rows["B"].weight == pytest.approx(0.25 * scale)
+    # The uncovered name contributes nothing and is reported as a zero row, not omitted.
+    assert rows["U"].total == 0.0
+
+
+def test_full_basis_leaves_weights_untouched():
+    book_ = partly_invested_book("full")
+    basis = COV.basis_for((1, 2))
+    assert book_.weight_scale(lambda q: q.weight) == 1.0
+    rows = {c.security_code: c for c in contributions(book_, basis, Level.PORTFOLIO)}
+    assert rows["A"].weight == pytest.approx(0.40)
