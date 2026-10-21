@@ -19,11 +19,36 @@ This layer takes whichever basis the caller computed and does not ask which it w
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Iterable, Mapping, Sequence
 
 from .basis import FactorBasis, FactorCovariance, active_basis
 from .exposures import ExposureVector, SpecificRisk
 from .metrics import RiskDecomposition, beta, correlation, covariance, decompose
+
+
+class WeightBasis(Enum):
+    """Whether securities the risk model does not cover sit in the weight denominator.
+
+    `FULL` keeps them there, so covered weights sum to less than one and the portfolio's
+    factor exposure is scaled down by the uncovered fraction. **This was the production
+    convention in RAT and is the default here**, and the reason is not a technical one:
+    portfolio managers reconcile weights and market values against their own systems, and a
+    tool whose weights do not tie is a tool they will not believe. Uncovered positions were
+    made visible instead -- they show a blank total risk in the report, and a separate
+    listing named them.
+
+    It looks like an error, because risk is understated by roughly the uncovered fraction.
+    It is a deliberate trade of a small, flagged bias for numbers a reader will trust, and
+    it should not be quietly "corrected".
+
+    `COVERED` renormalises each side over its covered names, so exposures are unscaled and
+    the weights no longer reconcile. Choose it when the risk number matters more than the
+    reconciliation.
+    """
+
+    FULL = "full"
+    COVERED = "covered"
 
 
 @dataclass(frozen=True)
@@ -106,14 +131,29 @@ class CoverageSummary:
     weight_sum: float
     benchmark_weight_sum: float
     uncovered_weight: float
+    covered_weight_sum: float = 0.0
+    covered_benchmark_weight_sum: float = 0.0
+    weight_basis: "WeightBasis" = None  # type: ignore[assignment]
 
     def qualifications(self) -> tuple[str, ...]:
         notes: list[str] = []
         if self.n_uncovered:
-            notes.append(
+            basis = self.weight_basis or WeightBasis.FULL
+            note = (
                 f"{self.n_uncovered} position(s) carrying {self.uncovered_weight:.4f} "
                 "of weight are not covered by the risk model and contribute no risk"
             )
+            if basis is WeightBasis.FULL:
+                note += (
+                    "; weights keep them in the denominator, so factor exposure and every "
+                    "risk number below are scaled down by that fraction"
+                )
+            else:
+                note += (
+                    "; weights were renormalised over covered names, so they no longer "
+                    "reconcile against the full book"
+                )
+            notes.append(note)
         if self.n_benchmark_not_held:
             notes.append(
                 f"{self.n_benchmark_not_held} benchmark name(s) are not held"
@@ -132,6 +172,7 @@ class Portfolio:
     name: str
     positions: tuple[Position, ...]
     benchmark_name: str = ""
+    weight_basis: WeightBasis = WeightBasis.FULL
 
     def __post_init__(self) -> None:
         positions = tuple(self.positions)
@@ -146,8 +187,19 @@ class Portfolio:
         object.__setattr__(self, "positions", positions)
 
     @classmethod
-    def of(cls, name: str, positions: Iterable[Position], benchmark_name: str = "") -> "Portfolio":
-        return cls(name=name, positions=tuple(positions), benchmark_name=benchmark_name)
+    def of(
+        cls,
+        name: str,
+        positions: Iterable[Position],
+        benchmark_name: str = "",
+        weight_basis: WeightBasis = WeightBasis.FULL,
+    ) -> "Portfolio":
+        return cls(
+            name=name,
+            positions=tuple(positions),
+            benchmark_name=benchmark_name,
+            weight_basis=weight_basis,
+        )
 
     def __len__(self) -> int:
         return len(self.positions)
@@ -163,30 +215,41 @@ class Portfolio:
 
     # -- exposures ----------------------------------------------------------
 
-    def _sum(self, weighted) -> ExposureVector:
+    def _covered_weight(self, of) -> float:
+        return float(sum(of(p) for p in self.positions if p.covered))
+
+    def _sum(self, weighted, weight_of) -> ExposureVector:
         total = ExposureVector.zero()
         for position in self.positions:
             if not position.covered:
                 continue
             total = total + weighted(position)
+        if self.weight_basis is WeightBasis.COVERED:
+            covered = self._covered_weight(weight_of)
+            full = float(sum(weight_of(p) for p in self.positions))
+            if abs(covered) > 1e-15 and abs(full - covered) > 1e-15:
+                total = (full / covered) * total
         return total
 
     @property
     def exposure(self) -> ExposureVector:
-        return self._sum(Position.weighted)
+        return self._sum(Position.weighted, lambda p: p.weight)
 
     @property
     def benchmark_exposure(self) -> ExposureVector:
-        return self._sum(Position.benchmark_weighted)
+        return self._sum(Position.benchmark_weighted, lambda p: p.benchmark_weight)
 
     @property
     def active_exposure(self) -> ExposureVector:
-        """Built directly from active weights rather than by differencing two sums.
+        """Portfolio exposure less benchmark exposure.
 
-        Algebraically identical, and it keeps the subtraction at the position level where the
-        two sides are guaranteed to be the same security.
+        Built by differencing the two sides rather than from per-position active weights,
+        because under `WeightBasis.COVERED` each side renormalises by its own factor and the
+        per-position form would silently use the wrong one. Under `FULL` the two are
+        identical, which `test_active_exposure_from_active_weights_equals_the_difference_of_sums`
+        pins.
         """
-        return self._sum(Position.active_weighted)
+        return self.exposure - self.benchmark_exposure
 
     # -- basis --------------------------------------------------------------
 
@@ -228,6 +291,11 @@ class Portfolio:
                 sum(p.benchmark_weight for p in self.positions)
             ),
             uncovered_weight=float(sum(p.weight for p in uncovered)),
+            covered_weight_sum=self._covered_weight(lambda p: p.weight),
+            covered_benchmark_weight_sum=self._covered_weight(
+                lambda p: p.benchmark_weight
+            ),
+            weight_basis=self.weight_basis,
         )
 
 

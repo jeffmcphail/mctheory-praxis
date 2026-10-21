@@ -331,3 +331,88 @@ def test_an_uncovered_positions_factors_do_not_enter_the_basis():
     basis = p.basis(COV)
     assert basis.factor_ids == (1,)
     assert p.exposure.exposures == {1: pytest.approx(0.8)}
+
+
+# --------------------------------------------------------------------------
+# Weight basis: whether uncovered names sit in the denominator
+# --------------------------------------------------------------------------
+
+
+def uncovered_book(basis_choice):
+    from praxis.midoffice.risk.portfolio import WeightBasis
+
+    return Portfolio.of(
+        "F",
+        [
+            Position("A", ExposureVector({1: 1.0}), weight=0.7, benchmark_weight=0.7),
+            Position("U", ExposureVector({2: 4.0}), weight=0.3, benchmark_weight=0.3,
+                     covered=False),
+        ],
+        weight_basis=basis_choice,
+    )
+
+
+def test_full_basis_is_the_default_and_scales_exposure_down():
+    """The production convention: uncovered names stay in the denominator."""
+    from praxis.midoffice.risk.portfolio import WeightBasis
+
+    p = Portfolio.of("F", [Position("A", ExposureVector({1: 1.0}), weight=0.7)])
+    assert p.weight_basis is WeightBasis.FULL
+
+    book = uncovered_book(WeightBasis.FULL)
+    assert book.exposure.exposures == {1: pytest.approx(0.7)}
+
+
+def test_covered_basis_renormalises_over_covered_names():
+    from praxis.midoffice.risk.portfolio import WeightBasis
+
+    book = uncovered_book(WeightBasis.COVERED)
+    # 0.7 of covered weight out of 1.0 total, renormalised to 1.0
+    assert book.exposure.exposures == {1: pytest.approx(1.0)}
+    assert book.benchmark_exposure.exposures == {1: pytest.approx(1.0)}
+
+
+def test_the_two_bases_differ_by_exactly_the_uncovered_fraction():
+    from praxis.midoffice.risk.portfolio import WeightBasis
+
+    full = uncovered_book(WeightBasis.FULL).exposure.exposures[1]
+    covered = uncovered_book(WeightBasis.COVERED).exposure.exposures[1]
+    assert full == pytest.approx(covered * 0.7)
+
+
+def test_coverage_reports_which_basis_was_used():
+    from praxis.midoffice.risk.portfolio import WeightBasis
+
+    full = uncovered_book(WeightBasis.FULL).coverage()
+    assert full.covered_weight_sum == pytest.approx(0.7)
+    assert any("scaled down" in q for q in full.qualifications())
+
+    covered = uncovered_book(WeightBasis.COVERED).coverage()
+    assert any("renormalised" in q for q in covered.qualifications())
+
+
+def test_renormalising_both_sides_keeps_an_index_fund_at_zero_tracking_error():
+    """Each side renormalises by its own factor, so a matched book stays matched."""
+    from praxis.midoffice.risk.portfolio import WeightBasis
+
+    for choice in (WeightBasis.FULL, WeightBasis.COVERED):
+        book = uncovered_book(choice)
+        r = portfolio_risk(book, book.basis(COV))
+        assert r.tracking_error == pytest.approx(0.0, abs=1e-15)
+
+
+def test_a_fully_covered_book_is_identical_under_both_bases():
+    from praxis.midoffice.risk.portfolio import WeightBasis
+
+    positions = [
+        Position("A", ExposureVector({1: 1.0}, SpecificRisk.for_security("A", 0.1)),
+                 weight=0.6, benchmark_weight=0.4),
+        Position("B", ExposureVector({2: 1.0}, SpecificRisk.for_security("B", 0.2)),
+                 weight=0.4, benchmark_weight=0.6),
+    ]
+    full = Portfolio.of("F", positions, weight_basis=WeightBasis.FULL)
+    covered = Portfolio.of("F", positions, weight_basis=WeightBasis.COVERED)
+    assert full.exposure.exposures == covered.exposure.exposures
+    assert portfolio_risk(full, full.basis(COV)).tracking_error == pytest.approx(
+        portfolio_risk(covered, covered.basis(COV)).tracking_error
+    )
