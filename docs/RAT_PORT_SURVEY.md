@@ -402,8 +402,69 @@ reconstructing through one.
 
 ---
 
+## 8. Port status and what it found
+
+**Steps 1-7 are complete for equities** (`src/praxis/midoffice/risk/`, 169 tests).
+
+| Step | Module | State |
+|---|---|---|
+| 1 Maths and basis | `basis.py` | done - `FactorCovariance`, `FactorBasis`, `nearest_psd` |
+| 2 Model objects | `exposures.py`, `factors.py` | done - exposures, specific risk, factor identity and hierarchy |
+| 3 The risk triple | `portfolio.py` | done - positions, portfolios, portfolio/benchmark/active |
+| 4 Contributions | `contributions.py` | done - marginal and component at all three levels |
+| 5 Decomposition | `decomposition.py` | done - factor and factor-group, both proportions |
+| 6 Tail metrics | `tail.py` | done - VaR and expected shortfall, Acklam inverse normal |
+| 7 Coverage | `portfolio.py` | done for risk; the `*IncNc` value family belongs with pricing |
+
+Step 7 split in two on contact. The coverage accounting that affects **risk** -- counts, weight
+sums, exclusion from exposure, qualifications on the result -- is done. The `*IncNc` family is
+not a risk concept at all: it lives in `Portfolio.cs`'s value accumulation and needs prices,
+accrued interest and `getPriceNumeraire`, which is the deferred loading layer. Note also that
+`RiskMarketValue` is **not** a coverage concept despite the name -- it selects dirty or clean
+value from `includeAccruedInterest`. Section 4 of this survey had that wrong.
+
+### Things the original encodes that are easy to get backwards
+
+Each of these cost a read of the C# to establish and would have produced plausible, wrong
+numbers if assumed.
+
+| Finding | Where it bites |
+|---|---|
+| **`fdTotalRisk` is `sqrt(sRisk^2 + x'Fx)`** -- total risk, not common-factor risk | It is the denominator of every factor proportion. Decompose against common-factor risk and the whole report is subtly wrong. It is also why `FactorTree` carries a `SPECIFIC_RISK` constant: the specific row is a named sibling of the factor groups, and factor contributions plus that row sum to total risk. |
+| **`RISK_PROP` does not sum to one; `LITT_PROP` does** | `RISK_PROP` is built from standalone risk and ignores every correlation. Both are reported because the intuitive one does not add up. A reader who assumes it should concludes the numbers are broken. |
+| **RAT's `mctr` is 1/100 of the textbook definition** | `mctr` divides by `100 * risk` and `ctr` multiplies back by 100, so components and percentages agree with the definitions here and only the marginals differ. Exported as `RAT_MARGINAL_SCALE`. |
+| **`cvar` means *contribution to* VaR, not conditional VaR** | The group-level registrations (`VAR`, `CONTRIB_VAR`, `CONDITIONAL_VAR`, `CONTRIB_CONDITIONAL_VAR`) disambiguate it. Reading it the obvious way gives a number wrong by a factor of the weight. Nothing in `tail.py` is called `cvar`. |
+| **Weights keep uncovered names in the denominator** | Production convention, and deliberate: PMs reconcile weights against their own systems and will not believe a tool whose weights do not tie. Risk is understated by roughly the uncovered fraction, and uncovered names are flagged instead. It looks like a bug. `WeightBasis.FULL` is the default; `COVERED` renormalises. |
+| **The factor-set count in `FactorTreeNode` is vestigial** | Stored as a hashtable of factor id to an incrementing count; written in three places, read in none -- every consumer uses `.Keys` or `.Contains`. It is a set. |
+| **Acklam's inverse normal has no refinement step** | So the port reproduces it exactly rather than reaching for `scipy.stats.norm.ppf`, at about 1.15e-9 relative error. `refine=True` adds a Halley step if the digits are ever wanted. |
+
+### Deliberate divergences, and why
+
+| Divergence | Reason |
+|---|---|
+| No `Matrix`/`Vector` wrapper classes | They exist in the C# because .NET had no ndarray. numpy is that wrapper; a class over it is overhead that makes every operation harder to read. |
+| One basis, built from the union of portfolio and benchmark factors | Removes RAT's sparse `expVect` / padded `expVectGlobal` pair. Nothing is left to conform, so the dimensional-mismatch class of defect cannot occur -- the defect MCRLib actually shipped. |
+| Specific risk keyed by security code when no issuer key exists | Same semantics as RAT's `"DEFAULT<n>"` -- unknown issuer correlates with nothing -- without a non-atomic `static` counter in a library with no locking and a background thread. |
+| Factor rollup at construction, tree immutable | RAT needs a separate mutating `setAllNodeFactors()` pass and raises if called in the wrong order; it then catches "leaf has no factors", logs it and continues, so a malformed tree yields a silently incomplete rollup. `build` refuses. |
+| One decomposition implementation, not 54 registrations | A factor is a group of one, so `sqrt(x_g' F x_g)` reduces to `|x_f| sqrt(F_ff)`. Factor-level and group-level are the same function. |
+| VaR decomposition is a rescaling, not a calculation | Both tail measures are `risk * constant` and contributions sum to risk, so scaled contributions sum to the scaled measure. Writing a separate one creates somewhere for it to disagree. |
+| `AmbiguousFactor` raised on a name defined in two models | RAT's single-argument `getFactorId` returns whichever it finds first: harmless with one model loaded, silently wrong with two. |
+| Provenance on the result, not in a log | The one structural change this port makes. See section 5. |
+
+### Still outstanding
+
+- **The value layer**: prices, accrued interest, exposure value, and the `*IncNc` family that
+  depends on them. It produces the weights this package consumes.
+- **The parity harness**: a synthetic model in the expected schema, so the engine can be
+  checked against RAT. The XML path (`LOAD_FROM_XML`) means the fixtures outlive the server
+  that produced them -- one export, not an ongoing dependency.
+- **Fixed income**, per the scoping in section 7.
+
+
+---
+
 *Last updated: 2026-10-17 (Chat: praxis_main_current)*
-*Changes: initial survey. Establishes the compiled surface (~35k lines of 85k), the four-date
+*Changes: 2026-10-21 - section 8 added: port status through step 7, the findings that\nwould have produced plausible wrong numbers if assumed, and the deliberate divergences.\nSection 4's claim that RiskMarketValue is a coverage concept corrected there.\nInitial survey. Establishes the compiled surface (~35k lines of 85k), the four-date
 API signature that corrects the roadmap's interface, the engine/model seam and its one
 inversion, the computation catalogue, the reproducibility inventory concentrated in
 getLatestDate, the FILL_MISSING_PRICES behaviour and the provenance-re-pointing
