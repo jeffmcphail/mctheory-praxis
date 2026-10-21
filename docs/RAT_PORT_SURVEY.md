@@ -464,7 +464,10 @@ numbers if assumed.
 ---
 
 *Last updated: 2026-10-17 (Chat: praxis_main_current)*
-*Changes: 2026-10-21 - section 8 added: port status through step 7, the findings that\nwould have produced plausible wrong numbers if assumed, and the deliberate divergences.\nSection 4's claim that RiskMarketValue is a coverage concept corrected there.\nInitial survey. Establishes the compiled surface (~35k lines of 85k), the four-date
+*Changes: 2026-10-21 - section 8 added: port status through step 7, the findings that
+would have produced plausible wrong numbers if assumed, and the deliberate divergences.
+Section 4's claim that RiskMarketValue is a coverage concept corrected there.
+Initial survey. Establishes the compiled surface (~35k lines of 85k), the four-date
 API signature that corrects the roadmap's interface, the engine/model seam and its one
 inversion, the computation catalogue, the reproducibility inventory concentrated in
 getLatestDate, the FILL_MISSING_PRICES behaviour and the provenance-re-pointing
