@@ -44,6 +44,20 @@ class Position:
     weight: float = 0.0
     benchmark_weight: float = 0.0
     covered: bool = True
+    benchmark_exposure_override: ExposureVector | None = None
+
+    @property
+    def benchmark_exposure(self) -> ExposureVector:
+        """The exposure this security carries on the benchmark side.
+
+        Normally identical to `exposure` -- a security is the same security in both books.
+        It can differ for a bucketed holding whose composition is not the same on the two
+        sides, which is why RAT's `car` has a `BucketSecurity` branch building the active
+        vector as `w*x_port - bw*x_bench` instead of `(w - bw)*x` (`RiskMetrics.cs:2060`).
+        That case is fixed-income and deferred, but the general form costs nothing here and
+        reduces exactly to the simple one when the two are equal.
+        """
+        return self.exposure if self.benchmark_exposure_override is None else self.benchmark_exposure_override
 
     @property
     def active_weight(self) -> float:
@@ -61,10 +75,15 @@ class Position:
         return self.weight * self.exposure
 
     def benchmark_weighted(self) -> ExposureVector:
-        return self.benchmark_weight * self.exposure
+        return self.benchmark_weight * self.benchmark_exposure
 
     def active_weighted(self) -> ExposureVector:
-        return self.active_weight * self.exposure
+        """This position's contribution to active exposure: w*x_port - bw*x_bench.
+
+        Reduces to `(w - bw) * x` whenever the two sides carry the same exposure, which is
+        every case except a bucketed holding.
+        """
+        return self.weighted() - self.benchmark_weighted()
 
 
 @dataclass(frozen=True)
