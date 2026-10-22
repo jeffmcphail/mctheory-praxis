@@ -490,9 +490,21 @@ def test_reference_refuses_a_non_psd_covariance():
         reference_records(case)
 
 
-def test_reference_refuses_a_psd_floor():
+def test_reference_accepts_a_floor_that_triggers_no_repair():
+    """A non-zero floor is fine; what the reference cannot handle is an actual repair.
+
+    This matters because the engine's configured default floor is non-zero. A reference that
+    refused any non-zero floor would only ever exercise a configuration the engine no longer
+    runs, which is a harness quietly testing the wrong thing.
+    """
     case = tiny_case(relative_floor=1e-8)
-    with pytest.raises(UnsupportedCase, match="relative_floor"):
+    assert reference_records(case), "no eigenvalue is below this floor, so nothing is repaired"
+
+
+def test_reference_refuses_a_floor_that_would_repair_the_matrix():
+    """tiny_case has eigenvalues 0.0381 and 0.0919, so a floor of 0.5 clips the smaller one."""
+    case = tiny_case(relative_floor=0.5)
+    with pytest.raises(UnsupportedCase, match="below its floor"):
         reference_records(case)
 
 

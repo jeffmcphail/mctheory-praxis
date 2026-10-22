@@ -176,21 +176,22 @@ def _check_supported(case: ParityCase) -> None:
             f"deliberately does not reproduce; proxy behaviour is covered by the engine's "
             f"own unit tests"
         )
-    if case.relative_floor != 0.0:
-        raise UnsupportedCase(
-            f"case {case.name!r} sets relative_floor={case.relative_floor!r}; this reference "
-            f"requires a covariance that needs no PSD repair, so that the slice the engine "
-            f"builds and the full matrix used here are the same matrix"
-        )
 
 
-def _assert_psd(case: ParityCase) -> None:
-    """Guard, not computation: refuse a case whose covariance is not PSD.
 
-    The engine slices the covariance down to the factors in play and repairs the slice if
-    needed; this reference uses the full matrix.  Those agree only when no repair fires, and
-    a principal submatrix of a PSD matrix is PSD -- so requiring PSD here is exactly the
-    condition under which the two are comparable.
+def _assert_repair_free(case: ParityCase) -> None:
+    """Guard, not computation: refuse a case whose covariance the engine would repair.
+
+    The engine slices the covariance down to the factors in play and repairs the slice if any
+    eigenvalue falls below its floor; this reference uses the published matrix.  The two are
+    comparable exactly when no repair fires, and a principal submatrix of a PSD matrix is
+    PSD, so the condition is checkable on the full matrix.
+
+    Note what this does NOT require: a zero floor.  An earlier version refused any non-zero
+    `relative_floor`, which was both stricter than necessary and quietly wrong once the
+    configured default stopped being zero -- it meant the harness only ever exercised a
+    configuration the engine no longer runs.  The real condition is that nothing sits below
+    the floor, whatever the floor is.
 
     numpy is used for the eigenvalue check and nowhere else.  The check is a precondition on
     the input, not part of the arithmetic under test.
@@ -201,12 +202,22 @@ def _assert_psd(case: ParityCase) -> None:
 
     eigenvalues = np.linalg.eigvalsh(np.array(case.covariance, dtype=float))
     smallest = float(eigenvalues.min())
+    largest = float(eigenvalues.max())
     scale = max(1.0, float(abs(eigenvalues).max()))
     if smallest < -1e-12 * scale:
         raise UnsupportedCase(
             f"covariance in case {case.name!r} is not PSD (smallest eigenvalue "
             f"{smallest:.3e}); the engine would repair the slice it builds and this "
             f"reference would not, so the two are not comparable"
+        )
+    floor = case.relative_floor * max(largest, 0.0)
+    if smallest < floor:
+        below = int((eigenvalues < floor).sum())
+        raise UnsupportedCase(
+            f"case {case.name!r} has {below} eigenvalue(s) below its floor of {floor:.3e} "
+            f"(relative_floor={case.relative_floor!r} of a largest eigenvalue of "
+            f"{largest:.3e}), so the engine would repair the slice while this reference uses "
+            f"the published matrix. PSD repair is covered by the engine's own unit tests."
         )
 
 
@@ -216,7 +227,7 @@ def _assert_psd(case: ParityCase) -> None:
 def reference_records(case: ParityCase) -> tuple[Record, ...]:
     """Every number the engine claims to produce, computed independently."""
     _check_supported(case)
-    _assert_psd(case)
+    _assert_repair_free(case)
     cov = _covariance_map(case)
 
     covered = [p for p in case.positions if p.covered]

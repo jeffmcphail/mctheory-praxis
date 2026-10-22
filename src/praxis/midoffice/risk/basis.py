@@ -23,6 +23,8 @@ from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 
+from .config import DEFAULTS, RiskConfig
+
 
 @dataclass(frozen=True)
 class PSDRepair:
@@ -50,8 +52,9 @@ class PSDRepair:
 def nearest_psd(
     matrix: np.ndarray,
     *,
-    relative_floor: float = 0.0,
-    symmetry_tol: float = 1e-10,
+    relative_floor: float | None = None,
+    symmetry_tol: float | None = None,
+    config: RiskConfig | None = None,
 ) -> tuple[np.ndarray, PSDRepair]:
     """Return the nearest positive semi-definite matrix, by eigenvalue clipping.
 
@@ -68,9 +71,23 @@ def nearest_psd(
     making it one of the largest in the matrix.  `test_repair_does_not_amplify` pins that.
 
     `relative_floor` is expressed as a fraction of the largest eigenvalue, so the floor scales
-    with the matrix.  Zero yields PSD; a small positive value yields positive definite, which
-    matters only if something downstream needs to invert it.
+    with the matrix.  Zero yields PSD; a positive value yields positive definite.
+
+    **The floor is not only about invertibility, and zero is not the safe choice.**  Clipping
+    to exactly zero leaves the matrix singular, and a book lying in a null direction then has
+    its common-factor risk computed as a total cancellation -- the answer comes back 0.0, or
+    worse, as rounding noise.  Measured over 15 matrix shapes, a factor-neutral book retained
+    between -0.7 and 1.7 correct digits at a floor of zero and 9.3 at the calibrated default.
+    `config.psd_relative_floor` carries the calibration; see `RiskConfig` for the table.
+
+    Omit `relative_floor` to take the configured value.  Passing it explicitly overrides the
+    configuration, and passing `0.0` deliberately restores the old singular behaviour.
     """
+    config = config or DEFAULTS
+    relative_floor = (
+        config.psd_relative_floor if relative_floor is None else relative_floor
+    )
+    symmetry_tol = config.symmetry_tolerance if symmetry_tol is None else symmetry_tol
     matrix = np.asarray(matrix, dtype=float)
     if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
         raise ValueError(f"covariance must be square, got shape {matrix.shape}")
@@ -187,7 +204,8 @@ class FactorCovariance:
         factor_ids: Iterable[int],
         *,
         proxies: Mapping[int, int] | None = None,
-        relative_floor: float = 0.0,
+        relative_floor: float | None = None,
+        config: RiskConfig | None = None,
     ) -> FactorBasis:
         """Slice this covariance down to `factor_ids`, repairing PSD if needed.
 
@@ -223,7 +241,9 @@ class FactorCovariance:
 
         idx = np.asarray(rows, dtype=int)
         block = self.matrix[np.ix_(idx, idx)] if idx.size else np.zeros((0, 0))
-        repaired, repair = nearest_psd(block, relative_floor=relative_floor)
+        repaired, repair = nearest_psd(
+            block, relative_floor=relative_floor, config=config
+        )
         return FactorBasis(
             factor_ids=wanted,
             covariance=repaired,
@@ -236,7 +256,8 @@ def active_basis(
     covariance: FactorCovariance,
     *exposure_sets: Mapping[int, float],
     proxies: Mapping[int, int] | None = None,
-    relative_floor: float = 0.0,
+    relative_floor: float | None = None,
+    config: RiskConfig | None = None,
 ) -> FactorBasis:
     """Build the basis spanning every factor in play across the given exposure sets.
 
@@ -247,4 +268,6 @@ def active_basis(
     union: set[int] = set()
     for exposures in exposure_sets:
         union.update(exposures.keys())
-    return covariance.basis_for(union, proxies=proxies, relative_floor=relative_floor)
+    return covariance.basis_for(
+        union, proxies=proxies, relative_floor=relative_floor, config=config
+    )

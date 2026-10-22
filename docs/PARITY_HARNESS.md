@@ -61,9 +61,13 @@ than being approximated:
 * **Proxies** have semantics that are surprising by design -- two factors proxied to one
   target become perfectly correlated and share its variance -- and a reference that guessed
   at them would manufacture disagreements that look like engine bugs.
-* **A PSD floor** means the engine repairs the slice it builds while the reference uses the
-  full matrix. Requiring PSD input is exactly the condition under which the two are
-  comparable, since a principal submatrix of a PSD matrix is PSD.
+* **A covariance the engine would repair** means the engine works from a different matrix
+  than the reference does. The condition is that no eigenvalue sits below the floor, whatever
+  the floor is -- not that the floor is zero. An earlier version refused any non-zero
+  `relative_floor`, which became quietly wrong once the configured default stopped being
+  zero: it meant the harness only ever exercised a configuration the engine no longer runs.
+  The fixtures now default to the configured floor, so the harness tests the engine as it
+  actually runs.
 
 Both behaviours stay covered by the engine's own unit tests.
 
@@ -193,6 +197,26 @@ the same signature.
 
 Calibration tests pin the tolerance boundary from both sides, so it cannot be quietly
 widened until the suite goes green.
+
+### Where the tolerance story stops holding
+
+The 1e-10 tolerance assumes the arithmetic is well conditioned, and that assumption is
+checkable: `RiskDecomposition.digits_intact` reports how many digits survive. Where it is
+comfortable, two machines agree to float noise and the tolerance has six orders of headroom.
+Where amplification is large, two different BLAS implementations disagree without bound -- the
+same factor-neutral book returned exactly `0.0` under OpenBLAS and `1.25e-10` under MKL.
+
+So a parity disagreement on a result whose `digits_intact` is flagged is evidence about the
+BLAS, not about the port. docs/CONDITIONING.md has the detail. This matters most for golden
+files captured on one machine and compared on another.
+
+### Which side is noisier
+
+The reference uses naive sorted Python loops; the engine uses BLAS, whose pairwise summation
+gives error growth of `log(n)` rather than `n`. So on the rare occasions the two disagree at
+the 1e-13 level, **the reference is the more likely culprit**, not the engine. The 1e-10
+default tolerance accommodates that comfortably, but if it ever needs tightening, the
+reference is what will hit the wall first.
 
 ## Running it
 

@@ -20,6 +20,7 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
+from ..risk.config import DEFAULTS
 from .case import FactorSpec, ParityCase, PositionSpec, TailCase
 
 
@@ -37,6 +38,7 @@ def synthetic_case(
     refine: bool = False,
     weight_basis: str = "full",
     exposure_density: float = 0.6,
+    relative_floor: float | None = None,
 ) -> ParityCase:
     """A case with the awkward shapes present by construction."""
     rng = random.Random(seed)
@@ -112,6 +114,13 @@ def synthetic_case(
         covariance=tuple(tuple(float(x) for x in row) for row in matrix),
         positions=tuple(positions),
         weight_basis=weight_basis,
+        # Default to the CONFIGURED floor, not zero, so the harness exercises the engine as
+        # it actually runs. The generator's covariance is strictly positive definite with a
+        # condition number far below 1/floor, so no repair fires and the reference stays
+        # comparable.
+        relative_floor=(
+            DEFAULTS.psd_relative_floor if relative_floor is None else relative_floor
+        ),
         tails=tuple(TailCase(confidence=c, refine=refine) for c in confidences),
         groups={g: "Total Risk" for g in groups},
         source=f"synthetic:synthetic_case:seed={seed}",

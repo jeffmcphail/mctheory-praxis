@@ -1,0 +1,66 @@
+# Mid-office market risk engine -- numerical settings.
+#
+# Every value here was chosen by measurement, and the measurement is recorded in
+# src/praxis/midoffice/risk/config.py beside each field. Change a value here rather than in
+# the code; the engine records which file it loaded and that record travels onto the result.
+#
+# This file is optional. With it absent the engine uses the same values as defaults, so
+# deleting it changes nothing. Load order: an explicit RiskConfig passed to a function, then
+# $PRAXIS_MIDOFFICE_RISK_CONFIG, then this file found by walking up from the working
+# directory, then the built-in defaults.
+
+[risk]
+
+# Eigenvalue clipping floor in nearest_psd, as a FRACTION of the largest eigenvalue.
+#
+# Calibrated 2026-10-21 over 15 configurations against mpmath at 50 digits:
+#
+#   floor | factor-neutral book | long-only distortion | margin vs 0.01bp reporting
+#   ------|---------------------|----------------------|---------------------------
+#   0.0   |  -0.7 digits (noise)|  --                  |  --
+#   1e-8  |   9.3 digits        |  9.9e-06 bps         |  1011x     <-- default
+#   1e-6  |  11.4 digits        |  9.9e-04 bps         |    10x
+#   1e-4  |  13.4 digits        |  9.9e-02 bps         |   0.1x  EXCEEDS PRECISION
+#
+# Distortion is linear in this value; precision gained is logarithmic. 1e-8 is the knee.
+# On a well-conditioned matrix (more observations than factors, no negative eigenvalues)
+# this setting is a measured no-op: nearest_psd only touches eigenvalues already below the
+# floor, so distortion was exactly zero at every value tested.
+#
+# 0.0 leaves the matrix singular and reports a factor-neutral book's risk as exactly 0.0.
+# That is a false number, not an imprecise one. Do not set it to 0.0 without a reason.
+psd_relative_floor = 1e-8
+
+# Largest max|A - A.T| accepted before nearest_psd refuses the matrix. Strict on purpose:
+# an asymmetric covariance means the producer is wrong, and averaging it silently would
+# hide that while changing every number downstream.
+symmetry_tolerance = 1e-10
+
+# Variance below which a risk number is treated as zero rather than square-rooted. Measured
+# float noise on an O(1) variance over a few hundred thousand terms is ~1e-13.
+risk_tolerance = 1e-12
+
+# Qualify a risk number when fewer than this many decimal digits survive the arithmetic.
+# The reported figure is a conservative bound, measured to understate reality by about 2.6
+# digits, so 10 here means roughly 12.6 real digits -- a wide margin over the 4 or 5
+# significant figures any report needs.
+conditioning_warn_digits = 10.0
+
+# Annualisation basis for horizon scaling. RAT hardcodes 252 (getVarMultiplier).
+trading_days = 252.0
+
+# Tail defaults when a caller does not specify.
+default_confidence = 0.95
+default_horizon_days = 1.0
+
+# Halley refinement on Acklam's inverse normal CDF. false matches RAT, which uses Acklam
+# unrefined with a relative error of 1.15e-9. Keep false while parity against production
+# output matters. Note VaR carries that error linearly while expected shortfall carries z^2
+# of it -- 2.7x at 95% confidence, 5.4x at 99%.
+refine_inverse_normal = false
+
+# "full" keeps risk-model-uncovered names in the weight denominator; "covered" redistributes
+# their weight across the covered names. "full" was the production convention in RAT, because
+# portfolio managers reconcile weights against their own systems and will not believe a tool
+# whose weights do not tie.
+weight_basis = "full"
