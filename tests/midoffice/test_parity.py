@@ -37,6 +37,7 @@ from praxis.midoffice.parity.engine import engine_records
 from praxis.midoffice.parity.harness import KNOWN_GAPS, run_parity
 from praxis.midoffice.parity.record import (
     COMMON_FACTOR_RISK,
+    DECOMPOSITION_SUMS_TO,
     COVERAGE_COUNT,
     COVERAGE_WEIGHT,
     CTR_COMMON_FACTOR,
@@ -203,6 +204,22 @@ MUTATIONS = [
         id="weight_basis",
     ),
     pytest.param(
+        # Move one factor from its group to the other. Nothing about the book changes, so
+        # every factor-level and position-level number must be identical; only the group
+        # partition moves. A harness blind to the tree would report no disagreement at all.
+        lambda c: replace(
+            c,
+            factors=tuple(
+                replace(f, group="G2" if f.group == "G1" else "G1")
+                if f.factor_id == c.factors[0].factor_id
+                else f
+                for f in c.factors
+            ),
+        ),
+        {ROW_CONTRIBUTION, DECOMPOSITION_SUMS_TO},
+        id="group_membership",
+    ),
+    pytest.param(
         lambda c: replace(c, tails=(TailCase(0.99),)),
         {VALUE_AT_RISK, EXPECTED_SHORTFALL},
         id="tail_confidence",
@@ -240,6 +257,73 @@ def test_mutating_one_input_is_detected(mutate, expected_metrics):
     assert expected_metrics <= moved, (
         f"mutation did not move {sorted(expected_metrics - moved)}; it moved {sorted(moved)}"
     )
+
+
+def test_group_records_are_actually_emitted():
+    """Otherwise the group-decomposition coverage claim is hollow."""
+    case = synthetic_case(seed=7)
+    details = {r.detail for r in reference_records(case)}
+    assert "group" in details, "no root-level group decomposition records"
+    assert {f"group:{c}" for c in case.root_children()} <= details, "no drill-down records"
+    counts = {d: sum(1 for r in reference_records(case) if r.detail == d) for d in details}
+    assert counts["group"] > 20, counts
+
+
+def test_group_drill_down_sums_to_the_parent_contribution():
+    """The partition property, checked through the harness on both implementations.
+
+    This is the identity the engine's leaf drill-down used to violate: it returned the whole
+    basis, so the rows summed to total risk rather than to the group's own contribution. Both
+    sides are checked, because the engine agreeing with a reference that made the same
+    mistake would prove nothing.
+    """
+    case = synthetic_case(seed=7)
+    for records in (reference_records(case), engine_records(case)):
+        values = index(records)
+        for level in ("portfolio", "benchmark", "active"):
+            for child in case.root_children():
+                at_root = values[(ROW_CONTRIBUTION, level, child, "group")]
+                drilled = values[(DECOMPOSITION_SUMS_TO, level, "", f"group:{child}")]
+                assert drilled == pytest.approx(at_root, rel=1e-12), (level, child)
+
+
+def test_root_group_decomposition_sums_to_total_risk():
+    case = synthetic_case(seed=7)
+    for records in (reference_records(case), engine_records(case)):
+        values = index(records)
+        for level in ("portfolio", "benchmark", "active"):
+            assert values[(DECOMPOSITION_SUMS_TO, level, "", "group")] == pytest.approx(
+                values[(TOTAL_RISK, level, "", "")], rel=1e-12
+            )
+            assert values[(DECOMPOSITION_SUMS_TO, level, "", "factor")] == pytest.approx(
+                values[(TOTAL_RISK, level, "", "")], rel=1e-12
+            )
+
+
+def test_moving_a_factor_between_groups_leaves_the_factor_rows_alone():
+    """Regrouping repartitions the risk; it does not change the book.
+
+    So every factor-level and position-level number must be bit-identical, and only the group
+    rows may move. This is the assertion that catches a group decomposition accidentally
+    wired to the wrong vector.
+    """
+    case = synthetic_case(seed=7)
+    moved = replace(
+        case,
+        factors=tuple(
+            replace(f, group="G2" if f.group == "G1" else "G1")
+            if f.factor_id == case.factors[0].factor_id
+            else f
+            for f in case.factors
+        ),
+    )
+    before, after = index(engine_records(case)), index(engine_records(moved))
+    untouched = [k for k in before if not k[3].startswith("group")]
+    assert untouched, "nothing to compare"
+    for key in untouched:
+        assert after[key] == before[key], key
+    group_keys = [k for k in before if k[3].startswith("group")]
+    assert any(after[k] != before[k] for k in group_keys), "the group rows did not move"
 
 
 def test_every_mutation_is_distinguishable():

@@ -33,11 +33,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from statistics import NormalDist
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 from .case import ParityCase, PositionSpec
 from .record import (
     BETA,
+    DECOMPOSITION_SUMS_TO,
     CORRELATION,
     COMMON_FACTOR_RISK,
     COVERAGE_COUNT,
@@ -221,6 +222,115 @@ def _assert_repair_free(case: ParityCase) -> None:
         )
 
 
+def _factors_under(case: ParityCase) -> dict[str, tuple[int, ...]]:
+    """Roll factors up the group tree, independently of `FactorTree`.
+
+    Repeated upward propagation until stable rather than a topological walk: group trees are
+    shallow, and the engine's own builder is the thing this is meant not to share.
+    """
+    own = case.leaf_factors()
+    parent_of = dict(case.groups)
+    nodes = set(parent_of) | set(parent_of.values()) | set(own)
+    under: dict[str, set[int]] = {n: set(own.get(n, ())) for n in nodes}
+    changed = True
+    while changed:
+        changed = False
+        for child, parent in parent_of.items():
+            before = len(under[parent])
+            under[parent] |= under[child]
+            if len(under[parent]) != before:
+                changed = True
+    return {n: tuple(sorted(v)) for n, v in under.items()}
+
+
+def _emit_decomposition(
+    emit,
+    level: str,
+    detail: str,
+    v: _Vector,
+    cov: Mapping[int, Mapping[int, float]],
+    basis_ids: Sequence[int],
+    parts: Sequence[tuple[str, tuple[int, ...]]],
+    *,
+    include_specific: bool,
+) -> None:
+    """One decomposition over an arbitrary partition.
+
+    A factor-level decomposition is this with singleton parts and a group-level one is this
+    with the groups' factor sets, which is the whole reason the engine has a single
+    `_decompose`. Writing it once here too keeps the two comparable on the multi-factor
+    algebra rather than only on the singleton case that a factor decomposition exercises.
+    """
+    total = _risk(v, cov)
+    specific_variance = _dot_specific(v.specific, v.specific)
+    fx = {
+        a: sum(cov[a][b] * v.exposures.get(b, 0.0) for b in sorted(v.exposures))
+        for a in basis_ids
+    }
+    running = 0.0
+    for name, ids in parts:
+        present = [f for f in ids if f in basis_ids]
+        if total <= _RISK_TOL or not present:
+            # The engine zeroes every field, the exposure included, when there is no risk to
+            # decompose or no factor of this part in the basis. Reporting a live exposure
+            # beside dead rows would be the more informative answer and the wrong one.
+            for metric in (
+                ROW_EXPOSURE,
+                ROW_STANDALONE,
+                ROW_MARGINAL,
+                ROW_CONTRIBUTION,
+                ROW_RISK_PROPORTION,
+                ROW_LITTERMAN_PROPORTION,
+            ):
+                emit(metric, level, name, detail, 0.0)
+            continue
+        x_g = {f: v.exposures.get(f, 0.0) for f in present}
+        exposure = sum(x_g.values())
+        standalone = math.sqrt(max(_quad(x_g, cov, x_g), 0.0))
+        contribution = sum(x_g[f] * fx[f] for f in present) / total
+        # Per unit of the part's own exposure. For a single factor that is unambiguous; for a
+        # group it is the contribution spread over the net exposure, which is meaningless when
+        # the net is zero and is reported as zero there rather than as a division.
+        marginal = (
+            fx[present[0]] / total
+            if len(present) == 1
+            else (contribution / exposure if abs(exposure) > _RISK_TOL else 0.0)
+        )
+        emit(ROW_EXPOSURE, level, name, detail, exposure)
+        emit(ROW_STANDALONE, level, name, detail, standalone)
+        emit(ROW_MARGINAL, level, name, detail, marginal)
+        emit(ROW_CONTRIBUTION, level, name, detail, contribution)
+        emit(ROW_RISK_PROPORTION, level, name, detail, (standalone / total) ** 2)
+        emit(ROW_LITTERMAN_PROPORTION, level, name, detail, contribution / total)
+        running += contribution
+
+    if include_specific:
+        if total <= _RISK_TOL:
+            for metric in (
+                ROW_STANDALONE,
+                ROW_CONTRIBUTION,
+                ROW_RISK_PROPORTION,
+                ROW_LITTERMAN_PROPORTION,
+            ):
+                emit(metric, level, SPECIFIC_ROW_NAME, detail, 0.0)
+        else:
+            specific_risk = math.sqrt(max(specific_variance, 0.0))
+            specific_contribution = specific_variance / total
+            emit(ROW_STANDALONE, level, SPECIFIC_ROW_NAME, detail, specific_risk)
+            emit(ROW_CONTRIBUTION, level, SPECIFIC_ROW_NAME, detail, specific_contribution)
+            emit(
+                ROW_RISK_PROPORTION, level, SPECIFIC_ROW_NAME, detail,
+                (specific_risk / total) ** 2,
+            )
+            emit(
+                ROW_LITTERMAN_PROPORTION, level, SPECIFIC_ROW_NAME, detail,
+                specific_contribution / total,
+            )
+            running += specific_contribution
+
+    emit(DECOMPOSITION_SUMS_TO, level, "", detail, running)
+
+
 # --- the computation ---------------------------------------------------------------------
 
 
@@ -360,41 +470,37 @@ def reference_records(case: ParityCase) -> tuple[Record, ...]:
 
     # -- factor decomposition ------------------------------------------------------
     names = case.factor_names
+    factor_parts = [(names.get(f, str(f)), (f,)) for f in basis_ids]
     for level in LEVELS:
-        v = aggregates[level]
-        total = _risk(v, cov)
-        specific_variance = _dot_specific(v.specific, v.specific)
-        # F x, needed for the single-factor marginal.
-        fx = {
-            a: sum(cov[a][b] * v.exposures.get(b, 0.0) for b in sorted(v.exposures))
-            for a in basis_ids
-        }
-        for f in basis_ids:
-            name = names.get(f, str(f))
-            x_f = v.exposures.get(f, 0.0)
-            emit(ROW_EXPOSURE, level, name, "factor", x_f)
-            if total <= _RISK_TOL:
-                for metric in (ROW_STANDALONE, ROW_MARGINAL, ROW_CONTRIBUTION, ROW_RISK_PROPORTION, ROW_LITTERMAN_PROPORTION):
-                    emit(metric, level, name, "factor", 0.0)
-                continue
-            standalone = math.sqrt(max(x_f * cov[f][f] * x_f, 0.0))
-            contribution = x_f * fx[f] / total
-            emit(ROW_STANDALONE, level, name, "factor", standalone)
-            emit(ROW_MARGINAL, level, name, "factor", fx[f] / total)
-            emit(ROW_CONTRIBUTION, level, name, "factor", contribution)
-            emit(ROW_RISK_PROPORTION, level, name, "factor", (standalone / total) ** 2)
-            emit(ROW_LITTERMAN_PROPORTION, level, name, "factor", contribution / total)
-        # The specific row completes the partition, which is what makes the rows sum.
-        if total <= _RISK_TOL:
-            for metric in (ROW_STANDALONE, ROW_CONTRIBUTION, ROW_RISK_PROPORTION, ROW_LITTERMAN_PROPORTION):
-                emit(metric, level, SPECIFIC_ROW_NAME, "factor", 0.0)
-        else:
-            specific_risk = math.sqrt(max(specific_variance, 0.0))
-            specific_contribution = specific_variance / total
-            emit(ROW_STANDALONE, level, SPECIFIC_ROW_NAME, "factor", specific_risk)
-            emit(ROW_CONTRIBUTION, level, SPECIFIC_ROW_NAME, "factor", specific_contribution)
-            emit(ROW_RISK_PROPORTION, level, SPECIFIC_ROW_NAME, "factor", (specific_risk / total) ** 2)
-            emit(ROW_LITTERMAN_PROPORTION, level, SPECIFIC_ROW_NAME, "factor", specific_contribution / total)
+        _emit_decomposition(
+            emit, level, "factor", aggregates[level], cov, basis_ids, factor_parts,
+            include_specific=True,
+        )
+
+    # -- group decomposition -------------------------------------------------------
+    #
+    # The root partition is the root's children plus the specific row, so it sums to total
+    # risk. Drilling into a child partitions that child and sums to the child's own
+    # contribution -- NOT to total risk, which is what the engine's leaf branch used to
+    # return. Specific risk sits under no factor group, so it appears only at the root.
+    if case.has_group_tree:
+        under = _factors_under(case)
+        root_parts = [(child, under[child]) for child in case.root_children()]
+        for level in LEVELS:
+            _emit_decomposition(
+                emit, level, "group", aggregates[level], cov, basis_ids, root_parts,
+                include_specific=True,
+            )
+            for child in case.root_children():
+                grandchildren = sorted(c for c, p in case.groups.items() if p == child)
+                if grandchildren:
+                    child_parts = [(g, under[g]) for g in grandchildren]
+                else:
+                    child_parts = [(names.get(f, str(f)), (f,)) for f in under[child]]
+                _emit_decomposition(
+                    emit, level, f"group:{child}", aggregates[level], cov, basis_ids,
+                    child_parts, include_specific=False,
+                )
 
     # -- tail ----------------------------------------------------------------------
     normal = NormalDist()

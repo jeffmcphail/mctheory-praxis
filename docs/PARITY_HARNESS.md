@@ -32,7 +32,7 @@ record sets and does not know which is which. That symmetry is deliberate: a com
 written against one side's data structure can only report on numbers that side produced, so
 a metric that silently stopped being emitted would show up as a clean pass.
 
-A synthetic case produces around 600 records.
+A synthetic case produces around 770 records.
 
 ## What makes the reference independent
 
@@ -154,6 +154,39 @@ the next reader knows it is understood rather than assumed.
 Covered above. My first tolerance assumed both tail measures were linear in `z`; ES failed
 at 2.99e-9 against a 2.3e-9 bound, and the discrepancy was derivable rather than noise.
 
+### 4. Drilling into a leaf group returned the whole basis *(engine defect, fixed)*
+
+`group_decomposition(vector, basis, tree, parent=node)` is documented to partition `node`.
+For an interior node it did. For a **leaf** -- and in a two-level model every group is a leaf,
+since factors attach to leaves rather than being nodes themselves -- `children_of(node)` is
+empty, and the function fell through to `factor_decomposition(vector, basis)`. That decomposes
+the *entire basis*, so "break this group down" silently became "break the book down by
+factor": the rows covered every factor in the model, `parent` came back empty, and the
+contributions summed to total risk instead of to the group's own contribution.
+
+Everything about the output looked plausible. `sums_to` matching `total_risk` is exactly what
+a correct root-level decomposition does, so the one number that could have betrayed it was
+the number that made it look right.
+
+The existing suite did not merely miss this. It **asserted** it:
+
+```python
+def test_a_leaf_parent_falls_through_to_factor_level():
+    d = group_decomposition(vector, basis, t, parent="Beta")
+    assert [r.name for r in d.factor_rows] == [str(f) for f in basis.factor_ids]
+```
+
+That test was written against what the code did rather than against what the operation means,
+and its name records the bug as though it were the design. Five tests replace it, pinning the
+contract instead: a leaf partitions its own factors, the rows sum to that node's contribution
+rather than to total risk, no specific row appears below the root, and the interior path that
+was already correct stays that way.
+
+Contribution is additive over a partition, so `sum(contribution of f for f in node)` must
+equal `contribution(node)` as measured one level up. That identity is now checked through the
+harness on **both** implementations -- the engine agreeing with a reference that made the same
+mistake would prove nothing.
+
 ### Open gap
 
 `CoverageSummary` reports uncovered weight for the portfolio only. The benchmark's uncovered
@@ -163,18 +196,17 @@ delete the line.
 
 ## Coverage
 
-**Compared** (about 600 records per synthetic case): total, common-factor and specific risk
+**Compared** (about 770 records per synthetic case): total, common-factor and specific risk
 at portfolio, benchmark and active level; beta; correlation; tracking error; coverage weights
 and counts; per-position weight, component, marginal, percent, common-factor and specific
 contributions at all three levels; per-factor exposure, standalone risk, marginal,
 contribution, risk proportion and Litterman proportion at all three levels; VaR and expected
-shortfall at every confidence and horizon in the case.
+shortfall at every confidence and horizon in the case; the root-level group decomposition
+and a drill-down into each of the root's children, with the sum of each decomposition's
+contributions compared as a number of its own.
 
 **Not yet compared:**
 
-* **Group decomposition.** `group_decomposition` is the same `_decompose` with multi-factor
-  parts, so extending the reference is mechanical, but it is not done and the harness says
-  nothing about it today. This is the first thing to add.
 * Proxies and PSD repair -- refused by the reference, by design, covered by unit tests.
 * `position_risk` standalone numbers.
 * The value layer, which does not exist yet.
@@ -187,9 +219,9 @@ agreement tests are only as good as the shapes the fixtures contain.
 
 ### The tests that make the agreement mean something
 
-`test_parity.py` has 61 tests in three groups. The middle group is the one that matters:
-each of ten mutations perturbs exactly one input and asserts both that the harness reports a
-disagreement **and** that it lands on the metrics that input should influence. If a mutation
+`test_parity.py` has 67 tests in three groups. The middle group is the one that matters:
+each of eleven mutations perturbs exactly one input and asserts both that the harness reports
+a disagreement **and** that it lands on the metrics that input should influence. If a mutation
 produced no mismatch, that input would not be reaching any number the harness checks -- the
 agreement would be real but vacuous over that part of the surface.
 `test_every_mutation_is_distinguishable` additionally requires that no two mutations produce

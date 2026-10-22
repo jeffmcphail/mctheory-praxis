@@ -192,6 +192,44 @@ class ParityCase:
     def factor_names(self) -> dict[int, str]:
         return {f.factor_id: f.name for f in self.factors}
 
+    # -- group tree ------------------------------------------------------------------
+    #
+    # Both sides of the comparison read these, which is deliberate: *whether* a case has a
+    # comparable group tree is a property of the fixture, not a computation, and the two
+    # sides disagreeing about the scope of the comparison would show up as a flood of
+    # missing records rather than as the numeric disagreement it is not.
+
+    @property
+    def has_group_tree(self) -> bool:
+        """True when the groups form a tree that spans every factor.
+
+        A factor with no group would sit under no child of the root, and
+        `group_decomposition` refuses that rather than silently dropping its risk.
+        """
+        return bool(self.groups) and all(f.group for f in self.factors)
+
+    @property
+    def group_root(self) -> str:
+        """The unique node that is never a child, or empty if there isn't exactly one."""
+        children = set(self.groups)
+        parents = set(self.groups.values())
+        roots = sorted(parents - children)
+        return roots[0] if len(roots) == 1 else ""
+
+    def group_edges(self) -> list[tuple[str, str]]:
+        """(parent, child) pairs, which is the order `FactorTree.build` expects."""
+        return [(parent, child) for child, parent in sorted(self.groups.items())]
+
+    def leaf_factors(self) -> dict[str, list[int]]:
+        out: dict[str, list[int]] = {}
+        for f in self.factors:
+            out.setdefault(f.group, []).append(f.factor_id)
+        return {k: sorted(v) for k, v in sorted(out.items())}
+
+    def root_children(self) -> tuple[str, ...]:
+        root = self.group_root
+        return tuple(sorted(c for c, p in self.groups.items() if p == root))
+
     def validate(self) -> None:
         """Refuse a case that cannot produce a meaningful comparison.
 

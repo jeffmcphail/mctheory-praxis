@@ -115,10 +115,61 @@ def test_a_missing_child_is_refused_when_drilling_in_too():
     assert d.check() == pytest.approx(0.0, abs=1e-12)
 
 
-def test_a_leaf_parent_falls_through_to_factor_level():
+def test_drilling_into_a_leaf_decomposes_that_leafs_own_factors():
+    """A leaf's partition is its own factors, not the whole basis.
+
+    This replaces a test that asserted the opposite. The earlier implementation fell through
+    to `factor_decomposition(vector, basis)` at a leaf, and the test -- written against what
+    the code did rather than against what the operation means -- asserted exactly that. So
+    the suite did not merely miss the defect, it protected it. The parity harness found it by
+    comparing against an implementation written from the definitions instead.
+    """
     t, _, basis, vector = wide_setup()
-    d = group_decomposition(vector, basis, t, parent="Beta")
-    assert [r.name for r in d.factor_rows] == [str(f) for f in basis.factor_ids]
+    d = group_decomposition(vector, basis, t, parent="Value")
+    assert [r.name for r in d.factor_rows] == ["10", "11"]
+    assert d.parent == "Value"
+    assert len(d.rows) < len(basis.factor_ids), "the whole basis is a different question"
+
+
+def test_a_leaf_drill_down_sums_to_that_leafs_contribution():
+    """The partition property, one level down.
+
+    Contribution is additive over a partition, so the factors under `Value` must sum to the
+    contribution `Value` itself carries within `Style`. The old behaviour summed to the
+    book's total risk, which is the tell that looked like success.
+    """
+    t, _, basis, vector = wide_setup()
+    within_style = {
+        r.name: r.contribution
+        for r in group_decomposition(vector, basis, t, parent="Style")
+    }
+    drilled = group_decomposition(vector, basis, t, parent="Value")
+    assert drilled.sums_to == pytest.approx(within_style["Value"], rel=1e-12)
+    assert drilled.sums_to != pytest.approx(drilled.total_risk, rel=1e-6)
+
+
+def test_an_interior_drill_down_sums_to_its_own_contribution():
+    """The path that was already correct, pinned so it stays that way."""
+    t, _, basis, vector = wide_setup()
+    at_root = {r.name: r.contribution for r in group_decomposition(vector, basis, t)}
+    drilled = group_decomposition(vector, basis, t, parent="Market")
+    assert [r.name for r in drilled.factor_rows] == ["Beta"]
+    assert drilled.sums_to == pytest.approx(at_root["Market"], rel=1e-12)
+
+
+def test_a_leaf_drill_down_carries_no_specific_row():
+    """Specific risk sits under no factor group, so it belongs only to the root partition."""
+    t, _, basis, vector = wide_setup()
+    assert not any(r.is_specific for r in group_decomposition(vector, basis, t, parent="Beta").rows)
+    assert any(r.is_specific for r in group_decomposition(vector, basis, t).rows)
+
+
+def test_a_leaf_drill_down_accepts_factor_names():
+    t, _, basis, vector = wide_setup()
+    d = group_decomposition(
+        vector, basis, t, parent="Value", names={10: "Book to Price", 11: "Earnings Yield"}
+    )
+    assert [r.name for r in d.factor_rows] == ["Book to Price", "Earnings Yield"]
 
 
 # --------------------------------------------------------------------------

@@ -18,13 +18,15 @@ import numpy as np
 
 from ..risk.basis import FactorCovariance, active_basis
 from ..risk.contributions import Level, contributions
-from ..risk.decomposition import factor_decomposition
+from ..risk.decomposition import Decomposition, factor_decomposition, group_decomposition
 from ..risk.exposures import ExposureVector, SpecificRisk
+from ..risk.factors import FactorTree
 from ..risk.portfolio import Portfolio, Position, WeightBasis, portfolio_risk
 from ..risk.tail import TailSpec, tail_risk
 from .case import ParityCase, PositionSpec
 from .record import (
     BETA,
+    DECOMPOSITION_SUMS_TO,
     COMMON_FACTOR_RISK,
     CORRELATION,
     COVERAGE_COUNT,
@@ -101,6 +103,13 @@ def build_covariance(case: ParityCase) -> FactorCovariance:
     )
 
 
+def build_tree(case: ParityCase) -> FactorTree | None:
+    """The engine's own tree, or None when the fixture has no comparable one."""
+    if not case.has_group_tree:
+        return None
+    return FactorTree.build(case.group_edges(), case.leaf_factors())
+
+
 def engine_records(case: ParityCase) -> tuple[Record, ...]:
     """Every number the engine produces for this case, flattened."""
     portfolio = build_portfolio(case)
@@ -153,21 +162,41 @@ def engine_records(case: ParityCase) -> tuple[Record, ...]:
             emit(CTR_COMMON_FACTOR, label, c.security_code, "", c.common_factor)
             emit(CTR_SPECIFIC, label, c.security_code, "", c.specific)
 
-    # -- factor decomposition ------------------------------------------------------
+    # -- factor and group decomposition --------------------------------------------
     names = case.factor_names
-    for label, vector in (
+    sides = (
         ("portfolio", portfolio.exposure),
         ("benchmark", portfolio.benchmark_exposure),
         ("active", portfolio.active_exposure),
-    ):
-        for row in factor_decomposition(vector, basis, names=names):
+    )
+
+    def emit_rows(label: str, detail: str, decomposition: Decomposition) -> None:
+        for row in decomposition:
             if not row.is_specific:
-                emit(ROW_EXPOSURE, label, row.name, "factor", row.exposure)
-                emit(ROW_MARGINAL, label, row.name, "factor", row.marginal)
-            emit(ROW_STANDALONE, label, row.name, "factor", row.standalone_risk)
-            emit(ROW_CONTRIBUTION, label, row.name, "factor", row.contribution)
-            emit(ROW_RISK_PROPORTION, label, row.name, "factor", row.risk_proportion)
-            emit(ROW_LITTERMAN_PROPORTION, label, row.name, "factor", row.litterman_proportion)
+                emit(ROW_EXPOSURE, label, row.name, detail, row.exposure)
+                emit(ROW_MARGINAL, label, row.name, detail, row.marginal)
+            emit(ROW_STANDALONE, label, row.name, detail, row.standalone_risk)
+            emit(ROW_CONTRIBUTION, label, row.name, detail, row.contribution)
+            emit(ROW_RISK_PROPORTION, label, row.name, detail, row.risk_proportion)
+            emit(
+                ROW_LITTERMAN_PROPORTION, label, row.name, detail,
+                row.litterman_proportion,
+            )
+        emit(DECOMPOSITION_SUMS_TO, label, "", detail, decomposition.sums_to)
+
+    for label, vector in sides:
+        emit_rows(label, "factor", factor_decomposition(vector, basis, names=names))
+
+    tree = build_tree(case)
+    if tree is not None:
+        for label, vector in sides:
+            emit_rows(label, "group", group_decomposition(vector, basis, tree, names=names))
+            for child in case.root_children():
+                emit_rows(
+                    label,
+                    f"group:{child}",
+                    group_decomposition(vector, basis, tree, parent=child, names=names),
+                )
 
     # -- tail ----------------------------------------------------------------------
     for tail in case.tails:

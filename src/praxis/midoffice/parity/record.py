@@ -42,6 +42,12 @@ ROW_CONTRIBUTION = "row_contribution"
 ROW_RISK_PROPORTION = "row_risk_proportion"
 ROW_LITTERMAN_PROPORTION = "row_litterman_proportion"
 
+# The sum of a decomposition's contributions. Worth comparing rather than merely asserting:
+# a decomposition that sums to the wrong total is how a mis-scoped partition announces
+# itself, and the leaf drill-down bug summed to the book's total risk instead of the group's
+# contribution -- a wrong answer that looked right.
+DECOMPOSITION_SUMS_TO = "decomposition_sums_to"
+
 VALUE_AT_RISK = "value_at_risk"
 EXPECTED_SHORTFALL = "expected_shortfall"
 

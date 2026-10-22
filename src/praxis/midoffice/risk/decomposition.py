@@ -210,17 +210,36 @@ def group_decomposition(
     tree: FactorTree,
     *,
     parent: str | None = None,
+    names: Mapping[int, str] | None = None,
 ) -> Decomposition:
     """Decompose risk across the children of a group, plus the specific-risk row.
 
     Decomposing the children of a node -- rather than every node in the tree -- is what makes
     the parts a partition, which is what makes them sum. Call it again on a child to drill in.
+
+    At a leaf the partition is the node's own factors, one row each. That case is easy to get
+    wrong in a way that looks right: an earlier version fell through to
+    `factor_decomposition(vector, basis)`, which decomposes the *whole basis* and so answered
+    "break the book down by factor" instead of "break this group down". The rows summed to
+    total risk rather than to the group's contribution, `parent` came back empty, and nothing
+    about the output said the question had been changed. The parity harness found it.
+
+    Rows at a leaf cover every factor under the node, including any the portfolio has no
+    exposure to, which get a zero row. That matches the group level, where every child gets a
+    row whether or not it is represented in the basis.
     """
     parent = parent or tree.root
     is_root = parent == tree.root
     children = tree.children_of(parent)
     if not children:
-        return factor_decomposition(vector, basis)
+        # A leaf: its own factors are the partition, and they sum to this node's
+        # contribution, not to the book's total risk.
+        labels = dict(names or {})
+        own = tuple(sorted(tree.factors_under(parent)))
+        leaf_parts = [(labels.get(f, str(f)), (f,)) for f in own]
+        return _decompose(
+            vector, basis, leaf_parts, include_specific=is_root, parent=parent
+        )
     parts = [(child, tuple(sorted(tree.factors_under(child)))) for child in children]
 
     # A missing child loses risk silently, so check coverage of whatever this call claims to
