@@ -36,7 +36,15 @@ def bond(code="T 4.5 30", qty=5000.0, bench=5000.0):
 
 
 def future(code="ESZ6", contracts=20.0, bench=0.0, index=5500.0, size=50.0, mark=12.5):
-    """A future: tiny market value, large notional. The case the axes exist for."""
+    """A future: tiny market value, large notional. The case the axes exist for.
+
+    The non-zero `mark` is deliberately NOT what RAT would produce. `FIFutureSecurity`'s unit
+    market value is literally `return 0.0;`, so a real future has exactly zero market value --
+    `test_market.py::test_a_future_has_no_market_value_and_a_notional_exposure` covers the
+    faithful case. This fixture gives it a mark so that the two bases are independently
+    non-zero, which exercises arithmetic that a zero would hide. Do not read it as the
+    convention.
+    """
     return PositionValue(
         code,
         clean_price=mark,

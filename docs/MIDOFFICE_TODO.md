@@ -67,6 +67,34 @@ path gives clean market value rather than clean exposure value.
 
 ---
 
+## Open: the price query must pass the multiplier through as a field
+
+The `.01` multiplier on RAT's fixed-income classes assumes prices arrive quoted per 100 of par.
+That normalisation was done in the **extraction query**, against a security view, not in the C#
+-- so the convention was split across two artefacts and stated in neither, and only one of them
+is in the source tree we have.
+
+**Resolved in the port's design:** `Quote.price_multiplier` carries it, with the per-class RAT
+value as the fallback when a feed is silent. So the requirement on a real adapter is not to
+reconstruct what the old query assumed, but to **select the multiplier as a column** alongside
+the price. If the security view holds it, it passes straight through; if it does not, the query
+has to state the basis it is normalising to.
+
+Still to do when the Barra box comes up:
+
+* find whether the security view carries a quote-basis or price-multiplier column, and select
+  it if so;
+* if it does not, pin the basis explicitly in the query rather than leaving it implied;
+* the same query is where `parAmount` and the `CASH_PLUG` gap originate, so one recovery covers
+  all three.
+
+Mitigations already in place, both reported through `LoadNotes`: an inferred multiplier is
+flagged, and a percent-of-par quote below `PAR_BASIS_FLOOR` is flagged with the count against
+the total so a whole-feed mismatch reads differently from a single distressed bond. Those are
+smoke detectors, not the specification.
+
+---
+
 ## Deferred: vendor-published PSD floor
 
 `FactorCovariance` carries no vendor metadata, so there is nowhere to record a floor that Barra
