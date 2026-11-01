@@ -315,3 +315,27 @@ def test_the_accrual_convention_is_a_frozen_field_not_a_mutable_flag():
 def test_duplicate_securities_are_refused():
     with pytest.raises(ValueError, match="duplicate security"):
         PortfolioValue("FUND", (equity(), equity()))
+
+
+def test_a_future_is_priced_even_though_its_market_value_is_zero():
+    """No value is not the same as no data.
+
+    A future's market price is zero by formula, so testing the market price alone reports
+    every future on a book as a missing price and buries the real gaps among them.
+    """
+    priced_future = PositionValue(
+        "ESZ6", clean_price=0.0, exposure_price=5_500_000.0, quantity=1.0
+    )
+    assert priced_future.is_priced
+    assert priced_future.value(ValueBasis.MARKET, Accrual.DIRTY) == 0.0
+
+    genuinely_missing = PositionValue("NOQUOTE", clean_price=0.0, quantity=1.0)
+    assert not genuinely_missing.is_priced
+
+
+def test_a_futures_overlay_reports_no_missing_prices():
+    book = PortfolioValue("OVERLAY", (
+        PositionValue("ESZ6", clean_price=0.0, exposure_price=5_500_000.0, quantity=1.0),
+        PositionValue("NQZ6", clean_price=0.0, exposure_price=4_100_000.0, quantity=1.0),
+    ))
+    assert book.notes().unpriced == ()

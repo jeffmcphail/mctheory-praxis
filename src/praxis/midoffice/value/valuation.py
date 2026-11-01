@@ -147,8 +147,18 @@ class PositionValue:
         alternative was to fail the whole run, and the cases were rare and almost always well
         under 1% of total weight. The behaviour is kept; what changes is that the flag travels
         on the result rather than only into a log stream nobody reads next to the numbers.
+
+        The exposure price is in the test because a **future's market price is zero by
+        formula** -- `FIFutureSecurity.getPriceNumeraire` is `return 0.0;` -- so testing the
+        market price alone reports every future on the book as a missing price. That is the
+        difference between no value and no data, and conflating them buries the real gaps
+        among the futures.
         """
-        return self.clean_price != 0.0 or self.accrued_interest != 0.0
+        return (
+            self.clean_price != 0.0
+            or self.accrued_interest != 0.0
+            or self.resolved_exposure_price != 0.0
+        )
 
 
 CASH_PLUG = "CASH_PLUG"
