@@ -34,6 +34,7 @@ import numpy as np
 
 from ..risk.basis import FactorCovariance
 from ..risk.exposures import ExposureVector, SpecificRisk
+from .covariance import CovarianceEstimate, CovarianceEstimator, SampleCovariance
 from .panel import Alignment, FactorReturns, Frequency, ReturnPanel, align
 
 MIN_OBSERVATIONS = 24
@@ -60,15 +61,33 @@ class EstimationNotes:
     degenerate: tuple[str, ...] = ()
     zero_specific_risk: tuple[str, ...] = ()
     alignment: Alignment | None = None
+    covariance: CovarianceEstimate | None = None
+
+    @property
+    def effective_observations(self) -> float:
+        """How many periods the covariance estimator actually used, by Kish's measure.
+
+        Equal to `n_periods` for an unweighted estimate and less for an exponentially
+        weighted one. This rather than the row count is what the conditioning judgements
+        below use: a long history with a short half-life has plenty of rows and very little
+        information, and the row count would call that matrix healthy.
+        """
+        if self.covariance is None:
+            return float(self.n_periods)
+        return self.covariance.effective_observations
 
     @property
     def periods_per_factor(self) -> float:
-        """How many observations the covariance has per factor. Below 1 it is singular."""
-        return self.n_periods / self.n_factors if self.n_factors else float("inf")
+        """Effective observations per factor. Below 1 the covariance is singular."""
+        return (
+            self.effective_observations / self.n_factors
+            if self.n_factors
+            else float("inf")
+        )
 
     @property
     def covariance_is_rank_deficient(self) -> bool:
-        return self.n_periods <= self.n_factors
+        return self.effective_observations <= self.n_factors
 
     @property
     def is_clean(self) -> bool:
@@ -78,19 +97,30 @@ class EstimationNotes:
         notes: list[str] = []
         if self.alignment is not None:
             notes.extend(self.alignment.qualifications())
-        if self.covariance_is_rank_deficient:
+        if self.covariance is not None:
+            notes.extend(self.covariance.notes)
+        shrunk = (
+            self.covariance is not None
+            and (self.covariance.shrinkage_intensity or 0.0) > 0.0
+        )
+        if self.covariance_is_rank_deficient and not shrunk:
+            missing = max(int(self.n_factors - self.effective_observations) + 1, 1)
             notes.append(
-                f"the factor covariance was estimated from {self.n_periods} period(s) of "
-                f"{self.n_factors} factor(s), so it is singular by construction and has at "
-                f"least {self.n_factors - self.n_periods + 1} zero eigenvalue(s). A book "
-                f"lying in one of those directions gets a risk number with no correct digits "
-                f"unless psd_relative_floor is positive -- see docs/CONDITIONING.md"
+                f"the factor covariance has {self.effective_observations:.1f} effective "
+                f"observation(s) of {self.n_factors} factor(s), so it is singular by "
+                f"construction and has at least {missing} zero eigenvalue(s). A book lying "
+                f"in one of those directions gets a risk number with no correct digits "
+                f"unless psd_relative_floor is positive -- see docs/CONDITIONING.md. "
+                f"Shrinking the estimate repairs this at source rather than patching it "
+                f"downstream"
             )
-        elif self.periods_per_factor < 3.0:
+        elif self.periods_per_factor < 3.0 and not shrunk:
             notes.append(
-                f"the factor covariance has only {self.periods_per_factor:.1f} observation(s) "
-                f"per factor, so it is poorly conditioned even though it is not singular; its "
-                f"smallest eigenvalues are mostly estimation noise"
+                f"the factor covariance has only {self.periods_per_factor:.1f} effective "
+                f"observation(s) per factor, so it is poorly conditioned even though it is "
+                f"not singular; its smallest eigenvalues are mostly estimation noise. "
+                f"Shrinkage buys about {min(21.0, 25.0 / self.periods_per_factor):.0f}% in "
+                f"accuracy at this sample size"
             )
         if self.short_history:
             shown = ", ".join(self.short_history[:5])
@@ -148,11 +178,14 @@ class FactorModel:
 
     def describe(self) -> str:
         basis = "annualised" if self.notes.annualised else self.notes.frequency.label
-        return (
+        head = (
             f"{len(self.factor_ids)}-factor model, {basis}, estimated on "
             f"{self.notes.n_periods} {self.notes.frequency.label} period(s) for "
             f"{self.notes.n_estimated} of {self.notes.n_securities} security(ies)"
         )
+        if self.notes.covariance is None:
+            return head
+        return f"{head}; covariance {self.notes.covariance.describe()}"
 
 
 def estimate_timeseries_model(
@@ -163,6 +196,7 @@ def estimate_timeseries_model(
     annualise: bool = True,
     first_factor_id: int = 1,
     fit_intercept: bool = True,
+    covariance_estimator: CovarianceEstimator | None = None,
 ) -> FactorModel:
     """Regress each security on the factor returns; return a model the engine can consume.
 
@@ -244,14 +278,20 @@ def estimate_timeseries_model(
             SpecificRisk.for_security(code, specific_volatility),
         )
 
-    # Sample covariance of the factor returns over the same window. rowvar=False because the
-    # rows are periods; ddof=1 because these are estimates, not the population.
-    matrix = (
-        np.cov(factor_block, rowvar=False, ddof=1)
-        if n_periods > 1
-        else np.zeros((n_factors, n_factors))
-    )
-    matrix = np.atleast_2d(matrix)
+    # The covariance of the factor returns over the same window. The estimator defaults to
+    # the plain sample covariance, which keeps this function's behaviour unchanged for any
+    # caller that does not ask for something better.
+    estimator = covariance_estimator or SampleCovariance()
+    if n_periods > 1:
+        estimate = estimator.estimate(factor_block)
+    else:
+        estimate = CovarianceEstimate(
+            matrix=np.zeros((n_factors, n_factors)),
+            effective_observations=float(n_periods),
+            method="degenerate",
+            n_periods=n_periods,
+        )
+    matrix = estimate.matrix
     if annualise:
         matrix = matrix * panel.frequency.variance_scale
     matrix = (matrix + matrix.T) / 2.0  # kill float asymmetry before FactorCovariance checks
@@ -275,5 +315,6 @@ def estimate_timeseries_model(
             degenerate=tuple(degenerate),
             zero_specific_risk=tuple(zero_specific),
             alignment=alignment,
+            covariance=estimate,
         ),
     )
