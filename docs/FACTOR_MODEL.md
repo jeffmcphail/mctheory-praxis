@@ -527,6 +527,86 @@ model, one with a long history gets its own sample estimate, and better characte
 more weight because `relative_residual_sd` is smaller. The blend beats both of its inputs, and
 is the only one of the three that is good in every regime.
 
+## Descriptors: building the exposures instead of assuming them
+
+`descriptors.py` implements Appendix A of the US-E3 handbook: the raw measurements underneath
+the risk indices, from price, volume and shares outstanding alone. Fifteen descriptors across
+five of the thirteen risk indices -- Volatility, Momentum, Size, Size Nonlinearity and Trading
+Activity -- with no fundamental data required. The other eight indices need balance sheet and
+earnings data and are not built.
+
+Each is checked against its published definition computed independently, because the only
+value in implementing a specification is that it matches: LNCAP, LPRI, HILO, CMRA and RSTR
+come out exact, the turnover descriptors land on 0.96 for a stock turning over 8% a month, and
+BTSG recovers beta times residual volatility with a mean ratio of 0.99.
+
+Three details that are easy to get wrong and are pinned by tests:
+
+* **LCAPCB is the cube of the *standardised* log capitalisation**, not of the raw one.
+  Appendix A says "normalized", so the standardisation is part of the definition.
+* **BTSG is set to zero when beta is negative**, which the definition states explicitly.
+* **SERDP comes out a few percent below its AR(1) theoretical value**, consistently across
+  rho. That is the definition rather than the implementation: it is built on *fitted*
+  market-model residuals, and OLS forces those orthogonal to the regressors.
+
+### A frequency mismatch worth naming
+
+USE3 mixes frequencies -- DASTD is 65 daily returns, RSTR is 12 monthly ones. A monthly panel
+has no equivalent of 65 daily returns, and mapping the span naively gives a three-observation
+standard deviation, which is noise: its correlation with true volatility is 0.69 against 0.94
+for a twelve-month window. So the default window adapts by frequency, and anything short
+enough to be a poor substitute is named in the notes. A longer monthly window measures
+something real, but it is no longer DASTD -- it is a slower descriptor wearing the same name,
+and the notes say so rather than letting the name imply otherwise.
+
+### The one thing not reproduced
+
+Appendix A states it plainly: *"The method of combining these descriptors into risk indices is
+proprietary to BARRA."* The descriptor definitions are published; the weights are not.
+
+So this stops at descriptors. `blend_to_index` equal-weights by default -- a stated convention
+rather than a guess at theirs -- and renormalises over whichever descriptors are available,
+since HALPHA needs sixty periods where RSTR needs twelve and an exposure from one descriptor
+beats a hole. `fit_index_weights` estimates the weights the way the handbook describes the
+real procedure, by explanatory power, and recovers a known blend to within 0.08 on synthetic
+data.
+
+That recovers Barra's *method* without claiming to recover their numbers. A model built this
+way is a reimplementation of a published methodology, not a clone of USE3, and it should be
+described as one.
+
+### Why there are two standardisations, not one
+
+Descriptors are not factors. RSTR and HALPHA never enter the regression; Momentum does. The
+collapse from roughly sixty descriptors to thirteen risk indices is what keeps the factor
+covariance estimable -- 115 factors would carry 6,555 free covariance parameters against 68
+factors' 2,346 -- and what stops two measurements of the same thing splitting their shared
+signal between two unstable coefficients. USE3's handbook records that its predecessor had
+risk indices sharing descriptors, which "resulted in a certain amount of unnecessary
+multicollinearity", and that separating them gave "more precise factor return estimates
+(smaller standard errors, higher t-stats)".
+
+The consequence is a scaling trap. A weighted average of standardised descriptors has a
+standard deviation *below* one unless they are perfectly correlated -- 0.707 for two
+uncorrelated, 0.894 at a correlation of 0.6 -- and the shrinkage grows with how many are
+blended. Measured on a real descriptor panel, before the second standardisation:
+
+| risk index | descriptors | scale |
+|---|---|---|
+| Size | 1 | 1.000 |
+| Size Nonlinearity | 1 | 1.000 |
+| Momentum | 2 | 0.834 |
+| Volatility | 6 | 0.471 |
+| Trading Activity | 5 | 0.382 |
+
+A one-sigma move in the underlying characteristic would register as 1.00 in Size and 0.38 in
+Trading Activity, the factor returns would be scaled inversely, and the covariance between
+them would mean nothing -- the exact failure standardising exists to prevent. So the blended
+index is standardised again, which is what Barra's own normalisation formula describes: it is
+written for the *risk index*, not for the descriptor. `build_risk_indices` does both passes
+and returns exposures that drop straight into
+`estimate_cross_sectional_model(..., standardise=False)`.
+
 ## Status
 
 Built, 29 tests in `tests/midoffice/test_model.py` and 28 in `test_covariance.py`:
