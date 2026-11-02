@@ -588,3 +588,148 @@ def test_first_factor_id_shifts_the_whole_basis():
     model = _fit(returns, chars, first_factor_id=501)
     assert model.factor_ids == (501, 502, 503, 504)
     assert model.factor_names[501] == MARKET_FACTOR
+
+
+# ------------------------------------------------- specific risk: measured, modelled, blended
+
+
+def _persistent_world(
+    n_secs: int = 80, n_periods: int = 60, seed: int = 5, sensitivity: float = 0.3
+):
+    """A world where the characteristic is persistent and really drives specific risk.
+
+    Persistence matters: a characteristic redrawn every period cannot explain a security's
+    specific risk however strong the relationship, which is a mistake easily made in a
+    fixture and silently reported as a model that explains nothing.
+    """
+    rng = np.random.default_rng(seed)
+    dates = _dates(n_periods)
+    securities = tuple(f"S{i:03d}" for i in range(n_secs))
+    level = rng.normal(size=n_secs)
+    drift = rng.normal(scale=0.05, size=(n_periods, n_secs))
+    raw = np.stack([level[None, :] + drift, rng.normal(size=(n_periods, n_secs))], axis=2)
+    chars = CharacteristicPanel(
+        dates, securities, ("Size", "Value"), raw, Frequency.MONTHLY
+    ).standardise()
+    design = np.concatenate([np.ones((n_periods, n_secs, 1)), chars.values], axis=2)
+    factors = rng.normal(size=(n_periods, 3)) * np.array([0.04, 0.02, 0.015])
+    specific = 0.06 * (1.0 + sensitivity * chars.values[:, :, 0])
+    returns = np.einsum("tsk,tk->ts", design, factors) + rng.normal(
+        size=(n_periods, n_secs)
+    ) * specific
+    caps = np.exp(10.0 + 2.0 * chars.values[:, :, 1])
+    return ReturnPanel(dates, securities, returns, Frequency.MONTHLY), chars, caps
+
+
+def test_historical_specific_risk_is_still_the_default():
+    returns, chars, _ = _persistent_world()
+    default = _fit(returns, chars, min_securities=20)
+    explicit = _fit(returns, chars, min_securities=20, specific_risk="historical")
+    assert default.notes.specific_risk_method == "historical"
+    assert default.notes.specific_risk_model is None
+    for code in default.exposures:
+        assert default.exposures[code].specific.by_issuer[code] == pytest.approx(
+            explicit.exposures[code].specific.by_issuer[code]
+        )
+
+
+def test_modelling_specific_risk_keeps_securities_that_measuring_it_drops():
+    """The point of the whole module: a new issue has characteristics but no history."""
+    returns, chars, _ = _persistent_world()
+    blanked = returns.returns.copy()
+    blanked[:-4, :3] = np.nan          # three securities with four months of history
+    thin = ReturnPanel(returns.dates, returns.securities, blanked, returns.frequency)
+
+    measured = _fit(thin, chars, min_securities=20, specific_risk="historical")
+    modelled = _fit(thin, chars, min_securities=20, specific_risk="model")
+
+    new_issues = set(returns.securities[:3])
+    assert not (new_issues & set(measured.exposures))
+    assert new_issues <= set(modelled.exposures)
+    assert all(
+        modelled.exposures[c].specific.by_issuer[c] > 0.0 for c in new_issues
+    )
+
+
+def test_the_blend_leans_on_the_model_for_a_new_issue_and_on_history_for_an_old_one():
+    returns, chars, _ = _persistent_world()
+    blanked = returns.returns.copy()
+    blanked[:-4, :3] = np.nan
+    thin = ReturnPanel(returns.dates, returns.securities, blanked, returns.frequency)
+    model = _fit(thin, chars, min_securities=20, specific_risk="blend")
+    risk_model = model.notes.specific_risk_model
+    assert risk_model is not None
+    # Thresholds would be wrong here: the weight depends on how much these particular
+    # characteristics explain, and in this fixture they explain a great deal, so the model
+    # keeps real weight even at sixty periods. The claim is the ordering and its size.
+    assert risk_model.model_weight(4) > 0.75
+    assert risk_model.model_weight(4) > 2.0 * risk_model.model_weight(60)
+    assert risk_model.model_weight(60) < 0.5
+
+
+def test_a_useless_characteristic_degrades_the_blend_to_the_historical_estimate():
+    """Graceful degradation, and the reason the blend is safe to prefer.
+
+    With characteristics that explain nothing, the inverse-variance weighting puts almost
+    everything on the sample estimate by itself -- nobody has to notice and intervene.
+    """
+    returns, chars, _ = _persistent_world(sensitivity=0.0)
+    measured = _fit(returns, chars, min_securities=20, specific_risk="historical")
+    blended = _fit(returns, chars, min_securities=20, specific_risk="blend")
+    shared = set(measured.exposures) & set(blended.exposures)
+    difference = np.array(
+        [
+            blended.exposures[c].specific.by_issuer[c]
+            / measured.exposures[c].specific.by_issuer[c]
+            - 1.0
+            for c in shared
+        ]
+    )
+    assert float(np.mean(np.abs(difference))) < 0.20
+
+
+def test_capitalisations_calibrate_kappa_through_the_estimator():
+    returns, chars, caps = _persistent_world()
+    plain = _fit(returns, chars, min_securities=20, specific_risk="model")
+    sized = _fit(
+        returns, chars, min_securities=20, specific_risk="model", capitalisations=caps
+    )
+    assert not plain.notes.specific_risk_model.notes.kappa_calibrated
+    assert sized.notes.specific_risk_model.notes.kappa_calibrated
+    assert len(sized.notes.specific_risk_model.kappa_knots) == 10
+
+
+def test_the_specific_risk_model_notes_reach_the_models_qualifications():
+    returns, chars, _ = _persistent_world()
+    model = _fit(returns, chars, min_securities=20, specific_risk="model")
+    assert any("falls back to the normal constant" in q for q in model.qualifications())
+
+
+def test_an_unknown_specific_risk_method_is_refused():
+    returns, chars, _ = _persistent_world()
+    with pytest.raises(ValueError, match="'historical', 'model' or 'blend'"):
+        _fit(returns, chars, min_securities=20, specific_risk="bayesian")
+
+
+def test_capitalisations_of_the_wrong_shape_are_refused_by_the_estimator():
+    returns, chars, _ = _persistent_world()
+    with pytest.raises(ValueError, match="to match the return panel"):
+        _fit(
+            returns,
+            chars,
+            min_securities=20,
+            specific_risk="model",
+            capitalisations=np.ones((60, 9)),
+        )
+
+
+def test_short_history_is_still_named_even_when_it_no_longer_excludes():
+    """Reported rather than silent: a modelled forecast for a security with four months of
+    history is a different kind of number from one with sixty, and the notes should say so."""
+    returns, chars, _ = _persistent_world()
+    blanked = returns.returns.copy()
+    blanked[:-4, :3] = np.nan
+    thin = ReturnPanel(returns.dates, returns.securities, blanked, returns.frequency)
+    model = _fit(thin, chars, min_securities=20, specific_risk="model")
+    assert set(returns.securities[:3]) <= set(model.notes.short_history)
+    assert set(returns.securities[:3]) <= set(model.exposures)

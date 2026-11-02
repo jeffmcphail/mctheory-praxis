@@ -63,6 +63,7 @@ from ..risk.exposures import ExposureVector, SpecificRisk
 from .characteristics import CharacteristicPanel
 from .covariance import CovarianceEstimate, CovarianceEstimator, SampleCovariance
 from .panel import FactorReturns, Frequency, ReturnPanel
+from .specificrisk import SpecificRiskModel, estimate_specific_risk_model
 from .timeseries import MIN_OBSERVATIONS, FactorModel
 
 MIN_SECURITIES_PER_PERIOD = 30
@@ -98,6 +99,9 @@ class CrossSectionalNotes:
     short_history: tuple[str, ...] = ()
     no_exposures: tuple[str, ...] = ()
     zero_specific_risk: tuple[str, ...] = ()
+    specific_risk_method: str = "historical"
+    specific_risk_model: SpecificRiskModel | None = None
+    floored_specific_risk: tuple[str, ...] = ()
     mean_r_squared: float = float("nan")
     observed_variance: tuple[float, ...] = ()
     sampling_variance: tuple[float, ...] = ()
@@ -177,7 +181,7 @@ class CrossSectionalNotes:
                 f"{shown}{more} -- industry dummies alongside a market factor are the "
                 f"usual cause"
             )
-        if self.short_history:
+        if self.short_history and self.specific_risk_method == "historical":
             out.append(
                 f"{len(self.short_history)} security(ies) excluded for fewer than "
                 f"{self.min_observations} residual observation(s): "
@@ -219,6 +223,14 @@ class CrossSectionalNotes:
                 "characteristics were not standardised, so the factor returns are on "
                 "incomparable scales and their covariance should not be read as one"
             )
+        if self.floored_specific_risk:
+            out.append(
+                f"{len(self.floored_specific_risk)} security(ies) hit the specific-risk "
+                f"floor, so their forecast is the floor rather than the model: "
+                f"{', '.join(self.floored_specific_risk[:5])}"
+            )
+        if self.specific_risk_model is not None:
+            out.extend(self.specific_risk_model.notes.qualifications())
         if self.covariance is not None:
             out.extend(self.covariance.notes)
         shrunk = (
@@ -248,6 +260,9 @@ def estimate_cross_sectional_model(
     covariance_estimator: CovarianceEstimator | None = None,
     min_observations: int = MIN_OBSERVATIONS,
     min_securities: int = MIN_SECURITIES_PER_PERIOD,
+    specific_risk: str = "historical",
+    capitalisations: np.ndarray | None = None,
+    specific_risk_floor: float = 0.1,
     exposure_index: int = -1,
     annualise: bool = True,
     first_factor_id: int = 1,
@@ -268,6 +283,23 @@ def estimate_cross_sectional_model(
     `exposure_index` picks which period's characteristics become the model's exposures, and
     defaults to the last. This is the forecast-relevant choice and is the thing a time-series
     model cannot offer.
+
+    `specific_risk` chooses how idiosyncratic risk is forecast:
+
+    * ``"historical"`` (the default, and what every existing caller gets) is the sample
+      standard deviation of the security's own residual series. Securities with fewer than
+      `min_observations` residuals are excluded, because there is nothing to compute.
+    * ``"model"`` fits `specificrisk.estimate_specific_risk_model` to the residual panel and
+      forecasts from characteristics instead. **This changes who is in the model**: a security
+      needs only a characteristic row, not a return history, so short-history names are no
+      longer dropped.
+    * ``"blend"`` combines the two by inverse variance, which is what BIM301 describes its own
+      specific risk models as doing. This is the better forecast in every regime measured --
+      see docs/FACTOR_MODEL.md -- but it is not the default, because changing every existing
+      caller's specific risk silently is not a thing to do by default.
+
+    `capitalisations`, a dates-by-securities array on the return panel's shape, calibrates
+    kappa against size the way USE3 does. Without it kappa falls back to the normal constant.
     """
     if returns.frequency != characteristics.frequency:
         raise ValueError(
@@ -434,25 +466,92 @@ def estimate_cross_sectional_model(
         else ()
     )
 
-    # Specific risk: the standard deviation of each security's residual series.
+    if specific_risk not in ("historical", "model", "blend"):
+        raise ValueError(
+            f"specific_risk must be 'historical', 'model' or 'blend', got "
+            f"{specific_risk!r}"
+        )
+
     exposure_slice = panel.values[char_rows[exposure_index], :, :][char_cols, :]
     short_history: list[str] = []
     no_exposures: list[str] = []
     zero_specific: list[str] = []
     exposures: dict[str, ExposureVector] = {}
 
+    # The residuals carry the degrees-of-freedom inflation applied period by period above,
+    # which is what the specific risk model wants: V is invariant to a per-period scale
+    # factor, while S and the realised standard deviation both need it.
+    risk_model: SpecificRiskModel | None = None
+    modelled: dict[str, float] = {}
+    floored: tuple[str, ...] = ()
+    if specific_risk != "historical":
+        cap_block = None
+        if capitalisations is not None:
+            caps = np.asarray(capitalisations, dtype=float)
+            if caps.shape != (len(returns.dates), len(returns.securities)):
+                raise ValueError(
+                    f"capitalisations have shape {caps.shape}, expected "
+                    f"{(len(returns.dates), len(returns.securities))} to match the "
+                    f"return panel"
+                )
+            cap_block = caps[np.ix_(return_rows, return_cols)]
+        risk_model = estimate_specific_risk_model(
+            residuals,
+            shared_securities,
+            panel.values[np.ix_(char_rows, char_cols)],
+            panel.names,
+            capitalisations=cap_block,
+            annualisation=vol_scale,
+        )
+        exposure_rows = {
+            code: {
+                name: float(exposure_slice[j, k])
+                for k, name in enumerate(panel.names)
+            }
+            for j, code in enumerate(shared_securities)
+            if not np.isnan(exposure_slice[j, :]).any()
+        }
+        if specific_risk == "blend":
+            history: dict[str, tuple[float, int]] = {}
+            for j, code in enumerate(shared_securities):
+                u = residuals[:, j]
+                present = ~np.isnan(u)
+                if int(present.sum()) >= 2:
+                    history[code] = (
+                        float(np.std(u[present], ddof=1)) * vol_scale,
+                        int(present.sum()),
+                    )
+            modelled = risk_model.blend(
+                exposure_rows, history, floor_fraction=specific_risk_floor
+            )
+        else:
+            modelled = risk_model.forecast(
+                exposure_rows, floor_fraction=specific_risk_floor
+            )
+        floored = risk_model.floored(
+            exposure_rows, floor_fraction=specific_risk_floor
+        )
+
     for j, code in enumerate(shared_securities):
         row = exposure_slice[j, :]
         if np.isnan(row).any():
             no_exposures.append(code)
             continue
-        u = residuals[:, j]
-        present = ~np.isnan(u)
-        if int(present.sum()) < min_observations:
-            short_history.append(code)
-            continue
-        # Already degrees-of-freedom corrected period by period, above.
-        specific = float(np.std(u[present], ddof=1)) * vol_scale
+        if specific_risk == "historical":
+            u = residuals[:, j]
+            present = ~np.isnan(u)
+            if int(present.sum()) < min_observations:
+                short_history.append(code)
+                continue
+            # Already degrees-of-freedom corrected period by period, above.
+            specific = float(np.std(u[present], ddof=1)) * vol_scale
+        else:
+            # A security with no residual history at all still gets a forecast here, which
+            # is the point of modelling specific risk rather than measuring it.
+            specific = float(modelled[code])
+            u = residuals[:, j]
+            if int(np.count_nonzero(~np.isnan(u))) < min_observations:
+                short_history.append(code)
         if specific <= 0.0:
             zero_specific.append(code)
         loadings = dict(zip(factor_ids[1:] if fit_market else factor_ids, row))
@@ -481,6 +580,9 @@ def estimate_cross_sectional_model(
         short_history=tuple(short_history),
         no_exposures=tuple(no_exposures),
         zero_specific_risk=tuple(zero_specific),
+        specific_risk_method=specific_risk,
+        specific_risk_model=risk_model,
+        floored_specific_risk=floored,
         mean_r_squared=float(np.mean(r_squareds)) if r_squareds else float("nan"),
         observed_variance=observed,
         sampling_variance=mean_sampling,
