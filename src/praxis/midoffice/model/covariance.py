@@ -57,6 +57,8 @@ class CovarianceEstimate:
     n_periods: int = 0
     shrinkage_intensity: float | None = None
     half_life: float | None = None
+    volatility_half_life: float | None = None
+    correlation_half_life: float | None = None
     notes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -86,7 +88,12 @@ class CovarianceEstimate:
 
     def describe(self) -> str:
         parts = [self.method]
-        if self.half_life is not None:
+        if self.volatility_half_life is not None:
+            parts.append(
+                f"half-life {self.volatility_half_life:g} vol / "
+                f"{self.correlation_half_life:g} corr"
+            )
+        elif self.half_life is not None:
             parts.append(f"half-life {self.half_life:g}")
         if self.shrinkage_intensity is not None:
             parts.append(f"shrinkage {self.shrinkage_intensity:.3f}")
@@ -194,6 +201,117 @@ class ExponentialCovariance:
             method="exponential",
             n_periods=n,
             half_life=self.half_life,
+            notes=tuple(notes),
+        )
+
+
+@dataclass(frozen=True)
+class HorizonCovariance:
+    """Correlations on a long half-life, volatilities on a short one, recombined.
+
+    Barra's BIM301 design, and their rationale is worth stating because it is not obvious that
+    one matrix should be estimated with two memories.
+
+    Correlation structure is **more stationary than volatility**.  Volatility moves fast and
+    clusters, so a forecast wants recent observations weighted heavily; correlations drift
+    slowly, so weighting recent observations heavily throws away information for nothing.
+
+    More decisively, the correlation matrix has far more elements to estimate -- n(n-1)/2
+    against n -- so the robustness problem binds much harder there.  A short half-life on a
+    correlation matrix is how you arrive at the spurious structure that makes a minimum-risk
+    portfolio forecast zero risk and then realise plenty of it.  Estimating correlations long
+    and volatilities short is a way of spending the available history where it buys the most:
+    responsiveness on the few parameters that need it, robustness on the many that do not.
+
+    This is also why `effective_observations` here reports the **correlation** half-life's
+    figure.  That is the one that decides whether the matrix is singular, and it is the
+    constraint Barra's own reasoning is organised around.
+
+    The recombination is safe: a positive semi-definite correlation matrix rescaled by a
+    positive diagonal stays positive semi-definite, so the split cannot introduce the negative
+    eigenvalues `psd_relative_floor` exists to repair.
+
+    Equal half-lives reduce this exactly to `ExponentialCovariance`, which
+    `test_equal_half_lives_reduce_to_the_single_half_life_estimator` pins -- an estimator
+    whose general case does not contain its special case is usually wrong in both.
+    """
+
+    volatility_half_life: float
+    correlation_half_life: float
+
+    def __post_init__(self) -> None:
+        for name in ("volatility_half_life", "correlation_half_life"):
+            value = getattr(self, name)
+            if value <= 0.0:
+                raise ValueError(f"{name} must be positive, got {value!r}")
+
+    @classmethod
+    def bim301_long(cls, periods_per_year: float = 12.0) -> "HorizonCovariance":
+        """BIM301L: volatility half-life one year, correlation half-life three years.
+
+        The long-horizon model, for an investor rebalancing on a monthly-ish cadence.  Barra
+        calls these figures typical rather than universal -- component models vary -- so this
+        is a starting configuration, not a constant.
+        """
+        return cls(periods_per_year, 3.0 * periods_per_year)
+
+    @classmethod
+    def bim301_short(cls, periods_per_year: float = 252.0) -> "HorizonCovariance":
+        """BIM301S: volatility half-life 90 trading days, correlation half-life two years.
+
+        The short-horizon model, built for a one-month forecast and a trading cadence to
+        match.  90 trading days is expressed here as a fraction of a year so the
+        configuration survives a change of panel frequency: on weekly data it is 18 periods,
+        on monthly about 4.3.
+        """
+        return cls((90.0 / 252.0) * periods_per_year, 2.0 * periods_per_year)
+
+    def estimate(self, returns: np.ndarray) -> CovarianceEstimate:
+        returns = np.atleast_2d(np.asarray(returns, dtype=float))
+        n = returns.shape[0]
+        if n < 2:
+            raise ValueError(f"a covariance needs at least two periods, got {n}")
+        ages = np.arange(n - 1, -1, -1, dtype=float)
+
+        corr_decay = 0.5 ** (1.0 / self.correlation_half_life)
+        vol_decay = 0.5 ** (1.0 / self.volatility_half_life)
+        corr_matrix, corr_effective = _weighted_covariance(returns, corr_decay**ages)
+        vol_matrix, vol_effective = _weighted_covariance(returns, vol_decay**ages)
+
+        # Correlations from the long estimate, volatilities from the short one.
+        long_sd = np.sqrt(np.clip(np.diag(corr_matrix), 0.0, None))
+        short_sd = np.sqrt(np.clip(np.diag(vol_matrix), 0.0, None))
+        safe = np.where(long_sd > 0.0, long_sd, 1.0)
+        correlation = corr_matrix / np.outer(safe, safe)
+        # A factor with no movement over the long window has no correlation to anyone; leave
+        # it uncorrelated rather than inventing one, and let its own variance stand.
+        flat = long_sd <= 0.0
+        if flat.any():
+            correlation[flat, :] = 0.0
+            correlation[:, flat] = 0.0
+            correlation[flat, flat] = 1.0
+        matrix = correlation * np.outer(short_sd, short_sd)
+
+        notes: list[str] = []
+        if flat.any():
+            notes.append(
+                f"{int(flat.sum())} factor(s) had no variation over the correlation window, "
+                f"so they are treated as uncorrelated with everything"
+            )
+        if corr_effective < 0.5 * n:
+            notes.append(
+                f"a correlation half-life of {self.correlation_half_life:g} period(s) over "
+                f"{n} period(s) leaves {corr_effective:.1f} effective observation(s), so "
+                f"more than half the history is being discarded by the weighting"
+            )
+        return CovarianceEstimate(
+            matrix=matrix,
+            effective_observations=corr_effective,
+            method="exponential, split horizon",
+            n_periods=n,
+            half_life=self.correlation_half_life,
+            volatility_half_life=self.volatility_half_life,
+            correlation_half_life=self.correlation_half_life,
             notes=tuple(notes),
         )
 

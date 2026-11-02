@@ -28,7 +28,7 @@ it is created rather than only where it bites.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping, Sequence
+from typing import Mapping, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 
@@ -157,6 +157,27 @@ class EstimationNotes:
         return tuple(notes)
 
 
+@runtime_checkable
+class ModelNotes(Protocol):
+    """What `FactorModel` needs from its notes, whichever construction produced them.
+
+    A structural contract rather than a base class, because the two estimators have genuinely
+    different things to report -- a time-series model has short-history betas and an R-squared
+    per security, a cross-sectional one has thin periods and an estimation-noise share -- and
+    forcing them into one class would mean half the fields being meaningless half the time.
+    """
+
+    n_periods: int
+    n_factors: int
+    n_securities: int
+    n_estimated: int
+    frequency: Frequency
+    annualised: bool
+    covariance: CovarianceEstimate | None
+
+    def qualifications(self) -> tuple[str, ...]: ...
+
+
 @dataclass(frozen=True)
 class FactorModel:
     """A built model: exactly the pair `compute_risk` consumes, plus how it was made."""
@@ -167,7 +188,7 @@ class FactorModel:
     exposures: Mapping[str, ExposureVector]
     alphas: Mapping[str, float] = field(default_factory=dict)
     r_squared: Mapping[str, float] = field(default_factory=dict)
-    notes: EstimationNotes = field(default_factory=EstimationNotes)
+    notes: ModelNotes = field(default_factory=EstimationNotes)
 
     @property
     def securities(self) -> tuple[str, ...]:

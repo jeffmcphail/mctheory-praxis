@@ -1,0 +1,264 @@
+"""Exposures as observable characteristics, standardised period by period.
+
+This is the input to a cross-sectional model, and the thing that makes it different in kind
+from a time-series one.  A time-series exposure is an estimated beta: backward-looking over
+its window, measured with error, and an average of whatever the security was during it.  A
+characteristic is what the security *is* today -- its log market cap, its book-to-price -- and
+carries no estimation error at all.
+
+That is why Barra built its models this way and why RAT's exposure table holds loadings that
+are not betas.  For a risk *forecast* the question is what the portfolio is exposed to now,
+and a beta estimated over five years answers a question about the past.
+
+**Standardisation is not cosmetic.**  Raw characteristics are on incomparable scales -- log
+market cap runs from 10 to 30, book-to-price from 0 to 3 -- so the factor returns estimated
+against them would be on incomparable scales too, and a factor covariance built from those is
+meaningless.  Standardising each characteristic cross-sectionally every period, to zero mean
+and unit standard deviation, makes an exposure of 1.0 mean "one standard deviation above the
+market" in every factor and every period.  That is what makes the factor returns comparable
+across factors and over time, and therefore what makes their covariance mean something.
+
+The mean is **cap-weighted** and the standard deviation **equal-weighted**, which is Barra's
+own convention.  The *Global Equity Model Handbook* states it exactly:
+
+    [Normalized Risk Index] = ([Raw Data] - [Capitalization-weighted Mean])
+                               / [Equal-weighted Standard Deviation]
+
+and says why: standardisation "sets the zero value at the capitalization-weighted mean of the
+companies within each local market".  That is the market-at-zero property.  The asymmetry is
+deliberate on both sides -- a cap-weighted mean so the market has no style tilt, an
+equal-weighted dispersion so a handful of mega-caps do not set the scale.  Equal-weighting the mean leaves the market with a large negative size exposure,
+because there are far more small companies than large ones, and every portfolio's size
+exposure is then measured against a benchmark nobody holds.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+from typing import Iterable, Mapping, Sequence
+
+import numpy as np
+
+from .panel import Frequency
+
+
+@dataclass(frozen=True)
+class CharacteristicPanel:
+    """Characteristic values for securities over time: dates x securities x factors.
+
+    Three dimensions rather than two because a characteristic moves: a company's market cap
+    changes daily and its book-to-price every quarter. Holding exposures fixed over the window
+    would reintroduce exactly the staleness that choosing characteristics over betas avoids.
+    """
+
+    dates: tuple[date, ...]
+    securities: tuple[str, ...]
+    names: tuple[str, ...]
+    values: np.ndarray
+    frequency: Frequency = Frequency.MONTHLY
+    standardised: bool = False
+    winsorised: int = 0
+    """How many raw values the clip moved, across every date and characteristic.
+
+    Provenance worth keeping. A handful means the clip did its job on genuine outliers; a
+    large fraction of the panel means the characteristic itself is wrong -- wrong units, a
+    sign error, a vendor placeholder like -999 -- and no amount of clipping will fix it.
+    """
+
+    def __post_init__(self) -> None:
+        dates = tuple(self.dates)
+        securities = tuple(self.securities)
+        names = tuple(self.names)
+        for label, items in (
+            ("dates", dates),
+            ("securities", securities),
+            ("characteristics", names),
+        ):
+            if len(set(items)) != len(items):
+                raise ValueError(f"duplicate {label} in the characteristic panel")
+        if list(dates) != sorted(dates):
+            raise ValueError("characteristic panel dates must be ascending")
+        values = np.asarray(self.values, dtype=float)
+        expected = (len(dates), len(securities), len(names))
+        if values.shape != expected:
+            raise ValueError(
+                f"characteristic values have shape {values.shape}, expected {expected} "
+                f"(dates x securities x characteristics)"
+            )
+        object.__setattr__(self, "dates", dates)
+        object.__setattr__(self, "securities", securities)
+        object.__setattr__(self, "names", names)
+        object.__setattr__(self, "values", values)
+
+    @classmethod
+    def constant(
+        cls,
+        dates: Iterable[date],
+        characteristics: Mapping[str, Mapping[str, float]],
+        frequency: Frequency = Frequency.MONTHLY,
+    ) -> "CharacteristicPanel":
+        """Build from a security-to-characteristic mapping held fixed over every date.
+
+        A convenience for a single snapshot, not a model of reality: characteristics move, and
+        `test_a_constant_panel_is_a_simplification` says so. Useful when only one observation
+        date is available.
+        """
+        dates = tuple(dates)
+        securities = tuple(characteristics)
+        names = tuple(dict.fromkeys(k for c in characteristics.values() for k in c))
+        values = np.full((len(dates), len(securities), len(names)), np.nan)
+        for j, code in enumerate(securities):
+            for k, name in enumerate(names):
+                if name in characteristics[code]:
+                    values[:, j, k] = float(characteristics[code][name])
+        return cls(dates, securities, names, values, frequency)
+
+    @property
+    def n_factors(self) -> int:
+        return len(self.names)
+
+    @property
+    def n_securities(self) -> int:
+        return len(self.securities)
+
+    def __len__(self) -> int:
+        return len(self.dates)
+
+    def at(self, index: int) -> np.ndarray:
+        """The securities-by-factors slice for one period."""
+        return self.values[index, :, :]
+
+    def snapshot(self, index: int = -1) -> dict[str, dict[str, float]]:
+        """One period's characteristics as a mapping, skipping what is missing.
+
+        Index -1 by default: the most recent period, which is the one a forecast wants. A
+        time-series model's exposures are an average over its window; these are a point in
+        time, and that is the whole difference.
+        """
+        slice_ = self.values[index, :, :]
+        out: dict[str, dict[str, float]] = {}
+        for j, code in enumerate(self.securities):
+            row = {
+                name: float(slice_[j, k])
+                for k, name in enumerate(self.names)
+                if not np.isnan(slice_[j, k])
+            }
+            if row:
+                out[code] = row
+        return out
+
+    def coverage(self) -> dict[str, int]:
+        """How many periods each security has a complete characteristic row for."""
+        complete = ~np.isnan(self.values).any(axis=2)
+        return {
+            code: int(np.count_nonzero(complete[:, j]))
+            for j, code in enumerate(self.securities)
+        }
+
+    def standardise(
+        self, weights: np.ndarray | None = None, *, winsorise: float | None = 4.0
+    ) -> "CharacteristicPanel":
+        """Zero weighted mean and unit standard deviation, per characteristic per period.
+
+        `weights` is a dates-by-securities array -- market capitalisation, or its square root.
+        The weighted mean is what puts the market portfolio at zero exposure to every style
+        factor; an equal-weighted mean leaves the market with a large negative size exposure
+        because small companies outnumber large ones, and every portfolio's size tilt would
+        then be measured against a benchmark nobody holds.
+
+        The standard deviation is deliberately **equal-weighted** even when the mean is not.
+        A cap-weighted standard deviation is dominated by the few largest names, so the scale
+        of the factor would be set by a handful of companies and would jump whenever one of
+        them moved.
+
+        `winsorise` clips the **raw** characteristic to that many robust scale units either
+        side of its median, before the mean and standard deviation are computed.
+
+        The default of 4.0 is Barra's own bound: the GEM handbook truncates a factor exposure
+        to +/-4 standard deviations, and eliminates outright anything beyond 10.  But Barra
+        clips the *standardised* value, which this does not, and the difference is a matter of
+        cross-section size rather than disagreement.  Their estimation universe runs to tens of
+        thousands of assets, where no single name can move the standard deviation enough to
+        matter.  On a few dozen it can, and does.  Clipping the raw value against a robust
+        scale gives Barra's behaviour at their n and survives at small n too -- so the order
+        here is the whole point. Clipping *standardised* values cannot catch an outlier, because by
+        then the outlier has set the scale it would be measured against: a book-to-price of
+        twenty inflates the standard deviation to about eight, so it standardises to +0.1 --
+        well inside any sane clip -- while every ordinary company is crushed to about -2.3.
+        The outlier never looks extreme; it makes everyone else look identical.
+
+        The scale used for the clip is the median absolute deviation, rescaled by 1.4826 so it
+        estimates the same quantity as the standard deviation on normal data. MAD is used
+        rather than the standard deviation precisely because one extreme value cannot inflate
+        it -- which is what lets the clip bite. Where the MAD is zero (more than half the
+        securities sharing one value) it falls back to the standard deviation, and where that
+        is zero too the characteristic has no cross-sectional variation and standardises to
+        zeros.
+        """
+        values = self.values.copy()
+        n_dates, n_securities, n_factors = values.shape
+        if weights is not None:
+            weights = np.asarray(weights, dtype=float)
+            if weights.shape != (n_dates, n_securities):
+                raise ValueError(
+                    f"weights have shape {weights.shape}, expected "
+                    f"{(n_dates, n_securities)} (dates x securities)"
+                )
+
+        clipped = 0
+        for t in range(n_dates):
+            for k in range(n_factors):
+                column = values[t, :, k]
+                present = ~np.isnan(column)
+                if not present.any():
+                    continue
+                raw = column[present]
+
+                # Clip the RAW values first, against a scale an outlier cannot inflate.
+                # Doing this after standardising would be useless: see the docstring.
+                if winsorise is not None and raw.size > 2:
+                    centre = float(np.median(raw))
+                    scale = float(np.median(np.abs(raw - centre))) * 1.4826
+                    if scale <= 0.0:
+                        scale = float(np.std(raw, ddof=1))
+                    if scale > 0.0:
+                        low = centre - winsorise * scale
+                        high = centre + winsorise * scale
+                        clipped += int(np.count_nonzero((raw < low) | (raw > high)))
+                        raw = np.clip(raw, low, high)
+
+                if weights is None:
+                    w = np.ones(raw.size)
+                else:
+                    w = np.nan_to_num(weights[t, present], nan=0.0)
+                    if w.sum() <= 0.0:
+                        w = np.ones(raw.size)
+
+                mean = float(np.average(raw, weights=w))
+                # Equal-weighted dispersion on purpose: see the docstring.
+                spread = float(np.std(raw, ddof=1)) if raw.size > 1 else 0.0
+                if spread <= 0.0:
+                    # A characteristic with no cross-sectional variation carries no
+                    # information this period. Centring it leaves zeros, which is honest.
+                    values[t, present, k] = 0.0
+                    continue
+                standardised = (raw - mean) / spread
+                if winsorise is not None:
+                    # A guard, not the clip that does the work. The robust clip above fixed
+                    # the scale; this one only makes `winsorise` mean what it says, since the
+                    # standard deviation computed on clipped data is still a little larger
+                    # than the MAD scale the clip used, so a clipped value lands inside the
+                    # stated bound rather than on it. Nearly always a no-op.
+                    standardised = np.clip(standardised, -winsorise, winsorise)
+                values[t, present, k] = standardised
+
+        return CharacteristicPanel(
+            dates=self.dates,
+            securities=self.securities,
+            names=self.names,
+            values=values,
+            frequency=self.frequency,
+            standardised=True,
+            winsorised=clipped,
+        )

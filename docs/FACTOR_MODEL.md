@@ -190,6 +190,206 @@ are uncorrelated and equally volatile". `CONSTANT_CORRELATION` keeps each varian
 every correlation with their average. The diagonal is usually the more honest one for *factor*
 returns, since a factor set is typically built close to orthogonal already.
 
+### Two half-lives, not one
+
+`HorizonCovariance` estimates correlations on a long half-life and volatilities on a short
+one, then recombines. This is BIM301's design, and Barra's stated rationale is that
+correlation structure is more stationary than volatility, and that the correlation matrix has
+n(n-1)/2 elements to estimate against the volatilities' n -- so robustness binds far harder
+there, and a short half-life on correlations is how you arrive at the spurious structure that
+makes a minimum-risk portfolio forecast zero risk and then realise plenty of it.
+
+That is a claim, so it is tested rather than quoted. On a fixture with a stationary
+correlation structure and a volatility regime change in the last 60 of 600 periods, 200
+replications:
+
+| half-life | effective obs | correlation RMSE | volatility RMSE |
+|---|---|---|---|
+| 6 | 17.3 | 0.2095 | 0.4561 |
+| 12 | 34.6 | 0.1532 | **0.3302** |
+| 24 | 69.3 | 0.1251 | 0.3474 |
+| 36 | 103.9 | 0.1163 | 0.5033 |
+| 72 | 206.5 | **0.1040** | 0.8935 |
+
+Correlation accuracy improves monotonically with half-life; volatility accuracy is U-shaped,
+best at 12. The optima are at different half-lives, so a single parameter has to compromise --
+and the compromise is expensive in both directions: half-life 72 is nearly three times the
+best volatility error, half-life 6 double the best correlation error.
+
+The split does not have to compromise:
+
+| estimator | correlation RMSE | volatility RMSE |
+|---|---|---|
+| single half-life 12 | 0.1532 | 0.3302 |
+| single half-life 72 | 0.1040 | 0.8935 |
+| **split, vol 12 / corr 72** | **0.1040** | **0.3302** |
+
+It attains both optima simultaneously, which is the entire reason to estimate one matrix with
+two memories.
+
+`bim301_long()` and `bim301_short()` carry Barra's published configurations -- volatility
+half-life of one year and correlation of three for the long-horizon model, 90 trading days and
+two years for the short. Both take `periods_per_year`, so a configuration survives a change of
+panel frequency: BIM301S's 90 trading days is 90 periods on daily data, 18 on weekly and about
+4.3 on monthly. Barra calls these typical rather than universal and their component models
+vary, so they are starting configurations, not constants.
+
+Two properties worth knowing. Equal half-lives reduce the estimator **exactly** to
+`ExponentialCovariance`, pinned by a test, because an estimator whose general case does not
+contain its special case is usually wrong in both. And the recombination is safe: a PSD
+correlation matrix rescaled by a positive diagonal stays PSD, so the split cannot introduce the
+negative eigenvalues `psd_relative_floor` exists to repair.
+
+`effective_observations` reports the **correlation** window's figure, because that is the one
+that decides whether the matrix is singular -- the same reasoning that motivates the long
+correlation half-life in the first place.
+
+One incidental confirmation. BIM301 notes in passing that "the effective observation window is
+three times the half life." The closed form for an unbounded exponentially weighted window is
+(1+lambda)/(1-lambda), which tends to 2/ln(2) = **2.885** times the half-life. The Kish measure
+here reproduces that to three figures at every half-life tested, which is an independent check
+that `effective_observations` means what Barra means by it.
+
+## The cross-sectional estimator
+
+`crosssectional.py` runs the other direction. Every period, security returns are regressed
+*across securities* on their characteristics; the slopes are that period's factor returns.
+
+    time-series        one regression per security, over time
+                       factor returns given, exposures estimated
+
+    cross-sectional    one regression per period, over securities
+                       exposures given, factor returns estimated
+
+The exposures are not estimated at all. A log market cap is a measurement, not a statistic
+with a standard error, and it describes the company as it is today rather than averaging over
+whatever it was during a five-year window. A firm that has doubled in size has a new size
+exposure this month and a time-series beta that still half-remembers the old one.
+
+But the estimation error does not vanish -- it moves to the factor returns, and that is
+worse. A factor covariance built from estimated quantities has an inflated diagonal, and
+every forecast built on it inherits the inflation, worst for the portfolios most exposed to
+the noisiest factor.
+
+### Standardisation, and the order that makes winsorising work
+
+Raw characteristics are on incomparable scales: log market cap runs 10 to 30, book-to-price 0
+to 3. Factor returns estimated against them would be on incomparable scales too, and their
+covariance would mean nothing. So each characteristic is standardised cross-sectionally every
+period.
+
+The mean is **cap-weighted**, which is what puts the market portfolio at exactly zero
+exposure to every style factor. Equal-weighting it leaves the market at +1.36 standard
+deviations of size in a six-stock example, because small companies outnumber large ones --
+and every portfolio's size tilt would then be measured against a benchmark nobody holds. The
+standard deviation is deliberately **equal-weighted** even so: a cap-weighted dispersion is
+set by a handful of names and jumps when one of them moves.
+
+Winsorising has to happen on the **raw** values, before the mean and standard deviation are
+computed. This was got wrong first time and the error is instructive. Clipping *standardised*
+values cannot catch an outlier, because by then the outlier has set the scale it is being
+measured against:
+
+| book-to-price | 0.3 | 0.6 | 20.0 | 1.2 | 1.5 | 1.8 |
+|---|---|---|---|---|---|---|
+| standardised, clip at 4 after | -0.51 | -0.47 | **+2.04** | -0.39 | -0.35 | -0.31 |
+| standardised, clip at 4 before | -0.85 | -0.67 | **+1.92** | -0.31 | -0.13 | +0.05 |
+
+The outlier never looks extreme -- it makes everyone else look identical. The raw standard
+deviation is 7.74 against a MAD-based scale of 0.89, 8.7x inflated, so the 20 standardises
+to about two sigma and sails through any sane clip while compressing the five ordinary
+companies into a range of 0.20. Clipping first restores their range to 0.90.
+
+The scale used for the clip is the median absolute deviation, rescaled by 1.4826 so it
+estimates the same quantity as the standard deviation on normal data. MAD is used precisely
+because one extreme value cannot inflate it, which is what lets the clip bite. A second clip
+after standardising is a guard that makes the parameter mean what it says; it is nearly always
+a no-op.
+
+`CharacteristicPanel.winsorised` counts how many raw values moved. A handful means the clip
+did its job; a large fraction means the characteristic itself is wrong -- wrong units, a sign
+error, a vendor placeholder like -999 -- and no clipping will fix it.
+
+### Weights: two different arrays, easily confused
+
+`regression_weights` is for the regression, and Barra uses the square root of market cap, on
+the argument that residual variance scales roughly as the inverse of size. `standardise_weights`
+is for the mean, and should be market cap itself -- the point of a cap-weighted mean is to put
+the *market portfolio* at zero, and the market portfolio is weighted by cap, not by its root.
+Passing the same array to both is a quiet error that nothing downstream would flag.
+
+### The unit column changes meaning
+
+In the time-series model the intercept is alpha, and alpha is emphatically not an exposure.
+Here the unit column is the **market factor** and it *is* an exposure, because every security
+really does have unit exposure to the market. Same column of ones, opposite meaning, opposite
+treatment.
+
+### Specific risk is degrees-of-freedom corrected
+
+A Monte Carlo found a real bias here. Residuals from a fitted regression are systematically
+too small: the fit absorbs `rank` of the period's `n` observations, so the residual variance
+understates specific variance by `(n - k) / n`. Measured against a known truth of 0.0600:
+
+| securities | factors | sqrt((n-k)/n) | uncorrected | corrected |
+|---|---|---|---|---|
+| 200 | 4 | 0.990 | 0.05936 | 0.05996 |
+| 80 | 4 | 0.975 | 0.05848 | 0.06000 |
+| 40 | 10 | 0.866 | 0.05207 | 0.06013 |
+| 25 | 10 | 0.775 | 0.04653 | 0.06007 |
+
+Both columns are measured, the uncorrected one by an independent plain-OLS computation rather
+than by dividing the corrected figure back out.
+
+At 200 securities on 4 factors the bias is one percent and ignorable. At 25 on 10 it is 22
+percent, and specific risk is the dominant term for a concentrated portfolio -- so the
+forecast was understated exactly where it mattered most. The correction is applied period by
+period, because `n` varies.
+
+### The estimation-noise diagnostic
+
+The sample covariance of estimated factor returns estimates the true factor covariance *plus*
+the average sampling variance of the estimates. For WLS that sampling variance is
+`sigma^2 (X'WX)^-1`, computed per period and averaged, and `CrossSectionalNotes.noise_share`
+reports it as a fraction of the observed variance.
+
+Validated over 24 replications, as `(observed - realized) / predicted`, which should be 1.00
+for a diagnostic that measures what it claims:
+
+| securities | mean ratio | std err | mean noise share |
+|---|---|---|---|
+| 40 | 0.963 | 0.031 | 21.3% |
+| 80 | 1.051 | 0.058 | 12.5% |
+| 200 | 1.029 | 0.068 | 5.8% |
+| 800 | 0.949 | 0.121 | 1.6% |
+
+Every ratio is within two standard errors of one, and the share roughly halves as the
+cross-section doubles, as `sigma^2/n` predicts.
+
+The bias **is not subtracted off**. The naive correction can drive a variance negative, and
+flooring that at zero would turn a diagnostic into a fabrication; Barra's own adjustment is
+more careful than a subtraction. It is reported, and reported loudly past 25 percent.
+
+One structural point worth noting: because sampling variance is roughly constant across
+standardised factors, it is a larger *fraction* of a small factor's variance. The noise
+concentrates on the lowest-variance factor -- the same shape as the time-series intercept bias
+landing hardest on HML rather than on the market.
+
+### What it flags rather than fixes
+
+* **Collinear designs.** Industry dummies sum to the unit column, so a design with both has
+  no unique solution. The rank deficiency is detected, the period named, and `lstsq` returns
+  the minimum-norm solution -- *a* solution, but not one with an economic reading. A real
+  Barra model imposes a cap-weighted zero-sum constraint on the industry returns. Supply
+  industries without a market factor, or accept the flag.
+* **Modelled specific risk.** The sample standard deviation of a residual series is noisy for
+  a short history and says nothing at all about a security with none. Barra regresses specific
+  risk on characteristics so a new issue inherits a sensible forecast. The notes name the
+  securities that got nothing.
+* **Thin cross-sections.** `MIN_SECURITIES_PER_PERIOD` is 30, and unlike the time-series
+  minimum it bites hard: with ten factors and twelve securities the factor returns are fitted
+  through nearly every point and specific risk collapses for every security at once.
+
 ## Status
 
 Built, 29 tests in `tests/midoffice/test_model.py` and 28 in `test_covariance.py`:
@@ -197,6 +397,8 @@ Built, 29 tests in `tests/midoffice/test_model.py` and 28 in `test_covariance.py
 `FactorReturns`, date alignment with loss reporting, and the time-series estimator with
 annualisation, the intercept, both exclusion rules and conditioning reporting; the sample,
 exponentially weighted and shrunk covariance estimators with Ledoit-Wolf intensity.
+Both estimation directions are built: time-series (Fama-French) and cross-sectional
+(Barra), sharing one `FactorModel` output and one covariance-estimator interface.
 
 Not built:
 
@@ -204,10 +406,11 @@ Not built:
   published series can be used directly. Building SMB and HML by sorting on market cap and
   book-to-price is a separate set of choices -- breakpoints, rebalancing frequency,
   value-weighting -- and deserves its own step.
-* **Newey-West.** The third covariance correction, for autocorrelation. It matters most at
-  daily frequency, where returns autocorrelate and the other two do nothing about it. With
-  Bartlett weights it is positive semi-definite by construction, so it composes with the
-  others safely.
-* **The cross-sectional estimator**, which is what Barra does.
+* **Newey-West.** The remaining covariance correction, for autocorrelation. BIM301 applies
+  it throughout and is blunt about why: serial correlation is "significant enough to affect
+  model performance, even out to two weeks for highly liquid developed market stocks." So
+  this is not the daily-frequency nicety it was filed as -- it becomes necessary as soon as
+  the panel moves below monthly. With Bartlett weights it is positive semi-definite by
+  construction, so it composes with the others safely.
 * **A factor tree.** Three flat factors need no hierarchy; an industry-plus-style model does,
   and `compute_risk` already takes one.

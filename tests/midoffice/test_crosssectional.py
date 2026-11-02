@@ -1,0 +1,590 @@
+"""Cross-sectional (Barra-style) model estimation, and characteristics as exposures.
+
+The estimator is checked against synthetic worlds whose factor returns and specific risks are
+known by construction, because that is the only way to tell recovery from plausibility. Two of
+the tests here exist because a Monte Carlo found a real bias the eye would not have: the
+degrees-of-freedom understatement of specific risk, and the estimation-noise inflation of the
+factor covariance diagonal.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+import numpy as np
+import pytest
+
+from praxis.midoffice.model.characteristics import CharacteristicPanel
+from praxis.midoffice.model.covariance import ShrunkCovariance, SampleCovariance
+from praxis.midoffice.model.crosssectional import (
+    MARKET_FACTOR,
+    MIN_SECURITIES_PER_PERIOD,
+    estimate_cross_sectional_model,
+)
+from praxis.midoffice.model.panel import Frequency, ReturnPanel
+
+
+def _dates(n: int) -> tuple[date, ...]:
+    return tuple(date(2000 + t // 12, t % 12 + 1, 28) for t in range(n))
+
+
+def _world(
+    n_secs: int = 120,
+    n_periods: int = 240,
+    seed: int = 7,
+    spec_vol: float = 0.06,
+    n_char: int = 3,
+    frequency: Frequency = Frequency.MONTHLY,
+):
+    """A world whose factor returns and specific risk are known exactly.
+
+    Returns the panel, the already-standardised characteristics the returns were built from,
+    the true factor returns, and the true specific volatility.
+    """
+    rng = np.random.default_rng(seed)
+    dates = _dates(n_periods)
+    secs = tuple(f"S{i:04d}" for i in range(n_secs))
+    names = tuple(f"C{i}" for i in range(n_char))
+    standardised = CharacteristicPanel(
+        dates, secs, names, rng.normal(size=(n_periods, n_secs, n_char)), frequency
+    ).standardise()
+    true_vol = np.linspace(0.04, 0.010, n_char + 1)
+    f_true = rng.normal(size=(n_periods, n_char + 1)) * true_vol
+    design = np.concatenate(
+        [np.ones((n_periods, n_secs, 1)), standardised.values], axis=2
+    )
+    returns = np.einsum("tsk,tk->ts", design, f_true) + rng.normal(
+        size=(n_periods, n_secs)
+    ) * spec_vol
+    return (
+        ReturnPanel(dates, secs, returns, frequency),
+        standardised,
+        f_true,
+        spec_vol,
+    )
+
+
+def _fit(returns, chars, **kw):
+    kw.setdefault("standardise", False)
+    kw.setdefault("annualise", False)
+    kw.setdefault("min_securities", 10)
+    return estimate_cross_sectional_model(returns, chars, **kw)
+
+
+# --------------------------------------------------------------------------- panel structure
+
+
+def test_a_panel_refuses_values_of_the_wrong_shape():
+    with pytest.raises(ValueError, match="dates x securities x characteristics"):
+        CharacteristicPanel(_dates(3), ("A", "B"), ("Size",), np.zeros((3, 2, 2)))
+
+
+def test_a_panel_refuses_duplicate_securities():
+    with pytest.raises(ValueError, match="duplicate securities"):
+        CharacteristicPanel(_dates(2), ("A", "A"), ("Size",), np.zeros((2, 2, 1)))
+
+
+def test_a_panel_refuses_duplicate_characteristic_names():
+    with pytest.raises(ValueError, match="duplicate characteristics"):
+        CharacteristicPanel(_dates(2), ("A",), ("Size", "Size"), np.zeros((2, 1, 2)))
+
+
+def test_a_panel_refuses_descending_dates():
+    backwards = tuple(reversed(_dates(3)))
+    with pytest.raises(ValueError, match="ascending"):
+        CharacteristicPanel(backwards, ("A",), ("Size",), np.zeros((3, 1, 1)))
+
+
+def test_constant_holds_one_snapshot_across_every_date():
+    panel = CharacteristicPanel.constant(
+        _dates(4), {"A": {"Size": 1.0, "Value": 2.0}, "B": {"Size": 3.0, "Value": 4.0}}
+    )
+    assert panel.values.shape == (4, 2, 2)
+    assert np.array_equal(panel.at(0), panel.at(3))
+    assert panel.snapshot()["B"]["Value"] == 4.0
+
+
+def test_constant_leaves_an_absent_characteristic_missing():
+    panel = CharacteristicPanel.constant(
+        _dates(2), {"A": {"Size": 1.0, "Value": 2.0}, "B": {"Size": 3.0}}
+    )
+    assert "Value" not in panel.snapshot()["B"]
+    assert np.isnan(panel.values[0, 1, 1])
+
+
+def test_a_snapshot_defaults_to_the_most_recent_period():
+    values = np.zeros((3, 1, 1))
+    values[:, 0, 0] = [10.0, 20.0, 30.0]
+    panel = CharacteristicPanel(_dates(3), ("A",), ("Size",), values)
+    assert panel.snapshot()["A"]["Size"] == 30.0
+    assert panel.snapshot(0)["A"]["Size"] == 10.0
+
+
+def test_a_snapshot_omits_a_security_with_nothing_at_all():
+    values = np.full((2, 2, 1), np.nan)
+    values[:, 0, 0] = 1.0
+    panel = CharacteristicPanel(_dates(2), ("A", "B"), ("Size",), values)
+    assert set(panel.snapshot()) == {"A"}
+
+
+def test_coverage_counts_only_complete_characteristic_rows():
+    values = np.ones((4, 2, 2))
+    values[1, 1, 0] = np.nan
+    values[2, 1, 1] = np.nan
+    panel = CharacteristicPanel(_dates(4), ("A", "B"), ("Size", "Value"), values)
+    assert panel.coverage() == {"A": 4, "B": 2}
+
+
+# --------------------------------------------------------------------- standardisation
+
+
+def test_standardising_gives_zero_mean_and_unit_dispersion():
+    rng = np.random.default_rng(0)
+    panel = CharacteristicPanel(
+        _dates(3), tuple(f"S{i}" for i in range(50)), ("Size",),
+        rng.normal(loc=17.0, scale=4.0, size=(3, 50, 1)),
+    )
+    out = panel.standardise()
+    column = out.at(0)[:, 0]
+    assert abs(float(np.mean(column))) < 1e-12
+    assert float(np.std(column, ddof=1)) == pytest.approx(1.0, abs=0.05)
+    assert out.standardised is True
+
+
+def test_a_cap_weighted_mean_puts_the_market_at_zero_style_exposure():
+    """The reason Barra weights the mean, and the reason this is not cosmetic.
+
+    Equal-weighting leaves the market portfolio with a large exposure to the very factor the
+    standardisation was supposed to centre, so every portfolio's tilt is measured against a
+    benchmark nobody holds.
+    """
+    cap = np.array([10.0, 12.0, 14.0, 18.0, 22.0, 25.0])
+    values = np.tile(cap.reshape(1, -1, 1), (2, 1, 1))
+    secs = tuple(f"S{i}" for i in range(6))
+    panel = CharacteristicPanel(_dates(2), secs, ("Size",), values)
+    weights = np.tile(np.exp(cap), (2, 1))
+    market = weights[0] / weights[0].sum()
+
+    cap_weighted = panel.standardise(weights).at(0)[:, 0]
+    equal_weighted = panel.standardise().at(0)[:, 0]
+
+    assert abs(float(market @ cap_weighted)) < 1e-12
+    assert float(market @ equal_weighted) > 1.0
+
+
+def test_the_dispersion_stays_equal_weighted_even_when_the_mean_is_not():
+    """A cap-weighted standard deviation would let a few names set the factor's scale."""
+    cap = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    values = np.tile(cap.reshape(1, -1, 1), (1, 1, 1))
+    panel = CharacteristicPanel(_dates(1), tuple(f"S{i}" for i in range(6)), ("X",), values)
+    heavy = np.array([[1.0, 1.0, 1.0, 1.0, 1.0, 1e6]])
+    out = panel.standardise(heavy, winsorise=None).at(0)[:, 0]
+    # Equal-weighted dispersion of the raw values is unchanged by the weighting, so the
+    # spacing between adjacent securities stays one raw unit over that dispersion.
+    spacing = float(np.diff(out)[0])
+    assert spacing == pytest.approx(1.0 / float(np.std(cap, ddof=1)), rel=1e-12)
+
+
+def test_winsorising_clips_the_raw_value_so_the_clip_actually_bites():
+    """The defect this module was rewritten to fix.
+
+    Clipping standardised values cannot catch an outlier, because by then the outlier has set
+    the scale it would be measured against: a book-to-price of twenty inflates the standard
+    deviation to about eight, standardises to +0.1, and sails through any sane clip while
+    crushing every ordinary company to about -2.3.
+    """
+    raw = np.array([0.3, 0.6, 20.0, 1.2, 1.5, 1.8])
+    values = raw.reshape(1, -1, 1)
+    panel = CharacteristicPanel(_dates(1), tuple(f"S{i}" for i in range(6)), ("Value",), values)
+
+    clipped = panel.standardise(winsorise=4.0).at(0)[:, 0]
+    unclipped = panel.standardise(winsorise=None).at(0)[:, 0]
+
+    ordinary = [0, 1, 3, 4, 5]
+    assert np.ptp(clipped[ordinary]) > 3.0 * np.ptp(unclipped[ordinary])
+
+
+def test_the_outlier_sets_the_scale_which_is_why_order_matters():
+    """Pins the mechanism, not just the symptom: the raw standard deviation is inflated."""
+    raw = np.array([0.3, 0.6, 20.0, 1.2, 1.5, 1.8])
+    centre = float(np.median(raw))
+    mad_scale = float(np.median(np.abs(raw - centre))) * 1.4826
+    assert float(np.std(raw, ddof=1)) > 5.0 * mad_scale
+    # And the outlier, measured against the inflated scale, is not even two sigma out.
+    assert (raw.max() - raw.mean()) / np.std(raw, ddof=1) < 2.5
+
+
+def test_the_winsorised_count_reports_how_many_raw_values_moved():
+    raw = np.array([0.3, 0.6, 20.0, 1.2, 1.5, 1.8])
+    values = np.tile(raw.reshape(1, -1, 1), (4, 1, 1))
+    panel = CharacteristicPanel(_dates(4), tuple(f"S{i}" for i in range(6)), ("Value",), values)
+    assert panel.standardise(winsorise=4.0).winsorised == 4
+    assert panel.standardise(winsorise=None).winsorised == 0
+
+
+def test_no_standardised_exposure_exceeds_the_stated_bound():
+    rng = np.random.default_rng(5)
+    raw = rng.standard_cauchy(size=(3, 60, 2)) * 3.0
+    panel = CharacteristicPanel(_dates(3), tuple(f"S{i}" for i in range(60)), ("A", "B"), raw)
+    out = panel.standardise(winsorise=3.0)
+    assert float(np.nanmax(np.abs(out.values))) <= 3.0 + 1e-12
+
+
+def test_a_characteristic_with_no_variation_standardises_to_zero():
+    panel = CharacteristicPanel(_dates(2), ("A", "B", "C"), ("Flat",), np.full((2, 3, 1), 7.0))
+    assert np.array_equal(panel.standardise().values, np.zeros((2, 3, 1)))
+
+
+def test_a_zero_mad_falls_back_to_the_standard_deviation():
+    """More than half the securities sharing one value makes the MAD zero."""
+    raw = np.array([5.0, 5.0, 5.0, 5.0, 5.0, 40.0])
+    values = raw.reshape(1, -1, 1)
+    panel = CharacteristicPanel(_dates(1), tuple(f"S{i}" for i in range(6)), ("X",), values)
+    out = panel.standardise(winsorise=1.0).at(0)[:, 0]
+    assert np.isfinite(out).all()
+    assert float(np.nanmax(np.abs(out))) <= 1.0 + 1e-12
+
+
+def test_standardising_preserves_what_was_missing():
+    values = np.ones((2, 4, 1))
+    values[0, 2, 0] = np.nan
+    panel = CharacteristicPanel(_dates(2), ("A", "B", "C", "D"), ("X",), values)
+    out = panel.standardise()
+    assert np.isnan(out.values[0, 2, 0])
+    assert not np.isnan(out.values[1, 2, 0])
+
+
+def test_standardise_refuses_weights_of_the_wrong_shape():
+    panel = CharacteristicPanel(_dates(3), ("A", "B"), ("X",), np.ones((3, 2, 1)))
+    with pytest.raises(ValueError, match="dates x securities"):
+        panel.standardise(np.ones((3, 5)))
+
+
+# -------------------------------------------------------------- recovery of a known truth
+
+
+def test_the_estimator_recovers_the_factor_returns_it_was_built_from():
+    returns, chars, f_true, _ = _world(n_secs=200, n_periods=240, seed=7)
+    model = _fit(returns, chars)
+    observed = np.sqrt(np.array(model.notes.observed_variance))
+    truth = np.std(f_true, axis=0, ddof=1)
+    # Biased slightly high by estimation noise, which the next tests are about.
+    assert np.all(observed > 0.9 * truth)
+    assert np.all(observed < 1.2 * truth)
+
+
+def test_the_market_factor_is_an_exposure_of_one_for_every_security():
+    """Where the cross-sectional model inverts the time-series one.
+
+    A time-series intercept is alpha and is deliberately not an exposure. The unit column here
+    is the market factor and every security really does load 1.0 on it.
+    """
+    returns, chars, _, _ = _world(n_secs=60, n_periods=60)
+    model = _fit(returns, chars)
+    market_id = model.factor_ids[0]
+    assert model.factor_names[market_id] == MARKET_FACTOR
+    assert all(ev.exposures[market_id] == 1.0 for ev in model.exposures.values())
+
+
+def test_omitting_the_market_factor_leaves_only_the_characteristics():
+    returns, chars, _, _ = _world(n_secs=60, n_periods=60, n_char=3)
+    model = _fit(returns, chars, fit_market=False)
+    assert MARKET_FACTOR not in model.factor_names.values()
+    assert len(model.factor_ids) == 3
+
+
+def test_specific_risk_is_unbiased_on_a_narrow_cross_section():
+    """The degrees-of-freedom correction, where it matters.
+
+    Twenty-five securities on ten factors: the fit absorbs ten of twenty-five observations
+    every period, so uncorrected residuals understate specific volatility by
+    sqrt(15/25) = 0.775 -- a 22 percent understatement of the term that dominates a
+    concentrated portfolio's risk.
+    """
+    returns, chars, _, spec_vol = _world(n_secs=25, n_periods=600, seed=3, n_char=9)
+    model = _fit(returns, chars, min_securities=12)
+    estimated = np.mean(
+        [ev.specific.by_issuer[code] for code, ev in model.exposures.items()]
+    )
+    uncorrected = spec_vol * np.sqrt((25 - 10) / 25)
+    assert estimated == pytest.approx(spec_vol, rel=0.03)
+    assert uncorrected < 0.8 * spec_vol  # the bias the correction removes is material
+
+
+def test_specific_risk_is_unbiased_on_a_wide_cross_section_too():
+    returns, chars, _, spec_vol = _world(n_secs=200, n_periods=400, seed=11)
+    model = _fit(returns, chars)
+    estimated = np.mean(
+        [ev.specific.by_issuer[code] for code, ev in model.exposures.items()]
+    )
+    assert estimated == pytest.approx(spec_vol, rel=0.02)
+
+
+# ------------------------------------------------------------ the estimation-noise diagnostic
+
+
+def test_noise_share_measures_the_bias_it_claims_to():
+    """The factor covariance diagonal is inflated by the sampling variance of its own
+    estimation, and `sampling_variance` predicts that inflation.
+
+    Averaged over replications, (observed - realized) / predicted should be one. A single
+    replication cannot show this: over 240 periods the sample variance of the true factor
+    series has a relative standard error of about 9 percent, which swamps the bias.
+    """
+    ratios = []
+    for seed in range(12):
+        returns, chars, f_true, _ = _world(n_secs=60, n_periods=240, seed=500 + seed)
+        model = _fit(returns, chars)
+        realized = np.var(f_true, axis=0, ddof=1)
+        observed = np.array(model.notes.observed_variance)
+        predicted = np.array(model.notes.sampling_variance)
+        ratios.append(float(np.mean((observed - realized) / predicted)))
+    mean = float(np.mean(ratios))
+    stderr = float(np.std(ratios, ddof=1) / np.sqrt(len(ratios)))
+    assert abs(mean - 1.0) < max(3.0 * stderr, 0.25)
+
+
+def test_noise_share_falls_as_the_cross_section_widens():
+    shares = []
+    for n_secs in (40, 100, 400):
+        returns, chars, _, _ = _world(n_secs=n_secs, n_periods=180, seed=17)
+        model = _fit(returns, chars)
+        shares.append(float(np.mean(model.notes.noise_share)))
+    assert shares[0] > shares[1] > shares[2]
+    assert shares[2] < 0.5 * shares[0]
+
+
+def test_noise_concentrates_on_the_lowest_variance_factor():
+    """Sampling variance is roughly constant across standardised factors, so it is a larger
+    fraction of a small factor's variance -- the same structure as the time-series intercept
+    bias landing hardest on the lowest-variance factor."""
+    returns, chars, _, _ = _world(n_secs=80, n_periods=240, seed=23, n_char=3)
+    model = _fit(returns, chars)
+    shares = model.notes.noise_share
+    variances = model.notes.observed_variance
+    assert variances[0] == max(variances)  # market, built with the largest vol
+    assert shares[0] == min(shares)
+    assert shares[-1] == max(shares)
+
+
+def test_a_loud_noise_share_is_reported_as_a_qualification():
+    returns, chars, _, _ = _world(n_secs=15, n_periods=120, seed=29, n_char=3)
+    model = _fit(returns, chars, min_securities=12)
+    assert any("sampling error of its own estimation" in q for q in model.qualifications())
+
+
+def test_the_noise_share_of_an_unestimated_covariance_is_empty():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=40)
+    model = _fit(returns, chars)
+    assert len(model.notes.noise_share) == len(model.factor_ids)
+    assert all(np.isfinite(model.notes.noise_share))
+
+
+# ------------------------------------------------------------------------ what it refuses
+
+
+def test_a_frequency_mismatch_is_refused():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=40)
+    weekly = CharacteristicPanel(
+        chars.dates, chars.securities, chars.names, chars.values, Frequency.WEEKLY
+    )
+    with pytest.raises(ValueError, match="align them before estimating"):
+        _fit(returns, weekly)
+
+
+def test_no_shared_dates_is_refused():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=40)
+    shifted = CharacteristicPanel(
+        tuple(date(d.year + 50, d.month, d.day) for d in chars.dates),
+        chars.securities, chars.names, chars.values, chars.frequency,
+    )
+    with pytest.raises(ValueError, match="share no dates"):
+        _fit(returns, shifted)
+
+
+def test_no_shared_securities_is_refused():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=40)
+    renamed = CharacteristicPanel(
+        chars.dates, tuple(f"X{s}" for s in chars.securities),
+        chars.names, chars.values, chars.frequency,
+    )
+    with pytest.raises(ValueError, match="share no securities"):
+        _fit(returns, renamed)
+
+
+def test_every_period_too_thin_is_refused_with_advice():
+    returns, chars, _, _ = _world(n_secs=12, n_periods=60)
+    with pytest.raises(ValueError, match="lower min_securities"):
+        estimate_cross_sectional_model(
+            returns, chars, standardise=False, min_securities=MIN_SECURITIES_PER_PERIOD
+        )
+
+
+def test_regression_weights_of_the_wrong_shape_are_refused():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=40)
+    with pytest.raises(ValueError, match="to match the return panel"):
+        _fit(returns, chars, regression_weights=np.ones((40, 9)))
+
+
+# --------------------------------------------------------------------- what it reports
+
+
+def test_a_thin_period_is_dropped_and_named():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60, seed=31)
+    blanked = returns.returns.copy()
+    blanked[5, 5:] = np.nan  # five usable securities that period
+    thinned = ReturnPanel(returns.dates, returns.securities, blanked, returns.frequency)
+    model = _fit(thinned, chars, min_securities=20)
+    assert chars.dates[5] in model.notes.thin_periods
+    assert model.notes.n_periods == 59
+    assert any("dropped for having fewer than" in q for q in model.qualifications())
+
+
+def test_a_collinear_design_is_flagged_rather_than_hidden():
+    """Industry dummies alongside a market factor: the classic rank deficiency.
+
+    Three mutually exclusive industry indicators sum to the unit column, so the design has no
+    unique solution. lstsq returns the minimum-norm one, which is a solution without an
+    economic reading, and the notes say so rather than letting it pass.
+    """
+    n_secs, n_periods = 60, 36
+    rng = np.random.default_rng(41)
+    dates, secs = _dates(n_periods), tuple(f"S{i:03d}" for i in range(n_secs))
+    industry = np.zeros((n_periods, n_secs, 3))
+    for j in range(n_secs):
+        industry[:, j, j % 3] = 1.0
+    chars = CharacteristicPanel(dates, secs, ("Tech", "Fin", "Energy"), industry)
+    returns = ReturnPanel(
+        dates, secs, rng.normal(scale=0.05, size=(n_periods, n_secs)), Frequency.MONTHLY
+    )
+    model = _fit(returns, chars, standardise=False, fit_market=True)
+    assert len(model.notes.rank_deficient_periods) == n_periods
+    assert any("minimum-norm solution" in q for q in model.qualifications())
+
+
+def test_a_security_without_characteristics_at_the_exposure_date_is_excluded():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60, seed=43)
+    values = chars.values.copy()
+    values[-1, 3, 0] = np.nan
+    holed = CharacteristicPanel(
+        chars.dates, chars.securities, chars.names, values, chars.frequency
+    )
+    model = _fit(returns, holed)
+    missing = chars.securities[3]
+    assert missing in model.notes.no_exposures
+    assert missing not in model.exposures
+    assert any("incomplete characteristic row" in q for q in model.qualifications())
+
+
+def test_a_security_with_too_little_history_is_excluded_and_named():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60, seed=47)
+    holed = returns.returns.copy()
+    holed[:-5, 2] = np.nan
+    thin = ReturnPanel(returns.dates, returns.securities, holed, returns.frequency)
+    model = _fit(thin, chars, min_observations=24)
+    short = returns.securities[2]
+    assert short in model.notes.short_history
+    assert short not in model.exposures
+    assert any("residual observation" in q for q in model.qualifications())
+
+
+def test_the_exposure_index_chooses_which_period_becomes_the_exposures():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60, seed=53)
+    last = _fit(returns, chars, exposure_index=-1)
+    first = _fit(returns, chars, exposure_index=0)
+    code = returns.securities[0]
+    style_id = last.factor_ids[1]
+    assert last.exposures[code].exposures[style_id] == pytest.approx(
+        chars.values[-1, 0, 0]
+    )
+    assert first.exposures[code].exposures[style_id] == pytest.approx(
+        chars.values[0, 0, 0]
+    )
+
+
+def test_notes_record_the_conventions_the_estimate_ran_under():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60)
+    model = _fit(returns, chars)
+    assert model.notes.weighting == "equal"
+    assert model.notes.standardised is False
+    assert model.notes.market_factor is True
+    assert 0.0 < model.notes.mean_r_squared < 1.0
+
+
+def test_not_standardising_is_reported_as_a_qualification():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60)
+    model = _fit(returns, chars)
+    assert any("incomparable scales" in q for q in model.qualifications())
+
+
+def test_describe_works_for_cross_sectional_notes_too():
+    """FactorModel.notes is a structural protocol, not the time-series class."""
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60)
+    model = _fit(returns, chars)
+    text = model.describe()
+    assert "4-factor model" in text
+    assert "monthly" in text
+
+
+# ----------------------------------------------------------------------- the knobs
+
+
+def test_regression_weights_change_the_estimate():
+    returns, chars, _, _ = _world(n_secs=60, n_periods=120, seed=59)
+    rng = np.random.default_rng(59)
+    cap = rng.lognormal(mean=10.0, sigma=2.0, size=60)
+    weights = np.tile(np.sqrt(cap), (120, 1))
+    equal = _fit(returns, chars)
+    weighted = _fit(returns, chars, regression_weights=weights)
+    assert weighted.notes.weighting != equal.notes.weighting
+    assert not np.allclose(
+        equal.covariance.matrix, weighted.covariance.matrix, rtol=1e-6
+    )
+
+
+def test_a_zero_weight_removes_a_security_from_that_period():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60, seed=61)
+    weights = np.ones((60, 40))
+    weights[0, 20:] = 0.0
+    model = _fit(returns, chars, regression_weights=weights, min_securities=25)
+    assert chars.dates[0] in model.notes.thin_periods
+
+
+def test_the_covariance_estimator_is_pluggable():
+    returns, chars, _, _ = _world(n_secs=60, n_periods=40, seed=67, n_char=8)
+    plain = _fit(returns, chars)
+    shrunk = _fit(
+        returns, chars, covariance_estimator=ShrunkCovariance(SampleCovariance(), intensity=0.5)
+    )
+    assert not np.allclose(plain.covariance.matrix, shrunk.covariance.matrix)
+    assert shrunk.notes.covariance is not None
+    assert shrunk.notes.covariance.shrinkage_intensity == pytest.approx(0.5)
+
+
+def test_annualising_scales_variance_by_periods_and_volatility_by_its_root():
+    returns, chars, _, _ = _world(n_secs=60, n_periods=120, seed=71)
+    monthly = _fit(returns, chars, annualise=False)
+    annual = _fit(returns, chars, annualise=True)
+    assert np.allclose(annual.covariance.matrix, monthly.covariance.matrix * 12.0)
+    code = returns.securities[0]
+    assert annual.exposures[code].specific.by_issuer[code] == pytest.approx(
+        monthly.exposures[code].specific.by_issuer[code] * np.sqrt(12.0)
+    )
+
+
+def test_standardising_inside_the_estimator_matches_standardising_outside():
+    returns, chars, _, _ = _world(n_secs=60, n_periods=120, seed=73)
+    raw = CharacteristicPanel(
+        chars.dates, chars.securities, chars.names,
+        chars.values * 7.0 + 3.0, chars.frequency,
+    )
+    inside = _fit(returns, raw, standardise=True, winsorise=None)
+    outside = _fit(returns, raw.standardise(winsorise=None), standardise=False)
+    assert np.allclose(inside.covariance.matrix, outside.covariance.matrix)
+
+
+def test_first_factor_id_shifts_the_whole_basis():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60)
+    model = _fit(returns, chars, first_factor_id=501)
+    assert model.factor_ids == (501, 502, 503, 504)
+    assert model.factor_names[501] == MARKET_FACTOR
