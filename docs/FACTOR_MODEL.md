@@ -390,6 +390,97 @@ landing hardest on HML rather than on the market.
   minimum it bites hard: with ten factors and twelve securities the factor returns are fitted
   through nearly every point and specific risk collapses for every security at once.
 
+## Specific risk from characteristics
+
+`specificrisk.py` implements Barra's EQ 3-12 to 3-14. The sample standard deviation of a
+residual series -- what `crosssectional.py` produces on its own -- is named in the handbook as
+the naive approach, and it has two failures: it is noisy on a short history, and it says
+*nothing at all* about a security with none.
+
+    sigma_it = kappa_it * (1 + V_it) * S_t          S_t = alpha + sum_j beta_j S_{t-j}
+                                                    V_it = sum_k Z_ikt gamma_k
+
+Three pieces, three different questions. **S** is the market-wide average absolute specific
+return, forecast from its own recent history -- the part that moves together, which nothing
+built from one security's residuals can see. **V** is how much riskier this security is than
+that average, regressed cross-sectionally on characteristics -- the part that gives a new
+issue a forecast, because it has characteristics even with no returns. **kappa** converts an
+absolute-return forecast into a standard deviation.
+
+Everything is built on absolute returns rather than squared ones, and the handbook gives the
+reason in two words: "for robustness reasons."
+
+### kappa has to be calibrated on normalised residuals
+
+For a normal distribution E|X| = sigma*sqrt(2/pi), so kappa = sqrt(pi/2) = **1.2533**, and
+recovering that from simulated normal residuals is the check that the three multiplied factors
+are identified rather than absorbing each other's scale.
+
+The first implementation calibrated kappa by comparing a security's realised standard
+deviation against its mean absolute forecast directly, and a failing test caught the problem:
+a quadratic measure and a linear one respond differently to a change in the level, so a window
+spanning a regime shift biased kappa upward by 15%. Dividing both sides by `S_t` first removes
+the level path entirely, which is right in principle -- kappa describes the *shape* of the
+distribution, not its size:
+
+| level shift in last quarter | kappa | vs sqrt(pi/2) | forecast | true |
+|---|---|---|---|---|
+| none | 1.2445 | -0.7% | 6.12% | 6.00% |
+| 2x | 1.2445 | -0.7% | 12.24% | 12.00% |
+| 3x | 1.2445 | -0.7% | 18.36% | 18.00% |
+| 5x | 1.2445 | -0.7% | 30.60% | 30.00% |
+
+USE3 goes further and fits kappa as a piecewise-linear function of relative capitalisation,
+calibrated to zero the average bias within each capitalisation decile -- doing two jobs at
+once, converting units and absorbing the size-related bias that remains because small
+companies' specific returns are further from normal. `capitalisations` enables that; without
+it kappa falls back to the normal constant and the notes say so.
+
+### The linear form runs past its own validity
+
+EQ 3-14 makes V linear in the characteristics, so `1 + V` turns negative for a security far
+enough into the tail -- with a coefficient of 0.3, anything past -3.3 standard deviations.
+Unfloored, that security is forecast to have **negative** specific risk, and flooring at zero
+merely renames the problem: a portfolio concentrated in it would be reported as carrying only
+factor risk. `forecast` floors at a tenth of the market-average specific risk and `floored()`
+names what it caught, because a security at the floor has a forecast the model did not make.
+
+### The model does not beat a sample standard deviation, and that is the point
+
+This was worth measuring rather than assuming, and the measurement reversed the expected
+conclusion. The characteristic model's error is **irreducible** -- it is the cross-sectional
+variation the characteristics do not contain, and more history does not shrink it. A sample
+standard deviation's error is **statistical**, falling as 1/sqrt(2(n-1)). So the sample
+estimate overtakes the model as soon as there is enough history: on a panel where the
+characteristics explain 20% of the cross-sectional variation, a plain 15-period trailing
+standard deviation wins comfortably.
+
+What the model does have is robustness to a shift in the level, and coverage of securities
+with no history at all. Forecasting the next period after a 3x level shift, 60 periods of
+history:
+
+| estimator | stable level | 3x shift |
+|---|---|---|
+| characteristic model | 0.269 | 0.298 |
+| sample sd, full 60 periods | **0.096** | 0.456 |
+| sample sd, trailing 15 | 0.197 | 0.197 |
+| **precision-weighted blend** | 0.163 | **0.164** |
+
+(RMSE relative to the mean true specific volatility, 12 replications.)
+
+So the answer is to use both, which is what BIM301's footnote says its specific risk models
+do -- "combining assets' specific return history with other information." `blend` weights them
+by inverse variance in the relative space they share:
+
+    v_model = relative_residual_sd^2        (irreducible)
+    v_hist  = 1 / (2 (n - 1))               (statistical, per security)
+    w_model = v_hist / (v_model + v_hist)
+
+which has the right limits without being told them: a security with no history gets the pure
+model, one with a long history gets its own sample estimate, and better characteristics earn
+more weight because `relative_residual_sd` is smaller. The blend beats both of its inputs, and
+is the only one of the three that is good in every regime.
+
 ## Status
 
 Built, 29 tests in `tests/midoffice/test_model.py` and 28 in `test_covariance.py`:
