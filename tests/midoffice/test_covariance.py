@@ -22,6 +22,7 @@ from praxis.midoffice.model.covariance import (
     CovarianceEstimate,
     ExponentialCovariance,
     HorizonCovariance,
+    NeweyWestCovariance,
     SampleCovariance,
     ShrinkageTarget,
     ShrunkCovariance,
@@ -543,3 +544,188 @@ def test_the_split_estimator_plugs_into_a_factor_model():
     assert model.notes.covariance is not None
     assert model.notes.covariance.volatility_half_life == pytest.approx(12.0)
     assert "split horizon" in model.describe()
+
+
+# ------------------------------------------------------------- Newey-West autocorrelation
+
+
+def _ar1(rho: float, n_periods: int, seed: int, n_factors: int = 2) -> np.ndarray:
+    """An AR(1) factor series, whose long-run variance is known in closed form."""
+    rng = np.random.default_rng(seed)
+    innovations = rng.normal(size=(n_periods, n_factors))
+    series = np.zeros_like(innovations)
+    for t in range(1, n_periods):
+        series[t] = rho * series[t - 1] + innovations[t]
+    return series
+
+
+def _bartlett_expectation(rho: float, lags: int) -> float:
+    """What a Bartlett-weighted estimator should recover, as a multiple of Gamma_0.
+
+    Not the full (1+rho)/(1-rho): the Bartlett weights discount every lag, so the estimator
+    is biased low by a predictable amount. Testing against the right target rather than
+    against the long-run variance is what distinguishes a kernel working correctly from one
+    that is broken.
+    """
+    j = np.arange(1, lags + 1)
+    return float(1.0 + 2.0 * np.sum((1.0 - j / (lags + 1.0)) * rho**j))
+
+
+def test_zero_lags_reduce_to_the_sample_covariance():
+    returns = _ar1(0.4, 200, seed=0)
+    assert np.allclose(
+        NeweyWestCovariance(lags=0).estimate(returns).matrix,
+        SampleCovariance().estimate(returns).matrix,
+    )
+
+
+def test_it_recovers_what_bartlett_weighting_says_it_should():
+    for rho, lags in ((0.2, 5), (0.3, 9), (0.5, 9)):
+        measured = []
+        for seed in range(10):
+            returns = _ar1(rho, 4000, seed=200 + seed)
+            corrected = NeweyWestCovariance(lags=lags).estimate(returns)
+            plain = NeweyWestCovariance(lags=0).estimate(returns)
+            measured.append(
+                float(np.mean(np.diag(corrected.matrix) / np.diag(plain.matrix)))
+            )
+        assert np.mean(measured) == pytest.approx(
+            _bartlett_expectation(rho, lags), rel=0.05
+        )
+
+
+def test_the_correction_is_in_the_right_direction_and_grows_with_persistence():
+    ratios = []
+    for rho in (0.0, 0.2, 0.4, 0.6):
+        values = []
+        for seed in range(6):
+            returns = _ar1(rho, 2000, seed=300 + seed)
+            corrected = NeweyWestCovariance(lags=10).estimate(returns)
+            plain = NeweyWestCovariance(lags=0).estimate(returns)
+            values.append(
+                float(np.mean(np.diag(corrected.matrix) / np.diag(plain.matrix)))
+            )
+        ratios.append(float(np.mean(values)))
+    assert ratios[0] == pytest.approx(1.0, abs=0.05)
+    assert all(a < b for a, b in zip(ratios, ratios[1:]))
+
+
+def test_an_independent_series_is_left_alone_on_average():
+    """Unbiased, not identical -- and the difference matters for how this is tested.
+
+    With no true autocorrelation the estimated autocovariances are pure noise with a standard
+    deviation of about Gamma_0/sqrt(T) each, so a single panel's correction is a few percent
+    off in either direction and an off-diagonal element whose true value is zero can move by
+    much more than any relative tolerance allows. The claim is that it does not move
+    systematically.
+    """
+    ratios = []
+    for seed in range(20):
+        rng = np.random.default_rng(5 + seed)
+        returns = rng.normal(size=(2000, 3))
+        corrected = NeweyWestCovariance().estimate(returns)
+        plain = SampleCovariance().estimate(returns)
+        ratios.append(float(np.mean(np.diag(corrected.matrix) / np.diag(plain.matrix))))
+    mean = float(np.mean(ratios))
+    stderr = float(np.std(ratios, ddof=1) / np.sqrt(len(ratios)))
+    assert abs(mean - 1.0) < max(3.0 * stderr, 0.02)
+
+
+def test_bartlett_weighting_keeps_the_estimate_positive_semi_definite():
+    """The reason for the weights, over enough panels to mean something."""
+    worst = np.inf
+    for seed in range(120):
+        rng = np.random.default_rng(900 + seed)
+        n_periods = int(rng.integers(30, 300))
+        n_factors = int(rng.integers(2, 9))
+        matrix = NeweyWestCovariance().estimate(
+            _ar1(0.4, n_periods, 900 + seed, n_factors=n_factors)
+        ).matrix
+        worst = min(worst, float(np.linalg.eigvalsh((matrix + matrix.T) / 2.0).min()))
+    assert worst > 0.0
+
+
+def test_combining_it_with_exponential_weighting_can_break_that_guarantee():
+    """Pinned because the docstring claims it and because the combination is tempting.
+
+    Short panel, many factors, heavy decay: the estimate goes indefinite most of the time,
+    and by a wide margin rather than a rounding error.
+    """
+    negatives = 0
+    worst = np.inf
+    for seed in range(120):
+        rng = np.random.default_rng(5000 + seed)
+        n_periods = int(rng.integers(25, 60))
+        n_factors = int(rng.integers(5, 12))
+        matrix = NeweyWestCovariance(lags=8, half_life=6.0).estimate(
+            _ar1(0.6, n_periods, 5000 + seed, n_factors=n_factors)
+        ).matrix
+        smallest = float(np.linalg.eigvalsh((matrix + matrix.T) / 2.0).min())
+        worst = min(worst, smallest)
+        negatives += smallest < -1e-12
+    assert negatives > 60
+    assert worst < -0.1
+
+
+def test_the_combination_warns_that_it_is_no_longer_guaranteed():
+    estimate = NeweyWestCovariance(lags=4, half_life=12.0).estimate(_ar1(0.4, 80, 7))
+    assert any("not guaranteed positive" in note for note in estimate.notes)
+
+
+def test_an_indefinite_result_is_named_rather_than_left_to_be_discovered():
+    estimate = NeweyWestCovariance(lags=8, half_life=6.0).estimate(
+        _ar1(0.6, 30, 5000, n_factors=8)
+    )
+    smallest = float(np.linalg.eigvalsh(estimate.matrix).min())
+    if smallest < 0.0:
+        assert any("negative eigenvalue" in note for note in estimate.notes)
+
+
+def test_the_automatic_bandwidth_follows_newey_and_wests_rule():
+    estimator = NeweyWestCovariance()
+    for n_periods in (100, 250, 1000, 4000):
+        assert estimator.bandwidth(n_periods) == int(
+            np.floor(4.0 * (n_periods / 100.0) ** (2.0 / 9.0))
+        )
+    # Never more lags than there are usable pairs.
+    assert NeweyWestCovariance(lags=500).bandwidth(10) == 9
+
+
+def test_a_bandwidth_of_zero_says_it_did_nothing():
+    estimate = NeweyWestCovariance(lags=0).estimate(_ar1(0.4, 60, 3))
+    assert any("no autocorrelation correction at all" in n for n in estimate.notes)
+
+
+def test_the_method_names_the_lag_count():
+    assert "9 lag(s)" in NeweyWestCovariance(lags=9).estimate(_ar1(0.3, 100, 1)).method
+
+
+def test_negative_lags_and_non_positive_half_lives_are_refused():
+    with pytest.raises(ValueError, match="lags must be non-negative"):
+        NeweyWestCovariance(lags=-1)
+    with pytest.raises(ValueError, match="half_life must be positive"):
+        NeweyWestCovariance(half_life=0.0)
+
+
+def test_newey_west_plugs_into_a_factor_model():
+    from datetime import date
+
+    from praxis.midoffice.model.panel import FactorReturns, Frequency, ReturnPanel
+    from praxis.midoffice.model.timeseries import estimate_timeseries_model
+
+    rng = np.random.default_rng(21)
+    n_periods = 120
+    dates = tuple(date(2000 + t // 12, t % 12 + 1, 28) for t in range(n_periods))
+    factor_returns = FactorReturns(
+        dates, ("A", "B"), _ar1(0.4, n_periods, 21) * 0.03, Frequency.MONTHLY
+    )
+    securities = tuple(f"S{i:02d}" for i in range(20))
+    panel = ReturnPanel(
+        dates, securities, rng.normal(scale=0.05, size=(n_periods, 20)), Frequency.MONTHLY
+    )
+    model = estimate_timeseries_model(
+        panel, factor_returns, covariance_estimator=NeweyWestCovariance(lags=6)
+    )
+    assert "Newey-West" in model.describe()
+    plain = estimate_timeseries_model(panel, factor_returns)
+    assert np.trace(model.covariance.matrix) > np.trace(plain.covariance.matrix)

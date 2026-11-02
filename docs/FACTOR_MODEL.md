@@ -250,6 +250,52 @@ three times the half life." The closed form for an unbounded exponentially weigh
 here reproduces that to three figures at every half-life tested, which is an independent check
 that `effective_observations` means what Barra means by it.
 
+### Newey-West, and what Bartlett weighting costs
+
+The other two covariance corrections assume each period is an independent draw. Returns are
+not, and BIM301 applies Newey-West throughout because of it -- serial correlation is
+"significant enough to affect model performance, even out to two weeks for highly liquid
+developed market stocks."
+
+What goes wrong without it is specific. A risk number is almost always quoted for a horizon
+longer than one period, and that conversion multiplies the one-period variance by the number
+of periods -- a step only valid under independence. With positive autocorrelation the variance
+of a sum grows faster than the number of terms, so annualising understates the risk by exactly
+`(1 + rho) / (1 - rho)` for an AR(1). At rho = 0.3 that is a factor of 1.86.
+
+`NeweyWestCovariance` estimates the long-run covariance instead, which *can* be scaled by the
+number of periods:
+
+    S = Gamma_0 + sum_j (1 - j/(L+1)) (Gamma_j + Gamma_j')
+
+**Bartlett weighting leaves some of the adjustment on the table, and raising the lag count
+does not recover it.** The weights discount every lag, so the expected recovery is
+`1 + 2 sum_j (1 - j/(L+1)) rho^j`, not the full long-run ratio. Measured against that
+expectation on AR(1) panels of 4000 periods:
+
+| rho | true LRV ratio | L=5 | L=9 | L=20 | L=50 |
+|---|---|---|---|---|---|
+| 0.2 | 1.500 | 1.391 | 1.422 | 1.402 | 1.360 |
+| 0.3 | 1.857 | 1.647 | 1.715 | 1.715 | 1.675 |
+| 0.5 | 3.000 | 2.332 | 2.565 | 2.674 | 2.666 |
+
+The measured value tracks the Bartlett expectation closely at small L (within 0.01 at L=5) and
+falls increasingly short of it as L grows -- the gap at rho=0.5 widens from 0.01 at L=5 to 0.26
+at L=50. That is the bias-variance tradeoff of a kernel estimator: more lags cut the truncation
+bias but add estimation noise from high-lag autocovariances that should be zero. Past about
+twenty lags the recovery stops improving and starts falling back. Newey and West's own rule,
+`floor(4 (T/100)^(2/9))`, is conservative and close to the best available, which is why it is
+the default.
+
+**The positive semi-definiteness guarantee is real, and it is conditional.** Bartlett weights
+make the equal-weighted estimator PSD by construction, and over 400 random panels its smallest
+eigenvalue never fell below +0.08. Combined with exponential weighting the guarantee is gone,
+and not academically: on short panels with many factors and a heavy decay -- 25 to 60 periods,
+5 to 12 factors, a six-period half-life -- **310 of 400 panels came out indefinite**, the worst
+eigenvalue at -0.487. That is a real negative variance forecast, not a rounding artifact. The
+combination is still worth having, but `psd_relative_floor` is doing load-bearing work beneath
+it, and the estimate says so in its notes.
+
 ## The cross-sectional estimator
 
 `crosssectional.py` runs the other direction. Every period, security returns are regressed
@@ -497,11 +543,5 @@ Not built:
   published series can be used directly. Building SMB and HML by sorting on market cap and
   book-to-price is a separate set of choices -- breakpoints, rebalancing frequency,
   value-weighting -- and deserves its own step.
-* **Newey-West.** The remaining covariance correction, for autocorrelation. BIM301 applies
-  it throughout and is blunt about why: serial correlation is "significant enough to affect
-  model performance, even out to two weeks for highly liquid developed market stocks." So
-  this is not the daily-frequency nicety it was filed as -- it becomes necessary as soon as
-  the panel moves below monthly. With Bartlett weights it is positive semi-definite by
-  construction, so it composes with the others safely.
 * **A factor tree.** Three flat factors need no hierarchy; an industry-plus-style model does,
   and `compute_risk` already takes one.
