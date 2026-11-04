@@ -492,3 +492,155 @@ def test_missing_changes_source_names_the_likely_cause():
     msg = str(e.value)
     assert "no changes table" in msg
     assert "DEFAULT_SOURCES" in msg, "the message must point at the fix"
+
+
+# --------------------------------------------------- three failures, three remedies
+#
+# fetch() can fail in three ways that need three different responses: the page would not
+# come back, no HTML parser is installed, or the page came back and no longer parses. Only
+# the last is an investigation. They were one `except Exception` until a 403 and a missing
+# lxml both arrived wearing StructureError's name.
+
+
+class _FakeResponse:
+    def __init__(self, markup: str):
+        self._markup = markup
+
+    def read(self):
+        return self._markup.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _serve(monkeypatch, markup="<table><tr><th>a</th></tr></table>", capture=None):
+    """Make urlopen return canned markup, recording the request if asked."""
+    import urllib.request
+
+    def fake_urlopen(request, timeout=None):
+        if capture is not None:
+            capture.append(request)
+        return _FakeResponse(markup)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+
+def _refuse(monkeypatch, code=403, reason="Forbidden"):
+    import urllib.error
+    import urllib.request
+
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(
+            request.full_url, code, reason, {}, None
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+
+def test_the_request_declares_a_user_agent_because_wikipedia_refuses_the_default(monkeypatch):
+    """pandas.read_html(url) fetches with urllib's default `Python-urllib/3.x`, which
+    Wikipedia answers with 403 under its user-agent policy. The fetch happens here instead,
+    with a header."""
+    seen: list = []
+    _serve(monkeypatch, capture=seen)
+    with pytest.raises(sp500.StructureError):
+        sp500.fetch()          # the canned markup has no usable tables; that is fine here
+    assert seen, "no request was made"
+    agent = seen[0].get_header("User-agent")
+    assert agent == sp500.USER_AGENT
+
+
+def test_the_user_agent_identifies_the_tool_without_tripping_the_filter():
+    """Two ways to get this wrong: name a library and be refused anyway, or embed a
+    personal address in source that gets pushed to a remote."""
+    assert "python-urllib" not in sp500.USER_AGENT.lower()
+    assert "python-requests" not in sp500.USER_AGENT.lower()
+    assert "@" not in sp500.USER_AGENT
+    assert "praxis" in sp500.USER_AGENT.lower()
+
+
+def test_a_403_is_a_refused_request_not_a_changed_page(monkeypatch):
+    _refuse(monkeypatch, 403, "Forbidden")
+    with pytest.raises(sp500.SourceUnavailable) as caught:
+        sp500.fetch()
+    message = str(caught.value)
+    assert "403" in message
+    assert "User-Agent" in message
+    assert not isinstance(caught.value, sp500.StructureError)
+
+
+def test_an_unreachable_host_is_also_a_source_failure(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.URLError("no route to host")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(sp500.SourceUnavailable, match="could not reach"):
+        sp500.fetch()
+
+
+def test_a_404_gets_no_user_agent_hint_because_that_is_not_the_problem(monkeypatch):
+    _refuse(monkeypatch, 404, "Not Found")
+    with pytest.raises(sp500.SourceUnavailable) as caught:
+        sp500.fetch()
+    assert "404" in str(caught.value)
+    assert "User-Agent" not in str(caught.value)
+
+
+def test_a_missing_html_parser_is_not_reported_as_a_changed_page(monkeypatch):
+    """pandas raises ImportError from deep inside read_html when no parser backend is
+    installed, and a broad `except Exception` turns that into a StructureError -- which says
+    Wikipedia changed, and sends the reader to investigate HTML instead of running pip
+    install. Different fixes need different names."""
+    import pandas as pd
+
+    _serve(monkeypatch)
+
+    def no_parser(*args, **kwargs):
+        raise ImportError("`Import lxml` failed.  Use pip or conda to install the lxml package.")
+
+    monkeypatch.setattr(pd, "read_html", no_parser)
+    with pytest.raises(sp500.ParserUnavailable) as caught:
+        sp500.fetch()
+    message = str(caught.value)
+    assert "pip install lxml" in message
+    assert "not a change to" in message
+    assert not isinstance(caught.value, sp500.StructureError)
+
+
+def test_a_genuinely_broken_page_is_still_a_structure_error(monkeypatch):
+    import pandas as pd
+
+    _serve(monkeypatch)
+
+    def broken(*args, **kwargs):
+        raise ValueError("No tables found")
+
+    monkeypatch.setattr(pd, "read_html", broken)
+    with pytest.raises(sp500.StructureError, match="could not read tables"):
+        sp500.fetch()
+
+
+def test_markup_is_handed_to_pandas_rather_than_a_url(monkeypatch):
+    """Passing a literal HTML string to read_html is deprecated in pandas 2, so it goes
+    through StringIO -- and pandas must never be asked to do its own fetching again."""
+    import io
+
+    import pandas as pd
+
+    seen: list = []
+    _serve(monkeypatch, markup="<table><tr><th>x</th></tr></table>")
+
+    def record(target, *args, **kwargs):
+        seen.append(target)
+        return []
+
+    monkeypatch.setattr(pd, "read_html", record)
+    with pytest.raises(sp500.StructureError):
+        sp500.fetch()
+    assert seen and all(isinstance(t, io.StringIO) for t in seen)

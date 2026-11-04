@@ -572,7 +572,12 @@ def estimate_cross_sectional_model(
         min_observations=min_observations,
         min_securities=min_securities,
         weighting="square-root-cap or supplied" if w_block is not None else "equal",
-        standardised=standardise,
+        # What matters is whether the exposures ARE standardised, not whether this call did
+        # it. `build_risk_indices` returns a standardised panel and callers then pass
+        # standardise=False, which made the model warn that its own correctly-scaled
+        # exposures were on incomparable scales. A warning that fires when nothing is wrong
+        # costs more than it saves: it teaches the reader to skim the others.
+        standardised=standardise or panel.standardised,
         winsorised=panel.winsorised,
         market_factor=fit_market,
         thin_periods=tuple(thin),

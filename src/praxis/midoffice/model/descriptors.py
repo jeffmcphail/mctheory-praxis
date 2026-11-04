@@ -29,6 +29,7 @@ pretending otherwise would be the one thing worse than not building it.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from datetime import date
 from typing import Iterable, Mapping, Sequence
@@ -80,12 +81,28 @@ class SecurityPanel:
     One frequency throughout.  USE3 mixes frequencies -- DASTD is 65 daily returns, RSTR is
     12 monthly ones -- and a faithful implementation would take both.  This takes one panel
     and computes each descriptor over the equivalent number of its own periods, which is
-    correct at daily frequency and an approximation at monthly.  `window_note` says which.
+    correct at daily frequency and an approximation at monthly.
+
+    **Two price series, because the descriptors need different bases.**  `prices` is
+    split-adjusted and drives returns, so a four-for-one split is not a -75% day.
+    `unadjusted_prices` is what the stock actually traded at, and three things need it:
+
+    * **LNCAP**, because market capitalisation pairs it with a *point-in-time* share count.
+      An adjusted price against a pre-split share count undercounts by the split factor.
+    * **LPRI**, because the descriptor's economic content is that low-priced stocks are
+      riskier.  A stock that traded at $400 before a four-for-one split shows as $100 in
+      adjusted terms, and LPRI would record it as a cheap stock in a year when it was not.
+    * **VLVR**, whose numerator is the dollars that actually changed hands.
+
+    Supplying only `prices` is allowed and the descriptors still compute, but the three above
+    are then on the adjusted basis and `compute_descriptors` says so in its notes rather than
+    letting the substitution pass unremarked.
     """
 
     dates: tuple[date, ...]
     securities: tuple[str, ...]
     prices: np.ndarray
+    unadjusted_prices: np.ndarray | None = None
     volumes: np.ndarray | None = None
     shares_outstanding: np.ndarray | None = None
     highs: np.ndarray | None = None
@@ -104,7 +121,14 @@ class SecurityPanel:
         shape = (len(dates), len(securities))
         object.__setattr__(self, "dates", dates)
         object.__setattr__(self, "securities", securities)
-        for name in ("prices", "volumes", "shares_outstanding", "highs", "lows"):
+        for name in (
+            "prices",
+            "unadjusted_prices",
+            "volumes",
+            "shares_outstanding",
+            "highs",
+            "lows",
+        ):
             value = getattr(self, name)
             if value is None:
                 continue
@@ -133,13 +157,22 @@ class SecurityPanel:
             out[1:] = np.where(previous > 0.0, current / previous - 1.0, np.nan)
         return out
 
+    @property
+    def traded_prices(self) -> np.ndarray:
+        """What the stock actually traded at: unadjusted where available, else adjusted."""
+        return self.prices if self.unadjusted_prices is None else self.unadjusted_prices
+
+    @property
+    def has_unadjusted(self) -> bool:
+        return self.unadjusted_prices is not None
+
     def market_capitalisation(self) -> np.ndarray:
         if self.shares_outstanding is None:
             raise ValueError(
                 "market capitalisation needs shares_outstanding, which this panel does not "
                 "carry; LNCAP, LCAPCB and every turnover descriptor depend on it"
             )
-        return self.prices * self.shares_outstanding
+        return self.traded_prices * self.shares_outstanding
 
     def periods_for(self, months: float) -> int:
         """How many of this panel's periods correspond to that many months.
@@ -276,6 +309,15 @@ def compute_descriptors(
     has_shares = panel.shares_outstanding is not None
     has_volume = panel.volumes is not None
 
+    if not panel.has_unadjusted:
+        for name in ("LNCAP", "LPRI", "VLVR"):
+            if name in wanted:
+                skipped[name] = (
+                    "computed on split-adjusted prices: the panel carries no "
+                    "unadjusted_prices, so a stock that split reads as cheaper and smaller "
+                    "than it was"
+                )
+
     if volatility_window_months is None:
         if panel.frequency is Frequency.DAILY:
             volatility_window_months = 65.0 / TRADING_DAYS_PER_MONTH
@@ -311,8 +353,9 @@ def compute_descriptors(
 
     # --- Volatility and Momentum from prices ----------------------------------------
     if "LPRI" in wanted:
+        traded = panel.traded_prices
         with np.errstate(divide="ignore", invalid="ignore"):
-            computed["LPRI"] = np.where(panel.prices > 0.0, np.log(panel.prices), np.nan)
+            computed["LPRI"] = np.where(traded > 0.0, np.log(traded), np.nan)
 
     if "DASTD" in wanted:
         window = panel.periods_for(volatility_window_months)
@@ -386,6 +429,16 @@ def compute_descriptors(
                 product = beta * residual_sd
                 computed["BTSG"] = np.where(beta < 0.0, 0.0, product)
             if "SERDP" in wanted:
+                # Only the final period. The market-model residual *series* is kept for the
+                # last window alone -- keeping it for every window would mean storing
+                # (periods x window x securities) residuals, which for a daily panel is
+                # hundreds of millions of values. So SERDP is a point-in-time descriptor
+                # here: usable as a current exposure, not as a history.
+                skipped["SERDP"] = (
+                    "computed at the final period only; the market-model residual series "
+                    "is retained for one window rather than all of them, so SERDP is a "
+                    "current exposure and not a time series"
+                )
                 serial = np.full((n_periods, n_securities), np.nan)
                 for j in range(n_securities):
                     column = residuals[:, j]
@@ -409,10 +462,24 @@ def compute_descriptors(
             skipped[name] = "needs both volumes and shares_outstanding"
             continue
         window = panel.periods_for(months)
+        if window > n_periods:
+            # Otherwise this is an all-nan column that quietly disappears downstream, and
+            # the reader is left wondering whether the descriptor failed or was never asked
+            # for. A five-year turnover needs five years.
+            skipped[name] = (
+                f"needs {window} period(s) of history and the panel has {n_periods}, so "
+                f"every value would be missing"
+            )
+            continue
         traded = _rolling(panel.volumes, window, lambda b: np.nansum(b, axis=0))
-        outstanding = _rolling(
-            panel.shares_outstanding, window, lambda b: np.nanmean(b, axis=0)
-        )
+        with warnings.catch_warnings():
+            # A security with no shares reported anywhere in the window is a legitimate
+            # state -- it is named in the load report -- and numpy's "mean of empty slice"
+            # adds nothing to that.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            outstanding = _rolling(
+                panel.shares_outstanding, window, lambda b: np.nanmean(b, axis=0)
+            )
         annualiser = 12.0 / months if months > 1.0 else 1.0
         with np.errstate(divide="ignore", invalid="ignore"):
             computed[name] = np.where(
@@ -429,7 +496,7 @@ def compute_descriptors(
             _, _, residual_sd, _ = _market_model(returns, market, window)
             months = panel.periods_for(12.0)
             dollar = _rolling(
-                panel.volumes * panel.prices, months, lambda b: np.nansum(b, axis=0)
+                panel.volumes * panel.traded_prices, months, lambda b: np.nansum(b, axis=0)
             )
             with np.errstate(divide="ignore", invalid="ignore"):
                 ratio = np.where(

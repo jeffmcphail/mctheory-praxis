@@ -41,6 +41,15 @@ CONSTITUENTS_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 CHANGES_URL = "https://en.wikipedia.org/wiki/Historical_components_of_the_S%26P_500"
 DEFAULT_SOURCES = (CONSTITUENTS_URL, CHANGES_URL)
 
+# Wikipedia's user-agent policy rejects urllib's default with a 403, so requests identify
+# the tool and what it is for. Note what is NOT here: the string "python-urllib", because the
+# filter keys on library names and a descriptor containing one risks the same refusal; and
+# any personal contact detail, because the policy asks for a way to reach the operator and an
+# email address compiled into source and pushed to a remote is a poor way to provide it.
+# Override `user_agent` to add contact details if a request is ever refused on those grounds.
+USER_AGENT = "praxis-midoffice/1.0 (S&P 500 constituent snapshot)"
+HTTP_TIMEOUT = 30.0
+
 # Permissive on purpose: this validates shape, not existence.  Class shares (BRK.B, BF.B)
 # and the occasional 5-letter ticker must pass.
 TICKER_RE = re.compile(r"^[A-Z][A-Z0-9]{0,5}(\.[A-Z]{1,2})?$")
@@ -56,6 +65,27 @@ class StructureError(RuntimeError):
 
 class CoverageError(LookupError):
     """The requested date lies outside what this snapshot can answer."""
+
+
+class SourceUnavailable(RuntimeError):
+    """The source could not be retrieved. Distinct from the page having changed.
+
+    Wikipedia refuses urllib's default `Python-urllib/3.x` User-Agent with a 403 under its
+    user-agent policy, and `pandas.read_html(url)` fetches with exactly that.  So the common
+    case of this is not an outage at all -- it is a request that identified itself badly, and
+    the remedy is a header rather than a retry.
+    """
+
+
+class ParserUnavailable(RuntimeError):
+    """pandas cannot parse HTML because no parser backend is installed.
+
+    Separate from StructureError on purpose.  StructureError means Wikipedia changed and the
+    parser needs updating -- an investigation.  This means a package is missing -- a pip
+    install.  Reporting the second as the first sends the reader to the wrong place entirely,
+    and `pd.read_html` raises ImportError from deep inside pandas where it is easy to catch
+    by accident in a broad `except Exception`.
+    """
 
 
 @dataclass(frozen=True, order=True)
@@ -339,16 +369,56 @@ def _parse_date(raw) -> dt.date | None:
 # ---------------------------------------------------------------------------
 
 
+def _read_tables(pd, source: str, user_agent: str, timeout: float) -> list:
+    """Fetch with a declared User-Agent, then parse the markup.
+
+    `pandas.read_html(url)` does its own fetching with urllib's default User-Agent, which
+    Wikipedia answers with a 403.  Retrieving the page here and handing pandas the markup
+    separates the two failures -- a refused request and an unparseable page -- which
+    otherwise arrive as the same exception.
+
+    The markup goes through StringIO because passing a literal HTML string to `read_html` is
+    deprecated in pandas 2.
+    """
+    import io
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(source, headers={"User-Agent": user_agent})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            markup = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        hint = ""
+        if exc.code in (403, 429):
+            hint = (
+                f"\n  The User-Agent sent was {user_agent!r}. Wikipedia refuses requests "
+                f"that do not identify themselves; pass a different `user_agent` if this one "
+                f"is being rejected."
+            )
+        raise SourceUnavailable(
+            f"HTTP {exc.code} {exc.reason} from {source}{hint}"
+        ) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise SourceUnavailable(f"could not reach {source}: {exc!r}") from exc
+    return pd.read_html(io.StringIO(markup))
+
+
 def fetch(
     *,
     urls: Sequence[str] = DEFAULT_SOURCES,
     overrides: Mapping[str, str] | None = None,
     now: dt.datetime | None = None,
+    user_agent: str = USER_AGENT,
+    timeout: float = HTTP_TIMEOUT,
 ) -> Snapshot:
     """Read the live page and return a validated snapshot.
 
-    Raises StructureError if the page no longer parses, so a broken snapshot is never
-    written and the last good one keeps serving.
+    Three failures, three names, because they need three different remedies:
+    `SourceUnavailable` when the page could not be retrieved, `ParserUnavailable` when no
+    HTML parser backend is installed, and `StructureError` when the page came back but no
+    longer matches what this parser expects.  Only the last is an investigation.  A broken
+    snapshot is never written either way, so the last good one keeps serving.
 
     `now` is injectable so the caller controls the clock; nothing in this module reads it
     implicitly.
@@ -362,7 +432,21 @@ def fetch(
     tables: list = []
     for source in urls:
         try:
-            tables.extend(pd.read_html(source))
+            tables.extend(_read_tables(pd, source, user_agent, timeout))
+        except (SourceUnavailable, ParserUnavailable):
+            # Already named precisely. Without this the broad clause below re-labels them
+            # as StructureError -- which is the defect those classes exist to fix, and it
+            # reappeared here the moment they were introduced. A catch-all converts every
+            # failure into whatever it was written for, including the ones added later.
+            raise
+        except ImportError as exc:
+            raise ParserUnavailable(
+                "pandas.read_html needs an HTML parser backend and none is installed. "
+                "Install one:\n"
+                "    pip install lxml\n"
+                "  (or: pip install html5lib beautifulsoup4)\n"
+                f"This is a missing dependency, not a change to {source}."
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - re-raised with the source named
             raise StructureError(f"could not read tables from {source}: {exc!r}") from exc
     current, changes = parse_tables(tables, overrides=overrides)

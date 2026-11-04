@@ -549,6 +549,27 @@ Three details that are easy to get wrong and are pinned by tests:
   rho. That is the definition rather than the implementation: it is built on *fitted*
   market-model residuals, and OLS forces those orthogonal to the regressors.
 
+### Two price bases, and the trap between them
+
+Returns need split-adjusted prices, so a four-for-one split is not a -75% day. Three
+descriptors need the opposite -- what the stock actually traded at:
+
+* **LNCAP**, because market capitalisation pairs price with a *point-in-time* share count.
+  An adjusted price against a pre-split share count undercuts by the split factor.
+* **LPRI**, because its economic content is that low-priced stocks are riskier. A stock that
+  traded at $400 before a four-for-one split reads as $100 adjusted, and LPRI would record it
+  as cheap in a year when it was not -- an error concentrated in the companies that split,
+  which are the ones that went up.
+* **VLVR**, whose numerator is the dollars that actually changed hands.
+
+`SecurityPanel` therefore carries both, and omitting `unadjusted_prices` is allowed but
+reported rather than silent.
+
+This is not hypothetical. Polygon's own `market_cap` field makes exactly this mistake at a
+split boundary: for AAPL at 2020-06-30 it reports $5.99tn, which is the unadjusted pre-split
+price of $364.80 multiplied by the *post-split* share count of 16.4bn. Four times the true
+figure, from mixing two bases in one product.
+
 ### A frequency mismatch worth naming
 
 USE3 mixes frequencies -- DASTD is 65 daily returns, RSTR is 12 monthly ones. A monthly panel

@@ -506,15 +506,40 @@ def test_notes_record_the_conventions_the_estimate_ran_under():
     returns, chars, _, _ = _world(n_secs=40, n_periods=60)
     model = _fit(returns, chars)
     assert model.notes.weighting == "equal"
-    assert model.notes.standardised is False
+    # True because the fixture panel is already standardised, not because this call did it.
+    # The note records the state of the exposures, which is what downstream readers need.
+    assert model.notes.standardised is True
     assert model.notes.market_factor is True
     assert 0.0 < model.notes.mean_r_squared < 1.0
 
 
-def test_not_standardising_is_reported_as_a_qualification():
+def test_genuinely_unstandardised_exposures_are_reported_as_a_qualification():
+    """The warning must key on the exposures, not on the parameter.
+
+    This test previously passed an already-standardised panel with standardise=False and
+    asserted the warning fired -- which pinned a false positive as if it were the contract.
+    On the real S&P 500 run it told the reader that correctly-scaled exposures were on
+    incomparable scales, which is exactly the kind of warning that teaches people to skim
+    the rest.
+    """
     returns, chars, _, _ = _world(n_secs=40, n_periods=60)
-    model = _fit(returns, chars)
+    raw = CharacteristicPanel(
+        chars.dates, chars.securities, chars.names,
+        chars.values * 1000.0 + 17.0, chars.frequency,
+    )
+    assert not raw.standardised
+    model = _fit(returns, raw)
+    assert model.notes.standardised is False
     assert any("incomparable scales" in q for q in model.qualifications())
+
+
+def test_a_pre_standardised_panel_does_not_trigger_the_warning():
+    """The other half: build_risk_indices returns a standardised panel and callers then
+    pass standardise=False. Nothing is wrong and nothing should be said."""
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60)
+    assert chars.standardised
+    model = _fit(returns, chars)
+    assert not any("incomparable scales" in q for q in model.qualifications())
 
 
 def test_describe_works_for_cross_sectional_notes_too():

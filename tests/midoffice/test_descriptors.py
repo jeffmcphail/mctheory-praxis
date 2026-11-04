@@ -41,6 +41,7 @@ def _panel(
     seed: int = 3,
     frequency: Frequency = Frequency.MONTHLY,
     turnover: float = 0.08,
+    split: float | None = None,
 ):
     rng = np.random.default_rng(seed)
     beta = np.linspace(0.4, 1.8, n_secs)
@@ -51,10 +52,19 @@ def _panel(
     ) * residual
     prices = 50.0 * np.cumprod(1.0 + returns, axis=0)
     shares = np.tile(np.linspace(1e6, 5e8, n_secs), (n_periods, 1))
+    # A four-for-one split halfway through, for the odd-numbered securities only: before it
+    # they traded at four times the adjusted price on a quarter of the shares.
+    unadjusted = prices.copy()
+    split_row = n_periods // 2
+    if split is not None:
+        unadjusted[:split_row, 1::2] *= split
+        shares = shares.copy()
+        shares[:split_row, 1::2] /= split
     panel = SecurityPanel(
         _dates(n_periods),
         tuple(f"S{i:02d}" for i in range(n_secs)),
         prices,
+        unadjusted_prices=unadjusted,
         volumes=shares * turnover,
         shares_outstanding=shares,
         highs=prices * 1.05,
@@ -382,12 +392,30 @@ def test_fitting_refuses_returns_of_the_wrong_shape():
 
 
 def test_every_published_descriptor_is_computable_from_a_complete_panel():
+    """Present is not the same as unqualified.
+
+    SERDP computes, but only at the final period, because keeping the market-model residual
+    series for every window would mean storing periods x window x securities values. That is
+    a note on a descriptor that exists, not a descriptor that is missing -- and the
+    distinction is why `skipped` carries reasons rather than being a list of absentees.
+    """
     panel, market, _, _ = _panel()
-    out, skipped = compute_descriptors(
+    out, notes = compute_descriptors(
         panel, market_returns=market, risk_free=np.full(panel.n_periods, 0.002)
     )
     assert set(out.names) == set(PRICE_DESCRIPTORS)
-    assert not skipped
+    assert set(notes) <= {"SERDP"}, notes
+    assert "final period only" in notes.get("SERDP", "")
+
+
+def test_a_descriptor_whose_window_exceeds_the_panel_says_so():
+    """An all-nan column that quietly disappears leaves the reader unable to tell whether
+    the descriptor failed or was never requested. STO5 needs five years."""
+    panel, market, _, _ = _panel(n_periods=30)
+    out, notes = compute_descriptors(panel, market_returns=market, names=("STO5", "STOM"))
+    assert "STO5" not in out.names
+    assert "needs 60 period(s) of history and the panel has 30" in notes["STO5"]
+    assert "STOM" in out.names
 
 
 # ------------------------------------------ the second standardisation, and the pipeline
@@ -498,3 +526,49 @@ def test_the_whole_pipeline_reaches_a_factor_model():
     assert "RSTR" not in model.factor_names.values()
     assert model.notes.n_estimated == 60
     assert 0.0 < model.notes.mean_r_squared < 1.0
+
+
+def test_lpri_uses_what_the_stock_actually_traded_at():
+    """A stock at $400 before a four-for-one split shows as $100 adjusted.
+
+    LPRI's economic content is that low-priced stocks are riskier, so reading the adjusted
+    price would record it as cheap in a year when it was not -- and the error is largest
+    exactly for the companies that split, which are the ones that went up.
+    """
+    panel, market, _, _ = _panel(split=4.0)
+    out, _ = compute_descriptors(panel, market_returns=market, names=("LPRI",))
+    half = len(panel.dates) // 2
+    lpri = out.values[:, :, 0]
+    # Odd-numbered securities split; before the split their traded price was 4x adjusted.
+    assert np.allclose(lpri[half - 1, 1::2], np.log(panel.prices[half - 1, 1::2] * 4.0))
+    assert np.allclose(lpri[half - 1, 0::2], np.log(panel.prices[half - 1, 0::2]))
+
+
+def test_market_capitalisation_pairs_traded_price_with_point_in_time_shares():
+    """The pairing Polygon's own market_cap field gets wrong at a split boundary."""
+    panel, market, _, _ = _panel(split=4.0)
+    half = len(panel.dates) // 2
+    cap = panel.market_capitalisation()
+    # A split changes neither the capitalisation nor, here, anything else: four times the
+    # price on a quarter of the shares is the same company.
+    before = cap[half - 1, 1::2]
+    naive = panel.prices[half - 1, 1::2] * panel.shares_outstanding[half - 1, 1::2]
+    assert np.allclose(before, naive * 4.0)
+    assert np.all(before > 0)
+
+
+def test_a_panel_without_unadjusted_prices_says_which_descriptors_it_affected():
+    panel, market, _, _ = _panel()
+    adjusted_only = SecurityPanel(
+        panel.dates,
+        panel.securities,
+        panel.prices,
+        volumes=panel.volumes,
+        shares_outstanding=panel.shares_outstanding,
+        frequency=panel.frequency,
+    )
+    assert not adjusted_only.has_unadjusted
+    out, skipped = compute_descriptors(adjusted_only, market_returns=market)
+    for name in ("LNCAP", "LPRI", "VLVR"):
+        assert name in out.names
+        assert "split-adjusted prices" in skipped[name]

@@ -32,6 +32,11 @@ dependencies = [
     "scikit-learn>=1.4.0,<2",
     "statsmodels>=0.14.0,<1",
     "scipy>=1.12.0,<2",
+    # --- lxml: pandas.read_html's parser backend, needed by
+    # midoffice/refdata/sp500.py to read the S&P 500 constituent tables. Same class
+    # of defect as the Cycle 65 entries below -- a transitive dependency that worked
+    # on the machine that wrote the module and broke on the first clean environment.
+    "lxml>=5.0.0,<7",
     # --- Cycle 65: previously undeclared, but imported by SCHEDULED collectors.
     # Their absence is why a clean install of Praxis was broken: MCRMINI2 was
     # not a new problem, it was the first machine to report an old one.
