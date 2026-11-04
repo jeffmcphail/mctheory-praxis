@@ -189,6 +189,14 @@ class FactorModel:
     alphas: Mapping[str, float] = field(default_factory=dict)
     r_squared: Mapping[str, float] = field(default_factory=dict)
     notes: ModelNotes = field(default_factory=EstimationNotes)
+    basis: str = "standard"
+    """Which exposure basis this model is on: "standard" or "unit".
+
+    Exposures and factor covariance are only meaningful together.  Unitized exposures
+    against a standard-basis covariance give a portfolio's common-factor risk roughly
+    forty times too large -- both halves look reasonable on their own, and the error is
+    silent.  This tag is what makes the mismatch detectable; see `exposure_basis.py`.
+    """
 
     @property
     def securities(self) -> tuple[str, ...]:
