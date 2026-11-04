@@ -9,6 +9,7 @@ factor covariance diagonal.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import date
 
 import numpy as np
@@ -892,3 +893,145 @@ def test_short_history_is_still_named_even_when_it_no_longer_excludes():
     model = _fit(thin, chars, min_securities=20, specific_risk="model")
     assert set(returns.securities[:3]) <= set(model.notes.short_history)
     assert set(returns.securities[:3]) <= set(model.exposures)
+
+
+# ------------------------------- specific risk: estimated over the regression, forecast beyond it
+
+
+def _never_in_a_regression(n_periods: int = 60):
+    """The persistent world with its first two securities never in a regression: a complete
+    characteristic row in every period, and not one return."""
+    returns, chars, caps = _persistent_world(n_periods=n_periods)
+    raw = returns.returns.copy()
+    raw[:, :2] = np.nan
+    return ReturnPanel(returns.dates, returns.securities, raw, returns.frequency), chars, caps
+
+
+def test_specific_risk_is_estimated_over_the_regression_universe_and_nothing_else():
+    """Two securities never reach a regression, so they have no residual to learn from. The
+    specific risk model must come out exactly as it does from a panel that never held them,
+    and its notes must speak for the securities it was fitted on, not the panel's. The S&P
+    500 run reported 13 such securities as getting "the average-level forecast" when they got
+    no forecast at all."""
+    returns, chars, caps = _never_in_a_regression()
+    values = chars.values.copy()
+    values[:, 1, :] = np.nan            # and this one has no characteristic row either
+    chars = dataclasses.replace(chars, values=values)
+    model = _fit(
+        returns, chars, min_securities=20, specific_risk="blend", capitalisations=caps
+    )
+    kept = returns.securities[2:]
+    without = _fit(
+        ReturnPanel(returns.dates, kept, returns.returns[:, 2:], returns.frequency),
+        dataclasses.replace(chars, securities=kept, values=chars.values[:, 2:, :]),
+        min_securities=20,
+        specific_risk="blend",
+        capitalisations=caps[:, 2:],
+    )
+    fitted = model.notes.specific_risk_model
+    reference = without.notes.specific_risk_model
+    assert set(returns.securities) - set(model.notes.regression_universe) == set(
+        returns.securities[:2]
+    )
+    assert fitted.notes.n_securities == 78
+    assert np.array_equal(fitted.gamma, reference.gamma)
+    assert fitted.kappa_constant == reference.kappa_constant
+    assert fitted.kappa_knots == reference.kappa_knots
+    assert fitted.forecast_level == reference.forecast_level
+    assert fitted.relative_residual_sd == reference.relative_residual_sd
+    assert not any("no characteristic row" in q for q in model.qualifications())
+
+
+def test_a_security_outside_the_universe_gets_a_fallback_and_never_the_floor_list():
+    """It still needs a number -- a holding outside the estimation universe is held all the
+    same -- and gets the characteristic forecast extrapolated to it, labelled as a fallback.
+    Pushed far enough into the tail that the linear V runs out, that number is the floor, and
+    the security is still not on the floor list: hitting the floor is a statement about an
+    estimate, and nothing was estimated on it."""
+    returns, chars, _ = _never_in_a_regression()
+    values = chars.values.copy()
+    values[-1, 0, 0] = -6.0
+    model = _fit(
+        returns,
+        dataclasses.replace(chars, values=values),
+        min_securities=20,
+        specific_risk="blend",
+    )
+    outside = returns.securities[0]
+    risk_model = model.notes.specific_risk_model
+    row = dict(zip(chars.names, values[-1, 0, :].tolist()))
+    assert 1.0 + risk_model.relative_level(row) < 0.1
+    assert model.notes.fallback_specific_risk == returns.securities[:2]
+    assert outside not in model.notes.floored_specific_risk
+    assert outside not in model.notes.delivered_floor
+    forecast = model.exposures[outside].specific.by_issuer[outside]
+    assert forecast == risk_model.forecast({outside: row})[outside]
+    assert forecast == risk_model.floor_level(0.1)
+    lines = model.qualifications()
+    assert any(q.startswith("2 security(ies) are in no estimated period's regression") and
+               "fallback" in q and outside in q for q in lines)
+    assert not any("floor" in q and outside in q for q in lines)
+
+
+def test_a_blend_says_which_floor_was_hit_the_characteristic_forecasts_or_the_delivered_one():
+    """`floored` tests the characteristic forecast alone, and under a blend that is not the
+    number delivered. On the S&P 500 run JPM's characteristic forecast was below the floor and
+    the blend delivered 12.8 percent, while the line said its forecast was the floor. Here both
+    securities' characteristic forecasts are below it; the one with 120 periods of history is
+    carried clear by it, the one with four is not."""
+    returns, chars, _ = _persistent_world(n_periods=120)
+    raw = returns.returns.copy()
+    raw[:-4, 1] = np.nan
+    panel = ReturnPanel(returns.dates, returns.securities, raw, returns.frequency)
+    values = chars.values.copy()
+    values[-1, :2, 0] = -6.0
+    tail = dataclasses.replace(chars, values=values)
+    long_history, short_history = returns.securities[:2]
+
+    blended = _fit(panel, tail, min_securities=20, specific_risk="blend")
+    notes = blended.notes
+    floor = notes.specific_risk_model.floor_level(0.1)
+    assert notes.floored_specific_risk == (long_history, short_history)
+    assert notes.delivered_floor == (short_history,)
+    assert blended.exposures[long_history].specific.by_issuer[long_history] > 3.0 * floor
+    assert blended.exposures[short_history].specific.by_issuer[short_history] == floor
+    lines = blended.qualifications()
+    assert any(
+        q.startswith("2 security(ies) have a characteristic forecast below the specific-risk "
+                     "floor") and q.endswith(f": {long_history}, {short_history}")
+        for q in lines
+    )
+    assert any(
+        q.startswith("1 security(ies) are delivered the floor itself")
+        and q.endswith(f": {short_history}")
+        for q in lines
+    )
+    assert not any("rather than the model" in q for q in lines)
+
+    modelled = _fit(panel, tail, min_securities=20, specific_risk="model")
+    assert modelled.notes.delivered_floor == modelled.notes.floored_specific_risk
+    assert any(
+        "so their forecast is the floor rather than the model" in q
+        for q in modelled.qualifications()
+    )
+
+
+def test_a_blend_that_carries_every_floored_forecast_clear_says_so():
+    returns, chars, _ = _persistent_world(n_periods=120)
+    values = chars.values.copy()
+    values[-1, 0, 0] = -6.0
+    model = _fit(
+        returns,
+        dataclasses.replace(chars, values=values),
+        min_securities=20,
+        specific_risk="blend",
+    )
+    assert model.notes.floored_specific_risk == (returns.securities[0],)
+    assert model.notes.delivered_floor == ()
+    assert any(
+        q.endswith(
+            "; blended with their own residual history, no forecast delivered is the "
+            f"floor: {returns.securities[0]}"
+        )
+        for q in model.qualifications()
+    )

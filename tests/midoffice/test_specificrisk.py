@@ -310,6 +310,32 @@ def test_without_capitalisations_kappa_falls_back_and_says_so():
     assert any("falls back to the normal constant" in q for q in model.notes.qualifications())
 
 
+def test_a_cell_without_a_residual_takes_no_part_in_the_kappa_calibration():
+    """kappa compares realised volatility with the predicted level, and the two have to be
+    taken over the same cells. A characteristic row or a capitalisation in a period with no
+    residual -- a period the security was not in the regression -- says nothing about how
+    wrong the model was there. Before this was fixed both moved the calibration."""
+    returns, securities, characteristics, _, _ = _world(n_secs=200, seed=17)
+    rng = np.random.default_rng(17)
+    caps = np.tile(rng.lognormal(mean=10.0, sigma=2.0, size=200), (returns.shape[0], 1))
+    residuals = returns.copy()
+    residuals[:60, :100] = np.nan
+    wild_z, blank_z = characteristics.copy(), characteristics.copy()
+    wild_z[:60, :100, :] = 3.0
+    blank_z[:60, :100, :] = np.nan
+    wild_caps, blank_caps = caps.copy(), caps.copy()
+    wild_caps[:60, :100] = 1e15
+    blank_caps[:60, :100] = np.nan
+    wild = estimate_specific_risk_model(
+        residuals, securities, wild_z, ("Z",), capitalisations=wild_caps
+    )
+    blank = estimate_specific_risk_model(
+        residuals, securities, blank_z, ("Z",), capitalisations=blank_caps
+    )
+    assert wild.kappa_constant == blank.kappa_constant
+    assert wild.kappa_knots == blank.kappa_knots
+
+
 def test_capitalisations_of_the_wrong_shape_are_refused():
     world = _world(n_secs=40, n_periods=40)
     with pytest.raises(ValueError, match="capitalisations have shape"):

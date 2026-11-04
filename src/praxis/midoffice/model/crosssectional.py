@@ -44,6 +44,14 @@ anyway -- and counted per factor in the notes, next to the periods in which exac
 security carried it.  That second count sees what `noise_share` cannot: a factor with one
 member fits that member exactly, its residual is zero, and its sampling variance looks small.
 
+**Specific risk is estimated over the regression and forecast beyond it.**  The specific risk
+model learns only from the securities in at least one estimated period's regression -- the
+rest have no residual to learn from -- but any security with a characteristic row at the
+exposure date gets a forecast, because a holding outside the estimation universe still needs
+a number.  Outside it the number is a fallback, the characteristic forecast extrapolated to a
+security nothing was estimated on, and the notes name it as one.  It never appears on the
+floor list: hitting the floor is a statement about an estimate.
+
 What this module does not do, and a real Barra model does:
 
 - **Constrained industry factors.**  Industry dummies sum to the unit column, so a design with
@@ -109,7 +117,16 @@ class CrossSectionalNotes:
     zero_specific_risk: tuple[str, ...] = ()
     specific_risk_method: str = "historical"
     specific_risk_model: SpecificRiskModel | None = None
+    # In the regression universe, with a characteristic forecast below the floor: their
+    # linear V ran past the end of its validity.
     floored_specific_risk: tuple[str, ...] = ()
+    # In the regression universe, with the floor itself as the forecast delivered. Under the
+    # model alone these are the floored ones; under a blend a security's own history can carry
+    # a floored characteristic forecast clear of it, or bring an unfloored one down onto it.
+    delivered_floor: tuple[str, ...] = ()
+    # In no estimated period's regression, so nothing was estimated on them: their specific
+    # risk is a fallback, the characteristic forecast extrapolated to them.
+    fallback_specific_risk: tuple[str, ...] = ()
     mean_r_squared: float = float("nan")
     observed_variance: tuple[float, ...] = ()
     sampling_variance: tuple[float, ...] = ()
@@ -279,11 +296,39 @@ class CrossSectionalNotes:
                 "characteristics were not standardised, so the factor returns are on "
                 "incomparable scales and their covariance should not be read as one"
             )
-        if self.floored_specific_risk:
+        blend = self.specific_risk_method == "blend"
+        if self.floored_specific_risk and blend:
+            # What `floored` tests is the characteristic forecast, and a blend does not
+            # deliver that: JPM's was below the floor while the blend gave it 12.8 percent.
+            carried = (
+                "; blended with their own residual history, no forecast delivered is the "
+                "floor"
+                if not self.delivered_floor
+                else ""
+            )
+            out.append(
+                f"{len(self.floored_specific_risk)} security(ies) have a characteristic "
+                f"forecast below the specific-risk floor, their linear V having run past the "
+                f"end of its validity{carried}: {', '.join(self.floored_specific_risk[:5])}"
+            )
+        elif self.floored_specific_risk:
             out.append(
                 f"{len(self.floored_specific_risk)} security(ies) hit the specific-risk "
                 f"floor, so their forecast is the floor rather than the model: "
                 f"{', '.join(self.floored_specific_risk[:5])}"
+            )
+        if self.delivered_floor and blend:
+            out.append(
+                f"{len(self.delivered_floor)} security(ies) are delivered the floor itself, "
+                f"the blend of model and history having fallen below it: "
+                f"{', '.join(self.delivered_floor[:5])}"
+            )
+        if self.fallback_specific_risk:
+            out.append(
+                f"{len(self.fallback_specific_risk)} security(ies) are in no estimated "
+                f"period's regression, so the specific risk model was not estimated on them "
+                f"and their forecast is a fallback, not a model one -- the characteristic "
+                f"forecast extrapolated to them: {', '.join(self.fallback_specific_risk[:5])}"
             )
         if self.specific_risk_model is not None:
             out.extend(self.specific_risk_model.notes.qualifications())
@@ -633,6 +678,8 @@ def estimate_cross_sectional_model(
     risk_model: SpecificRiskModel | None = None
     modelled: dict[str, float] = {}
     floored: tuple[str, ...] = ()
+    delivered_floor: tuple[str, ...] = ()
+    fallback: tuple[str, ...] = ()
     if specific_risk != "historical":
         cap_block = None
         if capitalisations is not None:
@@ -644,12 +691,17 @@ def estimate_cross_sectional_model(
                     f"return panel"
                 )
             cap_block = caps[np.ix_(return_rows, return_cols)]
+        # Estimated over the regression universe and nothing else. A security in no estimated
+        # period's regression has no residual; it must not shape S, V, gamma, kappa or the
+        # blend weights, nor be counted in the notes as something the model was fitted on.
+        fitted_on = np.flatnonzero(ever_in)
+        universe = {shared_securities[j] for j in fitted_on}
         risk_model = estimate_specific_risk_model(
-            residuals,
-            shared_securities,
-            panel.values[np.ix_(char_rows, char_cols)],
+            residuals[:, fitted_on],
+            tuple(shared_securities[j] for j in fitted_on),
+            panel.values[np.ix_(char_rows, [char_cols[j] for j in fitted_on])],
             panel.names,
-            capitalisations=cap_block,
+            capitalisations=None if cap_block is None else cap_block[:, fitted_on],
             annualisation=vol_scale,
         )
         exposure_rows = {
@@ -660,6 +712,11 @@ def estimate_cross_sectional_model(
             for j, code in enumerate(shared_securities)
             if not np.isnan(exposure_slice[j, :]).any()
         }
+        # Forecast beyond it, but say so. Outside the universe the characteristic forecast is
+        # extrapolated to a security nothing was estimated on: a fallback, kept off the floor
+        # list, which is about estimates.
+        fallback_rows = {c: row for c, row in exposure_rows.items() if c not in universe}
+        exposure_rows = {c: row for c, row in exposure_rows.items() if c in universe}
         if specific_risk == "blend":
             history: dict[str, tuple[float, int]] = {}
             for j, code in enumerate(shared_securities):
@@ -680,6 +737,12 @@ def estimate_cross_sectional_model(
         floored = risk_model.floored(
             exposure_rows, floor_fraction=specific_risk_floor
         )
+        floor = risk_model.floor_level(specific_risk_floor)
+        delivered_floor = tuple(c for c, value in modelled.items() if value <= floor)
+        modelled.update(
+            risk_model.forecast(fallback_rows, floor_fraction=specific_risk_floor)
+        )
+        fallback = tuple(fallback_rows)
 
     for j, code in enumerate(shared_securities):
         row = exposure_slice[j, :]
@@ -737,6 +800,8 @@ def estimate_cross_sectional_model(
         specific_risk_method=specific_risk,
         specific_risk_model=risk_model,
         floored_specific_risk=floored,
+        delivered_floor=delivered_floor,
+        fallback_specific_risk=fallback,
         mean_r_squared=float(np.mean(r_squareds)) if r_squareds else float("nan"),
         observed_variance=observed,
         sampling_variance=mean_sampling,

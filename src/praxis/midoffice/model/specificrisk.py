@@ -171,6 +171,14 @@ class SpecificRiskModel:
         z = np.array([float(exposures.get(name, 0.0)) for name in self.names])
         return float(z @ self.gamma)
 
+    def floor_level(self, floor_fraction: float = 0.1) -> float:
+        """The specific risk a forecast is floored at: a fraction of the market-average level.
+
+        One definition for every method that floors and for a caller asking which forecasts
+        landed on it, so the comparison is against the same number the floor produced.
+        """
+        return max(floor_fraction, 0.0) * (self.kappa_constant * self.forecast_level)
+
     def forecast(
         self,
         exposures: Mapping[str, Mapping[str, float]],
@@ -197,8 +205,7 @@ class SpecificRiskModel:
         securities it caught, because a security at the floor has a forecast the model did not
         really make.
         """
-        base = self.kappa_constant * self.forecast_level
-        floor = max(floor_fraction, 0.0) * base
+        floor = self.floor_level(floor_fraction)
         out: dict[str, float] = {}
         for code, row in exposures.items():
             relative = self.relative_level(row)
@@ -215,9 +222,11 @@ class SpecificRiskModel:
         floor_fraction: float = 0.1,
     ) -> tuple[str, ...]:
         """Which securities the floor caught -- those whose linear V ran past the end of its
-        own validity, and whose forecast is therefore the floor rather than the model."""
-        base = self.kappa_constant * self.forecast_level
-        floor = max(floor_fraction, 0.0) * base
+        own validity, and whose forecast is therefore the floor rather than the model.
+
+        The test is on the characteristic forecast alone. Under `blend` that is not the number
+        delivered: a security's own history can carry it well clear of the floor."""
+        floor = self.floor_level(floor_fraction)
         caught: list[str] = []
         for code, row in exposures.items():
             cap = None if relative_caps is None else relative_caps.get(code)
@@ -264,7 +273,7 @@ class SpecificRiskModel:
         """
         history = history or {}
         base = self.kappa_constant * self.forecast_level
-        floor = max(floor_fraction, 0.0) * base
+        floor = self.floor_level(floor_fraction)
         v_model = (
             self.relative_residual_sd**2
             if np.isfinite(self.relative_residual_sd)
@@ -371,6 +380,10 @@ def estimate_specific_risk_model(
 
     `capitalisations` is periods-by-securities and is what makes the kappa calibration
     possible.  Without it kappa falls back to the normal constant and the notes say so.
+
+    Only cells with a residual take part. S, V and gamma need one by construction; the kappa
+    calibration is held to the same cells on both of its sides, so a characteristic row or a
+    capitalisation recorded in a period the security was not in the regression moves nothing.
     """
     residuals = np.asarray(residuals, dtype=float)
     characteristics = np.asarray(characteristics, dtype=float)
@@ -409,6 +422,9 @@ def estimate_specific_risk_model(
     forecast_level, level_r2 = _forecast_average_level(
         levels[usable], model=average_model, periods=average_periods
     )
+    # The cells the fit learns from: a residual, in a period with a usable level. A residual
+    # exists exactly where the security was in that period's regression.
+    in_fit = np.isfinite(residuals) & usable[:, None]
 
     # V_it = |u_it| / S_t - 1, which is mean-zero across assets by construction.
     relative = np.full_like(absolute, np.nan)
@@ -462,8 +478,9 @@ def estimate_specific_risk_model(
     v_hat = characteristics @ gamma
     normalised = np.full_like(absolute, np.nan)
     normalised[usable, :] = residuals[usable, :] / levels[usable, None]
-    predicted_relative = np.full_like(absolute, np.nan)
-    predicted_relative[usable, :] = 1.0 + v_hat[usable, :]
+    # Over the realised side's own cells. A predicted level where there is no residual has
+    # nothing to be compared with, and averaging it in set kappa from periods it never saw.
+    predicted_relative = np.where(in_fit, 1.0 + v_hat, np.nan)
 
     realised_sd = np.full(n_securities, np.nan)
     mean_predicted = np.full(n_securities, np.nan)
@@ -492,7 +509,9 @@ def estimate_specific_risk_model(
             )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            mean_cap = np.nanmean(np.where(caps > 0.0, caps, np.nan), axis=0)
+            # Size over the same cells: the decile a security's bias is calibrated in is its
+            # size while it was being measured, not across periods it was absent from.
+            mean_cap = np.nanmean(np.where(in_fit & (caps > 0.0), caps, np.nan), axis=0)
         eligible = ratio_ok & np.isfinite(mean_cap)
         if int(eligible.sum()) >= deciles * 2:
             order = np.argsort(mean_cap[eligible])
