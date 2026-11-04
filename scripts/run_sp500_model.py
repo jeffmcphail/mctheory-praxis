@@ -35,6 +35,7 @@ from praxis.midoffice.model.covariance import (  # noqa: E402
 )
 from praxis.midoffice.model.crosssectional import (  # noqa: E402
     estimate_cross_sectional_model,
+    regression_universe,
 )
 from praxis.midoffice.model.descriptors import (  # noqa: E402
     SecurityPanel,
@@ -43,6 +44,16 @@ from praxis.midoffice.model.descriptors import (  # noqa: E402
     risk_index_members,
 )
 from praxis.midoffice.model.panel import Frequency, ReturnPanel  # noqa: E402
+from praxis.midoffice.refdata.industries import (  # noqa: E402
+    build_scheme,
+    combine,
+    industry_exposures,
+)
+from praxis.midoffice.refdata.polygon import (  # noqa: E402
+    PolygonClient,
+    PolygonError,
+    read_api_key,
+)
 
 
 def load_panel(path: Path) -> tuple[SecurityPanel, np.ndarray]:
@@ -127,6 +138,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--half-life", type=float, default=90.0,
                         help="volatility half-life in trading days (BIM301S uses 90)")
     parser.add_argument("--newey-west-lags", type=int, default=10)
+    parser.add_argument("--industries", action="store_true",
+                        help="add SIC-derived industry factors and drop the market factor, "
+                             "which they span; codes come from the fetch cache at no cost")
+    parser.add_argument("--cache", default="data/external/polygon/cache")
+    parser.add_argument("--env", default=".env")
+    parser.add_argument("--min-industry", type=int, default=15,
+                        help="merge a SIC major group below this size into its division")
     parser.add_argument("--equal-weight", action="store_true",
                         help="weight the cross-sectional regression equally; the default "
                              "is Barra's square root of capitalisation")
@@ -184,33 +202,104 @@ def main(argv: list[str] | None = None) -> int:
         members = [m for m in risk_index_members(name) if m in standardised.names]
         print(f"  {name:<20} {', '.join(members)}")
 
-    print("\nModel")
     # "Regression Weighting Scheme: Square root of capitalisation" appears on every model
     # sheet in the Equity Risk Model Reference Guide. Equal weighting lets the smallest,
     # noisiest names set the factor returns -- there are far more of them, and in a
-    # cap-weighted world almost none of the money.
+    # cap-weighted world almost none of the money. Needed before the industries, because
+    # which securities a regression sees depends on the weights.
     weights = None if args.equal_weight else np.sqrt(np.where(caps > 0.0, caps, np.nan))
+    return_panel = ReturnPanel(panel.dates, panel.securities, returns, Frequency.DAILY)
+
+    scheme = None
+    if args.industries:
+        print("\nIndustries")
+        try:
+            client = PolygonClient(
+                api_key=read_api_key(args.env), cache_dir=Path(args.cache)
+            )
+        except PolygonError as error:
+            raise SystemExit(f"  industries need the reference cache: {error}") from None
+        codes: dict[str, str | None] = {}
+        carried: list[str] = []
+        for ticker in panel.securities:
+            code, on = client.sic_code_any(ticker, panel.dates[-1])
+            codes[ticker] = code
+            if code and on != panel.dates[-1]:
+                carried.append(ticker)
+        if carried:
+            # A company acquired mid-window has no record at the end of it, but its
+            # industry while it traded is exactly what the regression needs.
+            print(f"  {len(carried)} classification(s) carried from an earlier date "
+                  f"(delisted inside the window): {', '.join(sorted(carried)[:5])}")
+        # Counted over the securities in at least one estimated period's regression, not
+        # over the panel. A member that never enters a regression contributes nothing to its
+        # factor, and counting them let a four-member Unclassified -- one member present in
+        # most periods -- past a floor of five.
+        universe = regression_universe(return_panel, indices, regression_weights=weights)
+        print(f"  {len(universe)} of {panel.n_securities} securities are in at least one "
+              f"estimated period's regression; every count below is over them")
+        scheme = build_scheme(codes, min_members=args.min_industry, universe=universe)
+        print(f"  {scheme.describe()}")
+        for name, count in sorted(scheme.counts().items(), key=lambda kv: -kv[1])[:8]:
+            print(f"    {name:<24} {count:>4}")
+        for note in scheme.qualifications():
+            print(f"  - {note}")
+        indices = combine(
+            indices,
+            industry_exposures(
+                scheme, panel.dates, panel.securities, frequency=Frequency.DAILY
+            ),
+        )
+
+    print("\nModel")
     print(f"  regression weights: "
           f"{'equal' if args.equal_weight else 'square root of capitalisation'}")
     model = estimate_cross_sectional_model(
-        ReturnPanel(panel.dates, panel.securities, returns, Frequency.DAILY),
+        return_panel,
         indices,
         standardise=False,
         annualise=True,
         specific_risk="blend",
         capitalisations=caps,
         regression_weights=weights,
+        # Industries sum to one per security, which IS the unit column. Fitting a market
+        # factor alongside them makes the design exactly singular, not nearly so.
+        fit_market=scheme is None,
         covariance_estimator=NeweyWestCovariance(
             lags=args.newey_west_lags, half_life=args.half_life
         ),
     )
+    notes = model.notes
     print(f"  {model.describe()}")
-    print(f"  mean cross-sectional R-squared {model.notes.mean_r_squared:.3f}")
-    print(f"\n  {'factor':<20} {'annual vol':>11} {'noise share':>12}")
+    print(f"  mean cross-sectional R-squared {notes.mean_r_squared:.3f}")
+    print(f"  {len(notes.rank_deficient_periods)} collinear period(s) of {notes.n_periods} "
+          f"estimated; {sum(notes.empty_periods)} factor-period(s) left out for having no "
+          f"member present")
+    if scheme is not None and scheme.universe is not None:
+        # The universe was worked out before the industries existed. It can differ from the
+        # regression's only if a security has no classification at all, or the model has
+        # min_securities factors or more -- neither is the case here, but a count over the
+        # wrong set is the defect this exists to prevent, so check it.
+        differs = scheme.universe.symmetric_difference(notes.regression_universe)
+        if differs:
+            print(f"  ! the industry counts were taken over a universe that differs from the "
+                  f"regression's by {len(differs)} security(ies): "
+                  f"{', '.join(sorted(differs)[:5])}")
+
+    # noise_share cannot see a factor with one member: the regression fits that member
+    # exactly, its residual is zero, and the sampling variance looks small. Other Industries
+    # read 5.7 percent with one member present in every period. The exactly-1 column can.
+    print(f"\n  Over the {notes.n_periods} estimated periods. noise share is blind to a "
+          f"one-member factor; the exactly-1 column is not.")
+    print(f"  {'':<22} {'':>11} {'':>12}   periods with a member present")
+    print(f"  {'factor':<22} {'annual vol':>11} {'noise share':>12}   "
+          f"{'>=1':>6} {'exactly 1':>10} {'none':>6}")
     volatilities = np.sqrt(np.diag(model.covariance.matrix))
     for i, fid in enumerate(model.factor_ids):
-        share = model.notes.noise_share[i] if model.notes.noise_share else float("nan")
-        print(f"  {model.factor_names[fid]:<20} {volatilities[i]:>10.2%} {share:>11.1%}")
+        share = notes.noise_share[i] if notes.noise_share else float("nan")
+        print(f"  {model.factor_names[fid]:<22} {volatilities[i]:>10.2%} {share:>11.1%}   "
+              f"{notes.present_periods[i]:>6,} {notes.single_member_periods[i]:>10,} "
+              f"{notes.empty_periods[i]:>6,}")
 
     specific = np.array(
         [ev.specific.by_issuer[code] for code, ev in model.exposures.items()]

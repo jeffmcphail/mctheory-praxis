@@ -36,6 +36,14 @@ emphatically *not* an exposure -- a factor risk model has nothing to say about i
 unit column is the **market factor**, and it *is* an exposure, because every security really
 does have unit exposure to the market.  Same column of ones, opposite meaning.
 
+**A factor nobody carries in a period is left out of that period.**  An industry with every
+member missing on one day is an all-zero column that day, and it makes the design rank
+deficient for a reason that has nothing to do with the other columns.  It is dropped from that
+period's fit, its factor return recorded as zero -- what the minimum-norm solution gives it
+anyway -- and counted per factor in the notes, next to the periods in which exactly one
+security carried it.  That second count sees what `noise_share` cannot: a factor with one
+member fits that member exactly, its residual is zero, and its sampling variance looks small.
+
 What this module does not do, and a real Barra model does:
 
 - **Constrained industry factors.**  Industry dummies sum to the unit column, so a design with
@@ -107,6 +115,17 @@ class CrossSectionalNotes:
     sampling_variance: tuple[float, ...] = ()
     factor_names: tuple[str, ...] = ()
     covariance: CovarianceEstimate | None = None
+    # Per factor, over the estimated periods: how many had at least one security in the
+    # regression with a nonzero exposure, how many exactly one, and how many none. A period
+    # with none left the factor out of that period's fit.
+    present_periods: tuple[int, ...] = ()
+    single_member_periods: tuple[int, ...] = ()
+    empty_periods: tuple[int, ...] = ()
+    # Per factor, the collinear periods in which it was constant across the cross-section and
+    # in the span of the other columns -- a cause that was checked, not presumed.
+    collinear_constant: tuple[int, ...] = ()
+    # The securities in at least one estimated period's regression.
+    regression_universe: tuple[str, ...] = ()
 
     @property
     def effective_observations(self) -> float:
@@ -168,6 +187,16 @@ class CrossSectionalNotes:
                 f"{len(self.thin_periods)} period(s) dropped for having fewer than "
                 f"{self.min_securities} securities: {shown}{more}"
             )
+        empty = sum(self.empty_periods)
+        if empty:
+            named = [
+                f"{name} ({k})" for name, k in zip(self.factor_names, self.empty_periods) if k
+            ]
+            out.append(
+                f"{empty} factor-period(s) had no security in the regression exposed to the "
+                f"factor and were left out of that period's fit, the factor return recorded "
+                f"as zero: {', '.join(named[:5])}"
+            )
         if self.rank_deficient_periods:
             shown = ", ".join(str(d) for d in self.rank_deficient_periods[:3])
             more = (
@@ -175,11 +204,38 @@ class CrossSectionalNotes:
                 if len(self.rank_deficient_periods) > 3
                 else ""
             )
+            # Name a cause only where one was checked. Empty columns never get here -- they
+            # are left out of the period's fit -- so what can be identified is a constant one.
+            constant = [
+                f"{name} ({k})"
+                for name, k in zip(self.factor_names, self.collinear_constant)
+                if k
+            ]
+            if constant:
+                cause = (
+                    f" -- constant across the cross-section, and so in the span of the other "
+                    f"columns: {', '.join(constant[:3])}"
+                )
+            elif self.market_factor:
+                cause = " -- industry dummies alongside a market factor are the usual cause"
+            else:
+                cause = " -- no empty or constant column accounts for it"
             out.append(
                 f"{len(self.rank_deficient_periods)} period(s) had a collinear design and "
                 f"took a minimum-norm solution, which has no economic reading: "
-                f"{shown}{more} -- industry dummies alongside a market factor are the "
-                f"usual cause"
+                f"{shown}{more}{cause}"
+            )
+        singles = [
+            f"{name} ({k} of {self.n_periods})"
+            for name, k in zip(self.factor_names, self.single_member_periods)
+            if k
+        ]
+        if singles:
+            out.append(
+                f"{len(singles)} factor(s) had exactly one security exposed in some estimated "
+                f"period(s); there the factor return is that security's return, fitted "
+                f"exactly, and noise_share reads it as well estimated: "
+                f"{', '.join(singles[:5])}"
             )
         if self.short_history and self.specific_risk_method == "historical":
             out.append(
@@ -248,6 +304,112 @@ class CrossSectionalNotes:
         return tuple(out)
 
 
+def _align(
+    returns: ReturnPanel, characteristics: CharacteristicPanel
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    """Return rows, characteristic rows, return columns and characteristic columns for the
+    dates and securities both panels have, in return-panel order."""
+    if returns.frequency != characteristics.frequency:
+        raise ValueError(
+            f"returns are {returns.frequency.label} and characteristics are "
+            f"{characteristics.frequency.label}; align them before estimating"
+        )
+
+    char_date_at = {d: i for i, d in enumerate(characteristics.dates)}
+    date_pairs = [
+        (i, char_date_at[d]) for i, d in enumerate(returns.dates) if d in char_date_at
+    ]
+    char_sec_at = {s: j for j, s in enumerate(characteristics.securities)}
+    sec_pairs = [
+        (j, char_sec_at[s])
+        for j, s in enumerate(returns.securities)
+        if s in char_sec_at
+    ]
+    if not date_pairs:
+        raise ValueError(
+            "the return panel and the characteristic panel share no dates, so there is "
+            "nothing to estimate"
+        )
+    if not sec_pairs:
+        raise ValueError(
+            "the return panel and the characteristic panel share no securities, so there "
+            "is nothing to estimate"
+        )
+    return (
+        [i for i, _ in date_pairs],
+        [k for _, k in date_pairs],
+        [j for j, _ in sec_pairs],
+        [k for _, k in sec_pairs],
+    )
+
+
+def _weight_block(
+    regression_weights: np.ndarray | None,
+    returns: ReturnPanel,
+    return_rows: list[int],
+    return_cols: list[int],
+) -> np.ndarray | None:
+    if regression_weights is None:
+        return None
+    weights = np.asarray(regression_weights, dtype=float)
+    if weights.shape != (len(returns.dates), len(returns.securities)):
+        raise ValueError(
+            f"regression weights have shape {weights.shape}, expected "
+            f"{(len(returns.dates), len(returns.securities))} to match the return panel"
+        )
+    return weights[np.ix_(return_rows, return_cols)]
+
+
+def _in_regression(
+    r_block: np.ndarray, x_block: np.ndarray, w_block: np.ndarray | None
+) -> np.ndarray:
+    """Dates by securities: who is in each period's regression.
+
+    A return, a complete characteristic row and, when the regression is weighted, a positive
+    weight. One definition for the estimator and for `regression_universe`, because a count
+    taken over a slightly different set is how a factor ends up with no members.
+    """
+    usable = ~np.isnan(r_block) & ~np.isnan(x_block).any(axis=2)
+    if w_block is not None:
+        usable &= ~np.isnan(w_block) & (w_block > 0.0)
+    return usable
+
+
+def regression_universe(
+    returns: ReturnPanel,
+    characteristics: CharacteristicPanel,
+    *,
+    regression_weights: np.ndarray | None = None,
+    min_securities: int = MIN_SECURITIES_PER_PERIOD,
+    n_factors: int | None = None,
+) -> tuple[str, ...]:
+    """The securities in at least one estimated period's regression, known before estimating.
+
+    The estimator's own test: a security is in a period's regression when it has a return, a
+    complete characteristic row and a positive weight, and a period is estimated when at
+    least `max(min_securities, n_factors + 1)` securities are. Anything that counts members
+    to make a decision -- an industry scheme's floors -- should count over this, because a
+    member that is never in a regression contributes nothing to its factor. The real S&P 500
+    run counted DISCA and DISCK, whose last returns were ten months before the first estimated
+    period, toward an industry's floor.
+
+    `n_factors` defaults to the panel's own columns; pass the final model's count when the
+    panel is only part of it. Industry indicators need not be in `characteristics` at all:
+    for a classified security they are never missing, so they cannot change who is in a
+    regression. The estimator records the same set as
+    `CrossSectionalNotes.regression_universe`, which is how a caller checks the two agreed.
+    """
+    return_rows, char_rows, return_cols, char_cols = _align(returns, characteristics)
+    r_block = returns.returns[np.ix_(return_rows, return_cols)]
+    x_block = characteristics.values[np.ix_(char_rows, char_cols)]
+    w_block = _weight_block(regression_weights, returns, return_rows, return_cols)
+    usable = _in_regression(r_block, x_block, w_block)
+    k = characteristics.values.shape[2] if n_factors is None else n_factors
+    estimated = usable.sum(axis=1) >= max(min_securities, k + 1)
+    ever = usable[estimated].any(axis=0)
+    return tuple(returns.securities[j] for j, inside in zip(return_cols, ever) if inside)
+
+
 def estimate_cross_sectional_model(
     returns: ReturnPanel,
     characteristics: CharacteristicPanel,
@@ -301,40 +463,10 @@ def estimate_cross_sectional_model(
     `capitalisations`, a dates-by-securities array on the return panel's shape, calibrates
     kappa against size the way USE3 does. Without it kappa falls back to the normal constant.
     """
-    if returns.frequency != characteristics.frequency:
-        raise ValueError(
-            f"returns are {returns.frequency.label} and characteristics are "
-            f"{characteristics.frequency.label}; align them before estimating"
-        )
-
     # Dates and securities common to both, in panel order.
-    char_date_at = {d: i for i, d in enumerate(characteristics.dates)}
-    date_pairs = [
-        (i, char_date_at[d]) for i, d in enumerate(returns.dates) if d in char_date_at
-    ]
-    char_sec_at = {s: j for j, s in enumerate(characteristics.securities)}
-    sec_pairs = [
-        (j, char_sec_at[s])
-        for j, s in enumerate(returns.securities)
-        if s in char_sec_at
-    ]
-    if not date_pairs:
-        raise ValueError(
-            "the return panel and the characteristic panel share no dates, so there is "
-            "nothing to estimate"
-        )
-    if not sec_pairs:
-        raise ValueError(
-            "the return panel and the characteristic panel share no securities, so there "
-            "is nothing to estimate"
-        )
-
-    shared_dates = tuple(returns.dates[i] for i, _ in date_pairs)
-    shared_securities = tuple(returns.securities[j] for j, _ in sec_pairs)
-    return_rows = [i for i, _ in date_pairs]
-    char_rows = [k for _, k in date_pairs]
-    return_cols = [j for j, _ in sec_pairs]
-    char_cols = [k for _, k in sec_pairs]
+    return_rows, char_rows, return_cols, char_cols = _align(returns, characteristics)
+    shared_dates = tuple(returns.dates[i] for i in return_rows)
+    shared_securities = tuple(returns.securities[j] for j in return_cols)
 
     panel = characteristics
     if standardise:
@@ -351,16 +483,7 @@ def estimate_cross_sectional_model(
 
     n_periods_in, n_secs, n_factors = x_block.shape
 
-    if regression_weights is not None:
-        regression_weights = np.asarray(regression_weights, dtype=float)
-        if regression_weights.shape != (len(returns.dates), len(returns.securities)):
-            raise ValueError(
-                f"regression weights have shape {regression_weights.shape}, expected "
-                f"{(len(returns.dates), len(returns.securities))} to match the return panel"
-            )
-        w_block = regression_weights[np.ix_(return_rows, return_cols)]
-    else:
-        w_block = None
+    w_block = _weight_block(regression_weights, returns, return_rows, return_cols)
 
     kept_dates: list[date] = []
     factor_rows: list[np.ndarray] = []
@@ -370,20 +493,23 @@ def estimate_cross_sectional_model(
     r_squareds: list[float] = []
     sampling = np.zeros(n_factors)
     sampling_periods = 0
+    periods_present = np.zeros(n_factors, dtype=int)
+    periods_single = np.zeros(n_factors, dtype=int)
+    periods_empty = np.zeros(n_factors, dtype=int)
+    periods_constant = np.zeros(n_factors, dtype=int)
+    ever_in = np.zeros(n_secs, dtype=bool)
 
+    in_regression = _in_regression(r_block, x_block, w_block)
     for t in range(n_periods_in):
-        r = r_block[t, :]
-        x = x_block[t, :, :]
-        usable = ~np.isnan(r) & ~np.isnan(x).any(axis=1)
-        if w_block is not None:
-            usable &= ~np.isnan(w_block[t, :]) & (w_block[t, :] > 0.0)
+        usable = in_regression[t]
         n_t = int(np.count_nonzero(usable))
         if n_t < max(min_securities, n_factors + 1):
             thin.append(shared_dates[t])
             continue
+        ever_in |= usable
 
-        r_t = r[usable]
-        x_t = x[usable, :]
+        r_t = r_block[t, usable]
+        x_t = x_block[t][usable, :]
         if w_block is None:
             w_t = np.ones(n_t)
         else:
@@ -392,12 +518,34 @@ def estimate_cross_sectional_model(
             w_t = w_block[t, usable]
             w_t = w_t * (n_t / w_t.sum())
 
+        # Who carries each factor this period. A column nobody carries is all zero: the
+        # period says nothing about that factor, and leaving it in would make the design rank
+        # deficient for a reason unrelated to every other column. So it is left out, and its
+        # return recorded as zero -- what the minimum-norm solution gives it anyway.
+        exposed = np.count_nonzero(x_t, axis=0)
+        periods_present += exposed > 0
+        periods_single += exposed == 1
+        periods_empty += exposed == 0
+        active = exposed > 0
+        n_active = int(np.count_nonzero(active))
+
         root_w = np.sqrt(w_t)
-        design = x_t * root_w[:, None]
+        design = x_t[:, active] * root_w[:, None]
         target = r_t * root_w
-        f_t, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
-        if rank < n_factors:
+        coefficients, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
+        f_t = np.zeros(n_factors)
+        f_t[active] = coefficients
+        if rank < n_active:
             rank_deficient.append(shared_dates[t])
+            for position, k in enumerate(np.flatnonzero(active)):
+                if fit_market and k == 0:
+                    continue    # constant by construction: it is what a constant duplicates
+                column = x_t[:, k]
+                if np.ptp(column) > 1e-12 * max(1.0, float(np.abs(column).max())):
+                    continue
+                # Constant -- but the cause only if the other columns span it.
+                if np.linalg.matrix_rank(np.delete(design, position, axis=1)) == rank:
+                    periods_constant[k] += 1
 
         fitted = x_t @ f_t
         u_t = r_t - fitted
@@ -424,14 +572,15 @@ def estimate_cross_sectional_model(
 
         # Sampling variance of this period's factor returns: sigma^2 (X'WX)^-1.
         dof = n_t - rank
-        if dof > 0 and rank == n_factors:
+        if dof > 0 and rank == n_active:
             sigma2 = ss_res / dof
             try:
                 xtwx_inv = np.linalg.inv(design.T @ design)
             except np.linalg.LinAlgError:
                 pass
             else:
-                sampling += sigma2 * np.diag(xtwx_inv)
+                # A factor left out this period adds nothing: its zero was set, not estimated.
+                sampling[active] += sigma2 * np.diag(xtwx_inv)
                 sampling_periods += 1
 
         kept_dates.append(shared_dates[t])
@@ -593,6 +742,13 @@ def estimate_cross_sectional_model(
         sampling_variance=mean_sampling,
         factor_names=tuple(names),
         covariance=estimate,
+        present_periods=tuple(int(v) for v in periods_present),
+        single_member_periods=tuple(int(v) for v in periods_single),
+        empty_periods=tuple(int(v) for v in periods_empty),
+        collinear_constant=tuple(int(v) for v in periods_constant),
+        regression_universe=tuple(
+            code for code, inside in zip(shared_securities, ever_in) if inside
+        ),
     )
 
     return FactorModel(

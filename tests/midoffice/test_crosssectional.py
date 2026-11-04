@@ -20,6 +20,7 @@ from praxis.midoffice.model.crosssectional import (
     MARKET_FACTOR,
     MIN_SECURITIES_PER_PERIOD,
     estimate_cross_sectional_model,
+    regression_universe,
 )
 from praxis.midoffice.model.panel import Frequency, ReturnPanel
 
@@ -460,6 +461,139 @@ def test_a_collinear_design_is_flagged_rather_than_hidden():
     model = _fit(returns, chars, standardise=False, fit_market=True)
     assert len(model.notes.rank_deficient_periods) == n_periods
     assert any("minimum-norm solution" in q for q in model.qualifications())
+    # There is a market factor, so the usual-cause hint may mention it.
+    assert any("alongside a market factor" in q for q in model.qualifications())
+
+
+class _Capture:
+    """A covariance estimator that keeps the factor returns it was handed."""
+
+    def __init__(self):
+        self.returns = None
+
+    def estimate(self, returns):
+        self.returns = np.array(returns, dtype=float, copy=True)
+        return SampleCovariance().estimate(returns)
+
+
+def _industry_world(seed, n_secs=60, n_periods=36):
+    """Three mutually exclusive industries of twenty and one style, with no market factor
+    needed: the indicators span the unit column themselves."""
+    rng = np.random.default_rng(seed)
+    dates, secs = _dates(n_periods), tuple(f"S{i:03d}" for i in range(n_secs))
+    values = np.zeros((n_periods, n_secs, 4))
+    for j in range(n_secs):
+        values[:, j, j % 3] = 1.0
+    values[:, :, 3] = rng.normal(size=(n_periods, n_secs))
+    chars = CharacteristicPanel(dates, secs, ("Ind0", "Ind1", "Ind2", "Size"), values)
+    return chars, rng.normal(scale=0.05, size=(n_periods, n_secs))
+
+
+def test_a_factor_nobody_carries_in_a_period_is_left_out_of_that_period():
+    """An industry with every member missing on one day is an all-zero column that day.
+
+    Left in, it makes the design rank deficient for a reason unrelated to every other column,
+    and the period takes a minimum-norm solution. Left out, the period is an ordinary
+    full-rank fit and the factor's return that day is recorded as exactly zero. The counts
+    are exact, not directions: the real run's 75 collinear periods were all this.
+    """
+    chars, raw = _industry_world(seed=61)
+    members = [j for j in range(60) if j % 3 == 2]
+    raw[np.ix_([4, 9, 17], members)] = np.nan
+    returns = ReturnPanel(chars.dates, chars.securities, raw, Frequency.MONTHLY)
+    capture = _Capture()
+    model = _fit(returns, chars, fit_market=False, covariance_estimator=capture)
+    notes = model.notes
+    assert notes.rank_deficient_periods == ()
+    assert notes.empty_periods == (0, 0, 3, 0)
+    assert notes.present_periods == (36, 36, 33, 36)
+    assert (capture.returns[[4, 9, 17], 2] == 0.0).all()
+    assert any(
+        q.startswith("3 factor-period(s) had no security in the regression") and "Ind2 (3)" in q
+        for q in model.qualifications()
+    )
+
+
+def test_a_factor_carried_by_one_security_is_counted_where_noise_share_cannot_see_it():
+    """One member: the regression fits it exactly and its residual is zero. noise_share takes
+    its sampling variance from everyone else's residuals, so with a common component in the
+    factor return it reads the factor as well estimated -- a real run's Other Industries was
+    one stock in all 939 periods and showed 5.7 percent. The single-member count does not
+    depend on any of that."""
+    rng = np.random.default_rng(67)
+    n_secs, n_periods = 60, 36
+    dates, secs = _dates(n_periods), tuple(f"S{i:03d}" for i in range(n_secs))
+    values = np.zeros((n_periods, n_secs, 3))
+    values[:, 0, 2] = 1.0                                   # Lone: one member
+    for j in range(1, n_secs):
+        values[:, j, j % 2] = 1.0
+    chars = CharacteristicPanel(dates, secs, ("Ind0", "Ind1", "Lone"), values)
+    raw = rng.normal(scale=0.05, size=(n_periods, n_secs))
+    raw += rng.normal(scale=0.2, size=(n_periods, 1))       # what the industries carry
+    returns = ReturnPanel(dates, secs, raw, Frequency.MONTHLY)
+    model = _fit(returns, chars, fit_market=False)
+    notes = model.notes
+    assert notes.noise_share[2] < 0.25                      # looks well estimated
+    assert notes.single_member_periods == (0, 0, 36)        # and is one stock every period
+    assert notes.present_periods == (36, 36, 36)
+    assert notes.empty_periods == (0, 0, 0)
+    assert any(
+        "exactly one security exposed" in q and "Lone (36 of 36)" in q
+        for q in model.qualifications()
+    )
+
+
+def test_the_collinearity_note_names_a_constant_column_and_no_absent_market_factor():
+    """A style column identical across the cross-section duplicates whatever spans the unit
+    column -- here the industry dummies -- and is named, because that was checked. Fitted
+    without a market factor, the note must not blame one."""
+    chars, raw = _industry_world(seed=71)
+    values = chars.values.copy()
+    values[5, :, 3] = 0.7                                   # Size constant, in one period
+    flat = CharacteristicPanel(chars.dates, chars.securities, chars.names, values)
+    returns = ReturnPanel(chars.dates, chars.securities, raw, Frequency.MONTHLY)
+    model = _fit(returns, flat, fit_market=False)
+    assert model.notes.rank_deficient_periods == (chars.dates[5],)
+    assert model.notes.collinear_constant == (0, 0, 0, 1)
+    note = next(q for q in model.qualifications() if "minimum-norm solution" in q)
+    assert "Size (1)" in note
+    assert "market factor" not in note
+
+
+def test_a_collinearity_with_no_identifiable_cause_does_not_invent_one():
+    chars, raw = _industry_world(seed=73)
+    values = np.concatenate([chars.values, 2.0 * chars.values[:, :, 3:]], axis=2)
+    doubled = CharacteristicPanel(
+        chars.dates, chars.securities, chars.names + ("Size2",), values
+    )
+    returns = ReturnPanel(chars.dates, chars.securities, raw, Frequency.MONTHLY)
+    model = _fit(returns, doubled, fit_market=False)
+    assert len(model.notes.rank_deficient_periods) == 36
+    note = next(q for q in model.qualifications() if "minimum-norm solution" in q)
+    assert "market factor" not in note
+    assert "no empty or constant column accounts for it" in note
+
+
+def test_the_regression_universe_is_known_before_estimating_and_agrees_with_it():
+    """The set an industry scheme must count over: securities in at least one estimated
+    period's regression, by the estimator's own test, before anything is estimated."""
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60, seed=79)
+    raw = returns.returns.copy()
+    raw[:, 0] = np.nan                  # never a return
+    raw[:10, 2:] = np.nan               # the first ten periods are thin...
+    raw[10:, 1] = np.nan                # ...and the only ones security 1 has a return in
+    weights = np.ones((60, 40))
+    weights[:, 3] = 0.0                 # never any weight
+    panel = ReturnPanel(returns.dates, returns.securities, raw, returns.frequency)
+    universe = regression_universe(
+        panel, chars, regression_weights=weights, min_securities=20
+    )
+    model = _fit(panel, chars, regression_weights=weights, min_securities=20)
+    assert len(model.notes.thin_periods) == 10
+    assert universe == model.notes.regression_universe
+    assert set(returns.securities) - set(universe) == {
+        returns.securities[k] for k in (0, 1, 3)
+    }
 
 
 def test_a_security_without_characteristics_at_the_exposure_date_is_excluded():
