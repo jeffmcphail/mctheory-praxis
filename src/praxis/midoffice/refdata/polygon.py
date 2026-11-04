@@ -220,6 +220,62 @@ class PolygonClient:
         # a panel that breaks quietly when it does not.
         return tuple(sorted(bars, key=lambda b: b.date))
 
+    def ticker_details(self, ticker: str, on: dt.date) -> Mapping:
+        """The reference record as of a date: shares outstanding, SIC code, the lot.
+
+        One cache entry serves every caller, so asking for an industry classification after
+        a panel fetch costs nothing -- the response is already on disk.
+        """
+        payload = self._get(
+            f"/v3/reference/tickers/{ticker}",
+            {"date": on.isoformat()},
+            cache_key=f"ref-{ticker}-{on}",
+        )
+        return payload.get("results") or {}
+
+    def cached_reference_dates(self, ticker: str) -> tuple[dt.date, ...]:
+        """Dates with a reference record already on disk, newest first.
+
+        A delisted security has no record at the end of a window but plenty before it, and
+        those responses are already cached from the panel fetch. Reading them back costs a
+        directory listing; guessing at dates instead would put thousands of requests on the
+        wire to rediscover what is sitting on disk.
+        """
+        if self.cache_dir is None:
+            return ()
+        found: list[dt.date] = []
+        prefix = f"ref-{ticker}-"
+        for path in self.cache_dir.glob(f"{prefix}*.json"):
+            try:
+                found.append(dt.date.fromisoformat(path.stem[len(prefix):]))
+            except ValueError:
+                continue
+        return tuple(sorted(found, reverse=True))
+
+    def sic_code_any(self, ticker: str, preferred: dt.date) -> tuple[str | None, dt.date | None]:
+        """The SIC code at `preferred`, else the most recent cached date that has one.
+
+        Returns the date it came from, because a classification carried forward from before
+        a delisting is a different claim from a current one and the caller should be able
+        to say so.
+        """
+        candidates = [preferred] + [
+            d for d in self.cached_reference_dates(ticker) if d != preferred
+        ]
+        for on in candidates:
+            try:
+                code = self.sic_code(ticker, on)
+            except PolygonError:
+                continue
+            if code:
+                return code, on
+        return None, None
+
+    def sic_code(self, ticker: str, on: dt.date) -> str | None:
+        """The four-digit SIC code, as a string so leading zeros survive."""
+        value = self.ticker_details(ticker, on).get("sic_code")
+        return str(value).strip().zfill(4) if value else None
+
     def shares_outstanding(self, ticker: str, on: dt.date) -> float | None:
         """`share_class_shares_outstanding` as of a date, or None if not reported.
 
@@ -228,13 +284,7 @@ class PolygonClient:
         The two converge for most companies and diverge exactly where it matters -- around
         issuance, buybacks and splits.
         """
-        payload = self._get(
-            f"/v3/reference/tickers/{ticker}",
-            {"date": on.isoformat()},
-            cache_key=f"ref-{ticker}-{on}",
-        )
-        results = payload.get("results") or {}
-        value = results.get("share_class_shares_outstanding")
+        value = self.ticker_details(ticker, on).get("share_class_shares_outstanding")
         return float(value) if value else None
 
     def market_bars(
