@@ -74,12 +74,19 @@ def load_panel(path: Path) -> tuple[SecurityPanel, np.ndarray]:
     return panel, data["market_returns"]
 
 
-def screen(standardised: CharacteristicPanel, returns: np.ndarray) -> list[dict]:
+def screen(
+    standardised: CharacteristicPanel,
+    returns: np.ndarray,
+    membership: np.ndarray | None = None,
+) -> list[dict]:
     """One univariate cross-sectional regression per descriptor per period.
 
     Returns are shifted forward by one period against the exposures: a descriptor computed
     from data up to day t can only explain day t+1's return. Regressing it on day t's return
     would use the price that produced it to predict itself.
+
+    Given a membership, each regression holds to the members on the return's day, as the
+    model's own do: a descriptor earns its place on the securities the model is estimated on.
     """
     rows = []
     for k, name in enumerate(standardised.names):
@@ -89,6 +96,8 @@ def screen(standardised: CharacteristicPanel, returns: np.ndarray) -> list[dict]
         for t in range(exposure.shape[0]):
             x, y = exposure[t], future[t]
             ok = np.isfinite(x) & np.isfinite(y)
+            if membership is not None:
+                ok &= membership[t + 1]
             if int(ok.sum()) < 30:
                 continue
             xs, ys = x[ok], y[ok]
@@ -128,6 +137,69 @@ def screen(standardised: CharacteristicPanel, returns: np.ndarray) -> list[dict]
             }
         )
     return rows
+
+
+def clipped_outside_on(
+    descriptors: CharacteristicPanel,
+    caps: np.ndarray,
+    membership: np.ndarray,
+    t: int,
+) -> list[tuple[str, int, int]]:
+    """Per descriptor on day t: how many values of securities outside the index hit one of
+    the members' bounds, and how many such values there were.
+
+    Read off `standardise` run on that day and descriptor alone, which is exact: no day's or
+    descriptor's standardisation looks at any other's.
+    """
+    out = []
+    for k, name in enumerate(descriptors.names):
+        day = CharacteristicPanel(
+            descriptors.dates[t : t + 1],
+            descriptors.securities,
+            (name,),
+            descriptors.values[t : t + 1, :, k : k + 1],
+            descriptors.frequency,
+        )
+        hit = day.standardise(caps[t : t + 1], membership=membership[t : t + 1])
+        have = int(np.count_nonzero(np.isfinite(day.values[0, :, 0]) & ~membership[t]))
+        out.append((name, hit.clipped_outside, have))
+    return out
+
+
+def estimation_moments(
+    values: np.ndarray, caps: np.ndarray, membership: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per date and column, over the estimation universe -- the members with a value, or
+    everyone with one: the cap-weighted mean, the equal-weighted standard deviation, the
+    first-order rounding bound on that mean (n * eps * the cap-weighted mean absolute value),
+    and n. A mean inside its bound is zero to machine precision.
+
+    Worked out here from the exposures, not taken from the code that standardised them, so a
+    step after it that moved them -- or a different set standardising them -- shows.
+    """
+    n_dates, _, n_columns = values.shape
+    means = np.full((n_dates, n_columns), np.nan)
+    spreads = np.full((n_dates, n_columns), np.nan)
+    bounds = np.full((n_dates, n_columns), np.nan)
+    sizes = np.zeros((n_dates, n_columns), dtype=int)
+    eps = np.finfo(float).eps
+    for t in range(n_dates):
+        for k in range(n_columns):
+            x = values[t, :, k]
+            inside = np.isfinite(x)
+            if membership is not None:
+                inside &= membership[t]
+            n = int(np.count_nonzero(inside))
+            if n < 2:
+                continue
+            w = np.nan_to_num(caps[t, inside], nan=0.0)
+            if w.sum() <= 0.0:
+                w = np.ones(n)
+            means[t, k] = np.average(x[inside], weights=w)
+            spreads[t, k] = np.std(x[inside], ddof=1)
+            bounds[t, k] = n * eps * np.average(np.abs(x[inside]), weights=w)
+            sizes[t, k] = n
+    return means, spreads, bounds, sizes
 
 
 def index_membership(
@@ -207,54 +279,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  {usable:,} of {returns.size:,} return observations present "
           f"({usable / returns.size:.1%})")
 
-    print("\nDescriptors")
-    descriptors, skipped = compute_descriptors(
-        panel,
-        market_returns=market,
-        beta_window_months=args.beta_window,
-    )
-    print(f"  computed {len(descriptors.names)}: {', '.join(descriptors.names)}")
-    for name, reason in sorted(skipped.items()):
-        print(f"  - {name}: {reason}")
-
-    caps = panel.market_capitalisation()
-    standardised = descriptors.standardise(caps)
-    if standardised.winsorised:
-        print(f"  {standardised.winsorised:,} raw values winsorised before standardising")
-
-    print("\nWhich descriptors carry signal")
-    print("  Ranked by the cross-sectional return variance each explains on its own.")
-    print(f"  {'descriptor':<10} {'cover':>6} {'periods':>8} {'mean R2':>9} "
-          f"{'factor vol':>11} {'t-stat':>8}")
-    rows = screen(standardised, returns)
-    scored = [r for r in rows if "mean_r2" in r]
-    thin = [r for r in rows if "mean_r2" not in r]
-    for row in sorted(scored, key=lambda r: -r["mean_r2"]):
-        print(f"  {row['name']:<10} {row['coverage']:>5.0%} {row['periods']:>8,} "
-              f"{row['mean_r2']:>8.2%} {row['factor_vol']:>10.2%} {row['t_stat']:>8.2f}")
-    for row in thin:
-        print(f"  {row['name']:<10} {'-':>6} {row['periods']:>8,}   too few usable periods")
-
-    print("\nRisk indices")
-    available = [
-        name
-        for name in ("Volatility", "Momentum", "Size", "Size Nonlinearity",
-                     "Trading Activity")
-        if any(m in standardised.names for m in risk_index_members(name))
-    ]
-    indices = build_risk_indices(standardised, cap_weights=caps, indices=available)
-    for name in indices.names:
-        members = [m for m in risk_index_members(name) if m in standardised.names]
-        print(f"  {name:<20} {', '.join(members)}")
-
-    # "Regression Weighting Scheme: Square root of capitalisation" appears on every model
-    # sheet in the Equity Risk Model Reference Guide. Equal weighting lets the smallest,
-    # noisiest names set the factor returns -- there are far more of them, and in a
-    # cap-weighted world almost none of the money. Needed before the industries, because
-    # which securities a regression sees depends on the weights.
-    weights = None if args.equal_weight else np.sqrt(np.where(caps > 0.0, caps, np.nan))
-    return_panel = ReturnPanel(panel.dates, panel.securities, returns, Frequency.DAILY)
-
     # The panel is the index on its first day held fixed. Nothing in it removes a name after
     # it leaves -- SBNY traded on at cents against a pre-failure share count -- so without a
     # membership the regression keeps whatever still has a price.
@@ -275,9 +299,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         except sp500.CoverageError as error:
             raise SystemExit(f"  the run stops: {error}") from None
-        print(f"  each period's regression holds only that day's members: "
-              f"{int(membership[0].sum())} of the panel's {panel.n_securities} on "
-              f"{panel.dates[0]}, {int(membership[-1].sum())} on {panel.dates[-1]}")
+        print(f"  one array for every standardisation and every regression below, each held "
+              f"to that day's members: {int(membership[0].sum())} of the panel's "
+              f"{panel.n_securities} on {panel.dates[0]}, {int(membership[-1].sum())} on "
+              f"{panel.dates[-1]}")
         unreproduced = unreproduced_changes(snapshot, panel.dates[0], panel.dates[-1])
         if unreproduced:
             print(f"  {len(unreproduced)} change(s) inside the panel's window that "
@@ -299,6 +324,71 @@ def main(argv: list[str] | None = None) -> int:
                           f"{'left out of' if kind == 'added' else 'kept in'} each of those "
                           f"days' cross-sections")
             print(f"  - {when} {ticker} {claim}: {effect}")
+
+    print("\nDescriptors")
+    descriptors, skipped = compute_descriptors(
+        panel,
+        market_returns=market,
+        beta_window_months=args.beta_window,
+        membership=membership,
+    )
+    print(f"  computed {len(descriptors.names)}: {', '.join(descriptors.names)}")
+    for name, reason in sorted(skipped.items()):
+        print(f"  - {name}: {reason}")
+
+    caps = panel.market_capitalisation()
+    # Over the estimation universe: the members set each day's clip bounds, cap-weighted mean
+    # and equal-weighted dispersion, and every other security with a value is put on their
+    # scale. Barra's estimation universe against its coverage universe -- an ex-member still
+    # gets an exposure, but no say in what an exposure of one means.
+    standardised = descriptors.standardise(caps, membership=membership)
+    if standardised.winsorised:
+        print(f"  {standardised.winsorised:,} raw values winsorised before standardising")
+    if membership is not None:
+        last = len(panel.dates) - 1
+        print(f"  {standardised.clipped_outside:,} values of securities outside the index hit "
+              f"one of the members' bounds, over every date; on {panel.dates[last]}, of those "
+              f"with a value:")
+        hits = [f"{name} {hit}/{have}"
+                for name, hit, have in clipped_outside_on(descriptors, caps, membership, last)]
+        for i in range(0, len(hits), 7):
+            print(f"    {'  '.join(hits[i:i + 7])}")
+
+    print("\nWhich descriptors carry signal")
+    print("  Ranked by the cross-sectional return variance each explains on its own.")
+    print(f"  {'descriptor':<10} {'cover':>6} {'periods':>8} {'mean R2':>9} "
+          f"{'factor vol':>11} {'t-stat':>8}")
+    rows = screen(standardised, returns, membership)
+    scored = [r for r in rows if "mean_r2" in r]
+    thin = [r for r in rows if "mean_r2" not in r]
+    for row in sorted(scored, key=lambda r: -r["mean_r2"]):
+        print(f"  {row['name']:<10} {row['coverage']:>5.0%} {row['periods']:>8,} "
+              f"{row['mean_r2']:>8.2%} {row['factor_vol']:>10.2%} {row['t_stat']:>8.2f}")
+    for row in thin:
+        print(f"  {row['name']:<10} {'-':>6} {row['periods']:>8,}   too few usable periods")
+
+    print("\nRisk indices")
+    available = [
+        name
+        for name in ("Volatility", "Momentum", "Size", "Size Nonlinearity",
+                     "Trading Activity")
+        if any(m in standardised.names for m in risk_index_members(name))
+    ]
+    indices = build_risk_indices(
+        standardised, cap_weights=caps, indices=available, membership=membership
+    )
+    style_names = indices.names
+    for name in indices.names:
+        members = [m for m in risk_index_members(name) if m in standardised.names]
+        print(f"  {name:<20} {', '.join(members)}")
+
+    # "Regression Weighting Scheme: Square root of capitalisation" appears on every model
+    # sheet in the Equity Risk Model Reference Guide. Equal weighting lets the smallest,
+    # noisiest names set the factor returns -- there are far more of them, and in a
+    # cap-weighted world almost none of the money. Needed before the industries, because
+    # which securities a regression sees depends on the weights.
+    weights = None if args.equal_weight else np.sqrt(np.where(caps > 0.0, caps, np.nan))
+    return_panel = ReturnPanel(panel.dates, panel.securities, returns, Frequency.DAILY)
 
     scheme = None
     if args.industries:
@@ -380,12 +470,42 @@ def main(argv: list[str] | None = None) -> int:
                   f"regression's by {len(differs)} security(ies): "
                   f"{', '.join(sorted(differs)[:5])}")
 
+    # The index at zero style exposure, exactly: on every estimated period the cap-weighted mean
+    # of each style exposure over that day's estimation universe is zero to rounding, and the
+    # equal-weighted dispersion one. That is what lets an exposure read as relative to the
+    # index. Nothing after the second standardisation clips, so nothing may move it.
+    at = {d: i for i, d in enumerate(panel.dates)}
+    held = [at[d] for d in notes.estimated_dates]
+    columns = [indices.names.index(name) for name in style_names]
+    means, spreads, bounds, sizes = estimation_moments(
+        indices.values[held][:, :, columns],
+        caps[held],
+        None if membership is None else membership[held],
+    )
+    worst = float(np.nanmax(np.abs(means)))
+    eps = np.finfo(float).eps
+    over = np.abs(means) > bounds
+    universe_label = "index members" if membership is not None else "securities"
+    in_eps = f" ({worst / eps:.1f} eps)" if worst < 1e3 * eps else ""
+    print(f"\n  Style exposures over each estimated period's {universe_label} with a value, "
+          f"all {len(held)} periods: cap-weighted mean at most {worst:.1e} from zero{in_eps}, "
+          f"equal-weighted sd at most {float(np.nanmax(np.abs(spreads - 1.0))):.1e} from one")
+    if over.any():
+        t, k = np.unravel_index(int(np.nanargmax(np.where(over, np.abs(means), -1.0))),
+                                means.shape)
+        print(f"  ! {int(over.sum())} of {over.size} style-period means are past rounding, so "
+              f"the index is not at zero exposure; the largest, {means[t, k]:+.4f}, is "
+              f"{style_names[k]} on {notes.estimated_dates[t]}")
+    print(f"  {'on ' + str(notes.estimated_dates[-1]):<22} {'cap-wtd mean':>13} "
+          f"{'eq-wtd sd':>10} {'n':>5}")
+    for k, name in enumerate(style_names):
+        print(f"  {name:<22} {means[-1, k]:>+13.1e} {spreads[-1, k]:>10.6f} "
+              f"{sizes[-1, k]:>5}")
+
     # A restriction to members only removes, so the cross-sections shrink and sampling error
     # rises with them; the sizes are where that shows.
     rows = [("in the regression", np.array(notes.cross_section_sizes))]
     if membership is not None:
-        at = {d: i for i, d in enumerate(panel.dates)}
-        held = [at[d] for d in notes.estimated_dates]
         rows = [
             ("index members", np.array(index_sizes)[held]),
             ("of them in the panel", membership[held].sum(axis=1)),

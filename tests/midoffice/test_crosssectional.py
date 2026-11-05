@@ -1142,3 +1142,152 @@ def test_a_membership_of_the_wrong_shape_or_kind_is_refused():
         regression_universe(returns, chars, membership=np.ones((40, 9), dtype=bool))
     with pytest.raises(TypeError, match="boolean"):
         _fit(returns, chars, membership=np.ones((40, 40)))
+
+
+# ------------------------------- the estimation universe: whose values set the scale
+
+
+def _tails(n_dates: int = 3, n_secs: int = 60, seed: int = 89):
+    """Fifty members, and ten securities outside the index sitting in the lower tail of
+    both characteristics: the ex-members that traded on as they shrank."""
+    rng = np.random.default_rng(seed)
+    values = rng.normal(loc=23.0, scale=1.2, size=(n_dates, n_secs, 2))
+    values[:, :10, :] -= 4.0
+    members = np.ones((n_dates, n_secs), dtype=bool)
+    members[:, :10] = False
+    caps = np.exp(values[:, :, 0])
+    secs = tuple(f"S{i:02d}" for i in range(n_secs))
+    return CharacteristicPanel(_dates(n_dates), secs, ("Size", "Other"), values), caps, members
+
+
+def test_standardising_over_members_centres_and_scales_on_them_alone():
+    """The members' cap-weighted mean is zero and their equal-weighted standard deviation one,
+    to machine precision -- which is what puts the index itself at zero exposure."""
+    panel, caps, members = _tails()
+    out = panel.standardise(caps, winsorise=None, membership=members)
+    for t in range(3):
+        inside = out.values[t][members[t]]
+        weights = caps[t][members[t]]
+        for k in range(2):
+            assert abs(float(np.average(inside[:, k], weights=weights))) < 1e-14
+            assert float(np.std(inside[:, k], ddof=1)) == pytest.approx(1.0, rel=1e-14)
+    everyone = panel.standardise(caps, winsorise=None).values[0][members[0]]
+    assert float(np.std(everyone[:, 0], ddof=1)) < 0.8
+
+
+def test_a_security_outside_the_index_is_put_on_the_members_scale_and_moves_none_of_it():
+    panel, caps, members = _tails()
+    out = panel.standardise(caps, membership=members)
+    raw = panel.values[1, :, 0]
+    sample = raw[members[1]]
+    centre = float(np.median(sample))
+    scale = float(np.median(np.abs(sample - centre))) * 1.4826
+    low, high = centre - 4.0 * scale, centre + 4.0 * scale
+    clipped = np.clip(sample, low, high)
+    mean = float(np.average(clipped, weights=caps[1][members[1]]))
+    spread = float(np.std(clipped, ddof=1))
+    expected = np.clip((np.clip(raw[:10], low, high) - mean) / spread, -4.0, 4.0)
+    assert out.values[1, :10, 0] == pytest.approx(expected, rel=1e-14)
+
+    # Push the outsiders deeper into the tail: no member's exposure moves by a bit.
+    deeper = panel.values.copy()
+    deeper[:, :10, :] -= 3.0
+    moved = dataclasses.replace(panel, values=deeper).standardise(caps, membership=members)
+    assert np.array_equal(moved.values[:, 10:, :], out.values[:, 10:, :])
+    # Without a membership they set the scale for everyone.
+    assert not np.array_equal(
+        dataclasses.replace(panel, values=deeper).standardise(caps).values[:, 10:, :],
+        panel.standardise(caps).values[:, 10:, :],
+    )
+
+
+def test_the_members_bounds_bind_an_outsider_in_the_tail_and_are_counted():
+    """Ex-members sit in the tails, so some will hit the members' bounds, and the panel
+    counts how many apart from the members' own clipped values."""
+    panel, caps, members = _tails()
+    deep = panel.values.copy()
+    deep[:, :10, 0] -= 8.0
+    out = dataclasses.replace(panel, values=deep).standardise(caps, membership=members)
+    raw_moved = outside = 0
+    for t in range(3):
+        # All ten were clipped to the same raw bound, so they share one exposure.
+        assert np.ptp(out.values[t, :10, 0]) == 0.0
+        for k in range(2):
+            raw = deep[t, :, k]
+            sample = raw[members[t]]
+            centre = float(np.median(sample))
+            scale = float(np.median(np.abs(sample - centre))) * 1.4826
+            low, high = centre - 4.0 * scale, centre + 4.0 * scale
+            moved = (raw < low) | (raw > high)
+            raw_moved += int(moved.sum())
+            clipped = np.clip(raw, low, high)
+            mean = float(np.average(clipped[members[t]], weights=caps[t][members[t]]))
+            spread = float(np.std(clipped[members[t]], ddof=1))
+            moved |= np.abs((clipped - mean) / spread) > 4.0
+            outside += int(moved[~members[t]].sum())
+    assert outside >= 30
+    assert out.clipped_outside == outside
+    assert out.winsorised == raw_moved
+
+
+def test_an_outsider_inside_the_raw_bound_can_still_hit_the_standardised_one():
+    """LNCAP's case. A cap-weighted mean far above the median means a value the raw bound
+    let through can still standardise past -4, and for an ex-member in the lower tail that
+    is the bound that binds. It counts as hitting one."""
+    rng = np.random.default_rng(97)
+    values = np.append(np.clip(rng.normal(size=50), -2.5, 2.5), -3.0)
+    values[0] = 2.5
+    caps = np.ones((1, 51))
+    caps[0, 0] = 1e6
+    members = np.ones((1, 51), dtype=bool)
+    members[0, 50] = False
+    panel = CharacteristicPanel(
+        _dates(1), tuple(f"S{i}" for i in range(51)), ("Size",), values.reshape(1, -1, 1)
+    )
+    out = panel.standardise(caps, membership=members)
+    assert out.winsorised == 0
+    assert out.clipped_outside == 1
+    assert out.values[0, 50, 0] == -4.0
+
+
+def test_a_membership_that_holds_everyone_standardises_exactly_as_none():
+    panel, caps, _ = _tails()
+    everyone = np.ones(caps.shape, dtype=bool)
+    held = panel.standardise(caps, membership=everyone)
+    default = panel.standardise(caps)
+    assert np.array_equal(held.values, default.values)
+    assert held.winsorised == default.winsorised
+    assert held.clipped_outside == default.clipped_outside == 0
+
+
+def test_a_day_with_no_member_value_is_left_missing_not_standardised_on_the_rest():
+    panel, caps, members = _tails()
+    members = members.copy()
+    members[1, :] = False
+    out = panel.standardise(caps, membership=members)
+    assert np.isnan(out.values[1]).all()
+    assert np.isfinite(out.values[[0, 2]]).all()
+
+
+def test_standardise_refuses_a_membership_of_the_wrong_shape_or_kind():
+    panel, caps, _ = _tails()
+    with pytest.raises(ValueError, match="dates x securities"):
+        panel.standardise(caps, membership=np.ones((3, 9), dtype=bool))
+    with pytest.raises(TypeError, match="boolean"):
+        panel.standardise(caps, membership=np.ones((3, 60)))
+
+
+def test_the_estimator_standardises_over_the_membership_it_regresses_on():
+    """One array for both, so the two cannot disagree about who is a member."""
+    returns, chars, caps, members = _departures()
+    raw = dataclasses.replace(chars, values=chars.values * 3.0 + 10.0, standardised=False)
+    kw = dict(min_securities=20, specific_risk="blend", capitalisations=caps)
+    inside = _fit(returns, raw, standardise=True, standardise_weights=caps,
+                  membership=members, **kw)
+    by_hand = _fit(returns, raw.standardise(caps, membership=members), membership=members, **kw)
+    assert np.array_equal(inside.covariance.matrix, by_hand.covariance.matrix)
+    assert inside.notes.mean_r_squared == by_hand.notes.mean_r_squared
+    assert inside.exposures == by_hand.exposures
+    # Not what standardising over everyone gives, which is what it used to do.
+    everyone = _fit(returns, raw.standardise(caps), membership=members, **kw)
+    assert everyone.exposures != inside.exposures

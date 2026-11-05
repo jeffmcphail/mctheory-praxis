@@ -13,6 +13,7 @@ method -- rather than as a claimed reproduction of Barra's numbers.
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from datetime import date
 
@@ -572,3 +573,115 @@ def test_a_panel_without_unadjusted_prices_says_which_descriptors_it_affected():
     for name in ("LNCAP", "LPRI", "VLVR"):
         assert name in out.names
         assert "split-adjusted prices" in skipped[name]
+
+
+# ------------------------------- the estimation universe: whose values set the scale
+
+
+def _leavers(n_periods: int = 120, n_secs: int = 60, seed: int = 3):
+    """The twelve smallest securities leave the index halfway through and trade on."""
+    panel, market, _, _ = _panel(n_periods=n_periods, n_secs=n_secs, seed=seed)
+    members = np.ones((n_periods, n_secs), dtype=bool)
+    members[n_periods // 2 :, :12] = False
+    return panel, market, members
+
+
+def _indices(panel, market, members):
+    caps = panel.market_capitalisation()
+    descriptors = compute_descriptors(
+        panel,
+        market_returns=market,
+        risk_free=np.full(panel.n_periods, 0.002),
+        membership=members,
+    )[0].standardise(caps, membership=members)
+    return build_risk_indices(descriptors, cap_weights=caps, membership=members), caps
+
+
+def test_risk_indices_built_over_members_hold_the_index_at_zero_style_exposure():
+    """Exact, on every period and every index: the members' cap-weighted mean is zero to
+    machine precision and their equal-weighted standard deviation one. That is what makes an
+    exposure read as relative to the index."""
+    panel, market, members = _leavers()
+    indices, caps = _indices(panel, market, members)
+    checked = 0
+    for t in range(panel.n_periods):
+        for k, name in enumerate(indices.names):
+            x = indices.values[t, :, k]
+            inside = members[t] & np.isfinite(x)
+            if inside.sum() < 2:
+                continue
+            mean = float(np.average(x[inside], weights=caps[t][inside]))
+            assert abs(mean) < 1e-14, (t, name, mean)
+            assert float(np.std(x[inside], ddof=1)) == pytest.approx(1.0, rel=1e-13), (t, name)
+            checked += 1
+    assert checked > 2 * panel.n_periods
+    # Over everyone, the leavers in the lower tail pull the members off zero.
+    everyone, _ = _indices(panel, market, None)
+    size = everyone.values[-1, :, everyone.names.index("Size")]
+    inside = members[-1] & np.isfinite(size)
+    assert abs(float(np.average(size[inside], weights=caps[-1][inside]))) > 0.01
+
+
+def test_a_security_outside_the_index_sets_no_part_of_any_members_exposure():
+    """End to end: shrink the leavers' share counts once they have left -- their caps, LNCAP,
+    LCAPCB and turnover all move -- and not one member's risk index moves by a bit. Without a
+    membership, every member's does."""
+    panel, market, members = _leavers()
+    shares = panel.shares_outstanding.copy()
+    shares[~members] *= 0.05
+    shrunk = dataclasses.replace(panel, shares_outstanding=shares)
+    before, _ = _indices(panel, market, members)
+    after, _ = _indices(shrunk, market, members)
+    assert np.array_equal(before.values[members], after.values[members], equal_nan=True)
+    assert not np.array_equal(before.values[~members], after.values[~members], equal_nan=True)
+    loose_before, _ = _indices(panel, market, None)
+    loose_after, _ = _indices(shrunk, market, None)
+    assert not np.array_equal(
+        loose_before.values[members], loose_after.values[members], equal_nan=True
+    )
+
+
+def test_lcapcb_is_the_cube_of_log_cap_normalised_over_the_members():
+    """The normalisation is part of the descriptor's definition, so it is taken over the
+    estimation universe like every other: an ex-member does not set the centre the cube is
+    taken about."""
+    panel, market, members = _leavers()
+    out, _ = compute_descriptors(
+        panel, market_returns=market, names=("LNCAP", "LCAPCB"), membership=members
+    )
+    log_cap = out.values[:, :, 0]
+    for t in (0, panel.n_periods - 1):
+        inside = members[t]
+        centre = float(log_cap[t][inside].mean())
+        spread = float(log_cap[t][inside].std(ddof=1))
+        expected = ((log_cap[t] - centre) / spread) ** 3
+        assert out.values[t, :, 1] == pytest.approx(expected, rel=1e-12)
+    loose, _ = compute_descriptors(panel, market_returns=market, names=("LNCAP", "LCAPCB"))
+    assert np.array_equal(loose.values[0], out.values[0])
+    assert not np.allclose(loose.values[-1, :, 1], out.values[-1, :, 1])
+
+
+def test_fitted_weights_learn_from_the_members_alone():
+    panel, market, members = _leavers(seed=9)
+    standardised = compute_descriptors(panel, market_returns=market)[0].standardise()
+    returns = panel.returns()
+    fitted = fit_index_weights(standardised, "Momentum", returns, membership=members)
+    blanked = fit_index_weights(standardised, "Momentum", np.where(members, returns, np.nan))
+    assert fitted == blanked
+    assert fitted != fit_index_weights(standardised, "Momentum", returns)
+
+
+def test_a_membership_of_the_wrong_shape_or_kind_is_refused_wherever_it_is_taken():
+    panel, market, members = _leavers()
+    standardised = compute_descriptors(panel, market_returns=market)[0].standardise()
+    wrong = np.ones((5, 5), dtype=bool)
+    with pytest.raises(ValueError, match="dates x securities"):
+        compute_descriptors(panel, market_returns=market, membership=wrong)
+    with pytest.raises(ValueError, match="dates x securities"):
+        blend_to_index(standardised, "Size", membership=wrong)
+    with pytest.raises(ValueError, match="dates x securities"):
+        build_risk_indices(standardised, membership=wrong)
+    with pytest.raises(ValueError, match="dates x securities"):
+        fit_index_weights(standardised, "Momentum", panel.returns(), membership=wrong)
+    with pytest.raises(TypeError, match="boolean"):
+        blend_to_index(standardised, "Size", membership=members.astype(float))

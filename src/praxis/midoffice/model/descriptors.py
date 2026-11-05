@@ -36,7 +36,7 @@ from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 
-from .characteristics import CharacteristicPanel
+from .characteristics import CharacteristicPanel, _checked_membership
 from .panel import Frequency
 
 TRADING_DAYS_PER_MONTH = 23.0
@@ -259,6 +259,7 @@ def compute_descriptors(
     names: Sequence[str] | None = None,
     beta_window_months: float = 60.0,
     volatility_window_months: float | None = None,
+    membership: np.ndarray | None = None,
 ) -> tuple[CharacteristicPanel, dict[str, str]]:
     """Compute USE3's price-and-volume descriptors over the panel.
 
@@ -277,6 +278,10 @@ def compute_descriptors(
     observations, and a standard deviation of three points is noise. A longer monthly window
     measures something real but it is no longer DASTD -- it is a slower descriptor wearing
     the same name.
+
+    `membership`, a dates-by-securities boolean array, is the estimation universe LCAPCB's
+    normalisation is taken over -- the one descriptor here whose definition is cross-sectional.
+    Everything else is a security's own history.
     """
     wanted = tuple(names) if names is not None else PRICE_DESCRIPTORS
     unknown = set(wanted) - set(PRICE_DESCRIPTORS)
@@ -287,6 +292,9 @@ def compute_descriptors(
         )
 
     n_periods, n_securities = panel.prices.shape
+    members = _checked_membership(
+        membership, (n_periods, n_securities), "(dates x securities)"
+    )
     returns = panel.returns()
     skipped: dict[str, str] = {}
     computed: dict[str, np.ndarray] = {}
@@ -339,16 +347,20 @@ def compute_descriptors(
 
     if "LCAPCB" in wanted and log_cap is not None:
         # "the cube of the NORMALIZED log of market capitalization" -- the standardisation
-        # is part of the definition, so it is done here rather than left to the caller.
+        # is part of the definition, so it is done here rather than left to the caller. Over
+        # the members when there is a membership, like every other standardisation: the cube
+        # is not affine, so an ex-member that moved the centre would change its shape, not
+        # just its scale.
         cube = np.full_like(log_cap, np.nan)
         for t in range(n_periods):
             row = log_cap[t, :]
             present = np.isfinite(row)
-            if int(present.sum()) > 1:
-                values = row[present]
-                spread = float(np.std(values, ddof=1))
+            inside = present if members is None else present & members[t]
+            if int(inside.sum()) > 1:
+                sample = row[inside]
+                spread = float(np.std(sample, ddof=1))
                 if spread > 0.0:
-                    cube[t, present] = ((values - values.mean()) / spread) ** 3
+                    cube[t, present] = ((row[present] - sample.mean()) / spread) ** 3
         computed["LCAPCB"] = cube
 
     # --- Volatility and Momentum from prices ----------------------------------------
@@ -534,31 +546,37 @@ def risk_index_members(index: str) -> tuple[str, ...]:
 
 
 def _restandardise(
-    values: np.ndarray, cap_weights: np.ndarray | None
+    values: np.ndarray,
+    cap_weights: np.ndarray | None,
+    membership: np.ndarray | None = None,
 ) -> np.ndarray:
     """Cross-sectional standardisation, period by period: the convention used throughout.
 
     Cap-weighted mean so the market has no tilt, equal-weighted dispersion so a handful of
-    large names cannot set the scale. The same asymmetry `characteristics.py` explains.
+    large names cannot set the scale. The same asymmetry `characteristics.py` explains, and
+    the same estimation universe: given a membership, the members set the mean and the
+    dispersion and everyone else is put on their scale. Fewer than two members with a value
+    leaves the day missing.
     """
     out = np.full_like(values, np.nan)
     for t in range(values.shape[0]):
         row = values[t, :]
         present = np.isfinite(row)
-        if int(present.sum()) < 2:
+        inside = present if membership is None else present & membership[t]
+        if int(inside.sum()) < 2:
             continue
-        sample = row[present]
+        sample = row[inside]
         if cap_weights is None:
             w = np.ones(sample.size)
         else:
-            w = np.nan_to_num(cap_weights[t, present], nan=0.0)
+            w = np.nan_to_num(cap_weights[t, inside], nan=0.0)
             if w.sum() <= 0.0:
                 w = np.ones(sample.size)
         spread = float(np.std(sample, ddof=1))
         if spread <= 0.0:
             out[t, present] = 0.0
             continue
-        out[t, present] = (sample - float(np.average(sample, weights=w))) / spread
+        out[t, present] = (row[present] - float(np.average(sample, weights=w))) / spread
     return out
 
 
@@ -569,6 +587,7 @@ def blend_to_index(
     weights: Mapping[str, float] | None = None,
     standardise: bool = True,
     cap_weights: np.ndarray | None = None,
+    membership: np.ndarray | None = None,
 ) -> np.ndarray:
     """Combine a risk index's descriptors into one exposure, from a standardised panel.
 
@@ -591,12 +610,19 @@ def blend_to_index(
     scaled inversely, and the covariance between them would mean nothing -- which is the exact
     failure standardising exists to prevent.  Barra standardises twice for this reason: the
     GEM handbook's normalisation formula is written for the *risk index*, not the descriptor.
+
+    `membership` is the estimation universe the second pass is taken over, and should be the
+    one the descriptors were standardised over: then the index's members carry a cap-weighted
+    mean of exactly zero, so the index itself has no exposure to its own style factors.
     """
     if not panel.standardised:
         raise ValueError(
             "blend_to_index needs a standardised panel: averaging raw descriptors on "
             "different scales is meaningless. Call CharacteristicPanel.standardise first."
         )
+    held = _checked_membership(
+        membership, (len(panel.dates), len(panel.securities)), "(dates x securities)"
+    )
     members = [name for name in risk_index_members(index) if name in panel.names]
     if not members:
         raise ValueError(
@@ -620,7 +646,7 @@ def blend_to_index(
         blended = np.where(
             denominator > 0.0, weighted.sum(axis=2) / denominator, np.nan
         )
-    return _restandardise(blended, cap_weights) if standardise else blended
+    return _restandardise(blended, cap_weights, held) if standardise else blended
 
 
 def build_risk_indices(
@@ -629,6 +655,7 @@ def build_risk_indices(
     weights: Mapping[str, Mapping[str, float]] | None = None,
     cap_weights: np.ndarray | None = None,
     indices: Iterable[str] | None = None,
+    membership: np.ndarray | None = None,
 ) -> CharacteristicPanel:
     """Descriptors in, risk indices out: the exposures a cross-sectional model consumes.
 
@@ -640,7 +667,8 @@ def build_risk_indices(
     between two unstable coefficients.
 
     The result is standardised and drops straight into
-    `estimate_cross_sectional_model(..., standardise=False)`.
+    `estimate_cross_sectional_model(..., standardise=False)`. Pass the `membership` the
+    descriptors were standardised over, and the estimator the same.
     """
     if not panel.standardised:
         raise ValueError(
@@ -666,6 +694,7 @@ def build_risk_indices(
             name,
             weights=None if weights is None else weights.get(name),
             cap_weights=cap_weights,
+            membership=membership,
         )
         for name in available
     ]
@@ -683,6 +712,8 @@ def fit_index_weights(
     panel: CharacteristicPanel,
     index: str,
     returns: np.ndarray,
+    *,
+    membership: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Fit a risk index's descriptor weights by explanatory power, pooled over periods.
 
@@ -693,6 +724,10 @@ def fit_index_weights(
 
     It recovers Barra's *method*, not their numbers. A model built this way is a
     reimplementation of a published methodology and should be described as one.
+
+    `membership` holds the fit to the estimation universe, as the model's regressions are
+    held: otherwise the names outside the index help choose the blend that measures the ones
+    inside it.
     """
     if not panel.standardised:
         raise ValueError("fit_index_weights needs a standardised panel")
@@ -704,10 +739,13 @@ def fit_index_weights(
         raise ValueError(
             f"returns have shape {returns.shape}, expected {panel.values.shape[:2]}"
         )
+    held = _checked_membership(membership, returns.shape, "(dates x securities)")
     columns = [panel.names.index(name) for name in members]
     design = panel.values[:, :, columns].reshape(-1, len(members))
     target = returns.reshape(-1)
     keep = np.isfinite(target) & np.isfinite(design).all(axis=1)
+    if held is not None:
+        keep &= held.reshape(-1)
     if int(keep.sum()) <= len(members):
         raise ValueError(
             f"only {int(keep.sum())} usable observation(s) to fit {len(members)} weight(s)"

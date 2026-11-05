@@ -349,12 +349,37 @@ companies into a range of 0.20. Clipping first restores their range to 0.90.
 The scale used for the clip is the median absolute deviation, rescaled by 1.4826 so it
 estimates the same quantity as the standard deviation on normal data. MAD is used precisely
 because one extreme value cannot inflate it, which is what lets the clip bite. A second clip
-after standardising is a guard that makes the parameter mean what it says; it is nearly always
-a no-op.
+after standardising is a guard that makes the parameter mean what it says. For the securities
+that set the scale it is nearly always a no-op -- 3,043 of the S&P 500 panel's member values
+over its 1,214 days, nearly half of them in LNCAP's lower tail, where a cap-weighted mean far
+above the median puts the bound inside the raw one. For the securities put on that scale it
+is not; see below.
 
 `CharacteristicPanel.winsorised` counts how many raw values moved. A handful means the clip
 did its job; a large fraction means the characteristic itself is wrong -- wrong units, a sign
 error, a vendor placeholder like -999 -- and no clipping will fix it.
+
+### Whose values set the scale: the estimation universe
+
+Given a membership, every standardisation is taken over that day's index members with a value:
+the descriptors' clip bounds, cap-weighted mean and equal-weighted standard deviation, the
+second pass over each blended risk index, and LCAPCB's own normalisation. Every other security
+with a value is put on the members' scale -- clipped to their bounds, centred on their mean,
+divided by their dispersion. That is Barra's estimation universe against its coverage universe.
+A name that left the index still gets an exposure, as a holding of it needs, but no say in what
+an exposure of one means. The run script builds one membership array and hands it to every
+standardisation and every regression, so no two can disagree about who is a member.
+
+What it buys is the index at zero. Standardised over every panel security, the S&P 500 run's
+members carried a cap-weighted Size exposure of +0.013 on its last day, at a dispersion of
+0.88: the ex-members trading on in the lower tail had widened the scale for everyone. Over the
+members, the cap-weighted mean of every style exposure is zero to rounding on every estimated
+period -- at most 2e-16 -- and the run checks it each time.
+
+The outsiders sit in the tails, so many hit a bound: 100,018 of their values over the panel.
+`CharacteristicPanel.clipped_outside` counts them, by either bound, since for LNCAP the second
+one binds: 19 of the 45 ex-members with a price on the last day hit it, one of them the raw
+bound too.
 
 ### Weights: two different arrays, easily confused
 
@@ -543,7 +568,9 @@ BTSG recovers beta times residual volatility with a mean ratio of 0.99.
 Three details that are easy to get wrong and are pinned by tests:
 
 * **LCAPCB is the cube of the *standardised* log capitalisation**, not of the raw one.
-  Appendix A says "normalized", so the standardisation is part of the definition.
+  Appendix A says "normalized", so the standardisation is part of the definition -- and given
+  a membership it is taken over the members, like every other. The cube is not affine, so
+  where it is centred changes its shape and not just its scale.
 * **BTSG is set to zero when beta is negative**, which the definition states explicitly.
 * **SERDP comes out a few percent below its AR(1) theoretical value**, consistently across
   rho. That is the definition rather than the implementation: it is built on *fitted*

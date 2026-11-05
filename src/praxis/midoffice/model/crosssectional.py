@@ -56,8 +56,9 @@ floor list: hitting the floor is a statement about an estimate.
 security enters period t's regression only if it was a member on t as well as having a return,
 a complete row and a weight.  A non-member cell is then exactly a missing return: no part in
 that period's factor returns, no residual, nothing for the specific risk model to learn from.
-It is not a filter on the output -- a security outside the index on the exposure date still
-gets exposures and a forecast, as a holding outside it would.
+Where this module standardises, the same array decides whose values set the scale -- see
+`CharacteristicPanel.standardise`.  It is not a filter on the output -- a security outside the
+index on the exposure date still gets exposures and a forecast, as a holding outside it would.
 
 What this module does not do, and a real Barra model does:
 
@@ -83,7 +84,7 @@ import numpy as np
 
 from ..risk.basis import FactorCovariance
 from ..risk.exposures import ExposureVector, SpecificRisk
-from .characteristics import CharacteristicPanel
+from .characteristics import CharacteristicPanel, _checked_membership
 from .covariance import CovarianceEstimate, CovarianceEstimator, SampleCovariance
 from .panel import FactorReturns, Frequency, ReturnPanel
 from .specificrisk import SpecificRiskModel, estimate_specific_risk_model
@@ -422,19 +423,13 @@ def _membership_block(
     return_rows: list[int],
     return_cols: list[int],
 ) -> np.ndarray | None:
-    if membership is None:
+    members = _checked_membership(
+        membership,
+        (len(returns.dates), len(returns.securities)),
+        "to match the return panel",
+    )
+    if members is None:
         return None
-    members = np.asarray(membership)
-    if members.dtype != bool:
-        raise TypeError(
-            f"membership must be a boolean array, got {members.dtype}: a 0/1 float is not a "
-            f"membership, and a NaN in one is truthy"
-        )
-    if members.shape != (len(returns.dates), len(returns.securities)):
-        raise ValueError(
-            f"membership has shape {members.shape}, expected "
-            f"{(len(returns.dates), len(returns.securities))} to match the return panel"
-        )
     return members[np.ix_(return_rows, return_cols)]
 
 
@@ -532,8 +527,10 @@ def estimate_cross_sectional_model(
 
     `membership` is a dates-by-securities boolean array on the same shape, True where the
     security was an index member that day. Given one, a period's regression holds only that
-    day's members; a non-member cell is treated exactly as a missing return. None, the
-    default, regresses every security with data.
+    day's members; a non-member cell is treated exactly as a missing return. When this call
+    standardises, the same array is the estimation universe the standardisation is taken over,
+    so the two cannot disagree about who is a member. None, the default, regresses and
+    standardises over every security with data.
 
     `standardise_weights` is passed to `CharacteristicPanel.standardise` for the *mean*, and
     should be market capitalisation itself rather than its square root: the point of a
@@ -566,9 +563,22 @@ def estimate_cross_sectional_model(
     shared_dates = tuple(returns.dates[i] for i in return_rows)
     shared_securities = tuple(returns.securities[j] for j in return_cols)
 
+    m_block = _membership_block(membership, returns, return_rows, return_cols)
+
     panel = characteristics
     if standardise:
-        panel = characteristics.standardise(standardise_weights, winsorise=winsorise)
+        # Over the same members the regressions are held to. The characteristic panel's own
+        # dates and securities outside the return panel's have no membership to read, so
+        # they set no scale; nothing here uses them.
+        standardise_members = None
+        if m_block is not None:
+            standardise_members = np.zeros(
+                (len(characteristics.dates), len(characteristics.securities)), dtype=bool
+            )
+            standardise_members[np.ix_(char_rows, char_cols)] = m_block
+        panel = characteristics.standardise(
+            standardise_weights, winsorise=winsorise, membership=standardise_members
+        )
 
     r_block = returns.returns[np.ix_(return_rows, return_cols)]
     x_block = panel.values[np.ix_(char_rows, char_cols)]
@@ -582,7 +592,6 @@ def estimate_cross_sectional_model(
     n_periods_in, n_secs, n_factors = x_block.shape
 
     w_block = _weight_block(regression_weights, returns, return_rows, return_cols)
-    m_block = _membership_block(membership, returns, return_rows, return_cols)
 
     kept_dates: list[date] = []
     sizes: list[int] = []

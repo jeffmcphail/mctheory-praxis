@@ -30,6 +30,13 @@ deliberate on both sides -- a cap-weighted mean so the market has no style tilt,
 equal-weighted dispersion so a handful of mega-caps do not set the scale.  Equal-weighting the mean leaves the market with a large negative size exposure,
 because there are far more small companies than large ones, and every portfolio's size
 exposure is then measured against a benchmark nobody holds.
+
+**Whose values set the scale is a separate question from who gets an exposure.**  Barra
+standardises over its estimation universe and applies the result to its whole coverage
+universe.  Given a membership, `standardise` does the same: the index's members that day set
+the clip bounds, the mean and the standard deviation, and everyone else with a value is put
+on their scale.  The market at zero is then the index at zero, which is what lets an exposure
+read as relative to it.
 """
 
 from __future__ import annotations
@@ -41,6 +48,23 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 
 from .panel import Frequency
+
+
+def _checked_membership(
+    membership: np.ndarray | None, shape: tuple[int, int], expected: str
+) -> np.ndarray | None:
+    """A dates-by-securities membership, refused unless it is boolean and of `shape`."""
+    if membership is None:
+        return None
+    members = np.asarray(membership)
+    if members.dtype != bool:
+        raise TypeError(
+            f"membership must be a boolean array, got {members.dtype}: a 0/1 float is not a "
+            f"membership, and a NaN in one is truthy"
+        )
+    if members.shape != shape:
+        raise ValueError(f"membership has shape {members.shape}, expected {shape} {expected}")
+    return members
 
 
 @dataclass(frozen=True)
@@ -64,6 +88,15 @@ class CharacteristicPanel:
     Provenance worth keeping. A handful means the clip did its job on genuine outliers; a
     large fraction of the panel means the characteristic itself is wrong -- wrong units, a
     sign error, a vendor placeholder like -999 -- and no amount of clipping will fix it.
+    """
+    clipped_outside: int = 0
+    """How many values of securities outside the estimation universe hit one of the members'
+    bounds: their raw clip bounds, or the `winsorise` bound on the standardised value.
+
+    The ex-members sit in the tails, so some will. Both bounds count because either can bind:
+    a cap-weighted mean far above the median -- LNCAP's -- puts the second bound inside the
+    first in the lower tail. Most of a characteristic's outsiders hitting a bound would mean
+    the members' scale does not describe them at all.
     """
 
     def __post_init__(self) -> None:
@@ -157,7 +190,11 @@ class CharacteristicPanel:
         }
 
     def standardise(
-        self, weights: np.ndarray | None = None, *, winsorise: float | None = 4.0
+        self,
+        weights: np.ndarray | None = None,
+        *,
+        winsorise: float | None = 4.0,
+        membership: np.ndarray | None = None,
     ) -> "CharacteristicPanel":
         """Zero weighted mean and unit standard deviation, per characteristic per period.
 
@@ -195,6 +232,18 @@ class CharacteristicPanel:
         securities sharing one value) it falls back to the standard deviation, and where that
         is zero too the characteristic has no cross-sectional variation and standardises to
         zeros.
+
+        **`membership` decides whose values set the scale.**  A dates-by-securities boolean
+        array, True where the security is in the estimation universe that day -- for an index
+        model, an index member.  Given one, the clip bounds, the weighted mean and the
+        standard deviation are taken over that day's members with a value and nobody else,
+        and every other security with a value is put on the members' scale: clipped to their
+        bounds, centred on their mean, divided by their standard deviation.  A name that left
+        the index still gets an exposure, as a holding of it would need, but no say in what an
+        exposure of one means -- and it is the ex-members, shrinking in the tails, that would
+        otherwise widen the scale for everyone.  A day on which no member has a value leaves
+        the characteristic missing that day rather than standardising the rest against
+        themselves.
         """
         values = self.values.copy()
         n_dates, n_securities, n_factors = values.shape
@@ -205,52 +254,72 @@ class CharacteristicPanel:
                     f"weights have shape {weights.shape}, expected "
                     f"{(n_dates, n_securities)} (dates x securities)"
                 )
+        members = _checked_membership(
+            membership, (n_dates, n_securities), "(dates x securities)"
+        )
 
         clipped = 0
+        clipped_outside = 0
         for t in range(n_dates):
             for k in range(n_factors):
                 column = values[t, :, k]
                 present = ~np.isnan(column)
                 if not present.any():
                     continue
+                inside = present if members is None else present & members[t]
+                if not inside.any():
+                    values[t, present, k] = np.nan
+                    continue
                 raw = column[present]
+                # Which of `raw` may set the scale. Every statistic below is taken over
+                # `sample` alone; everything computed from them is applied to all of `raw`.
+                among = inside[present]
+                sample = raw[among]
 
                 # Clip the RAW values first, against a scale an outlier cannot inflate.
                 # Doing this after standardising would be useless: see the docstring.
-                if winsorise is not None and raw.size > 2:
-                    centre = float(np.median(raw))
-                    scale = float(np.median(np.abs(raw - centre))) * 1.4826
+                moved = np.zeros(raw.size, dtype=bool)
+                if winsorise is not None and sample.size > 2:
+                    centre = float(np.median(sample))
+                    scale = float(np.median(np.abs(sample - centre))) * 1.4826
                     if scale <= 0.0:
-                        scale = float(np.std(raw, ddof=1))
+                        scale = float(np.std(sample, ddof=1))
                     if scale > 0.0:
                         low = centre - winsorise * scale
                         high = centre + winsorise * scale
-                        clipped += int(np.count_nonzero((raw < low) | (raw > high)))
+                        moved = (raw < low) | (raw > high)
+                        clipped += int(np.count_nonzero(moved))
                         raw = np.clip(raw, low, high)
+                        sample = raw[among]
 
                 if weights is None:
-                    w = np.ones(raw.size)
+                    w = np.ones(sample.size)
                 else:
-                    w = np.nan_to_num(weights[t, present], nan=0.0)
+                    w = np.nan_to_num(weights[t, inside], nan=0.0)
                     if w.sum() <= 0.0:
-                        w = np.ones(raw.size)
+                        w = np.ones(sample.size)
 
-                mean = float(np.average(raw, weights=w))
+                mean = float(np.average(sample, weights=w))
                 # Equal-weighted dispersion on purpose: see the docstring.
-                spread = float(np.std(raw, ddof=1)) if raw.size > 1 else 0.0
+                spread = float(np.std(sample, ddof=1)) if sample.size > 1 else 0.0
                 if spread <= 0.0:
                     # A characteristic with no cross-sectional variation carries no
                     # information this period. Centring it leaves zeros, which is honest.
-                    values[t, present, k] = 0.0
-                    continue
-                standardised = (raw - mean) / spread
-                if winsorise is not None:
-                    # A guard, not the clip that does the work. The robust clip above fixed
-                    # the scale; this one only makes `winsorise` mean what it says, since the
-                    # standard deviation computed on clipped data is still a little larger
-                    # than the MAD scale the clip used, so a clipped value lands inside the
-                    # stated bound rather than on it. Nearly always a no-op.
-                    standardised = np.clip(standardised, -winsorise, winsorise)
+                    standardised = np.zeros(raw.size)
+                else:
+                    standardised = (raw - mean) / spread
+                    if winsorise is not None:
+                        # A guard, not the clip that does the work. The robust clip above
+                        # fixed the scale; this one only makes `winsorise` mean what it says,
+                        # since the standard deviation computed on clipped data is still a
+                        # little larger than the MAD scale the clip used, so a clipped value
+                        # lands inside the stated bound rather than on it -- when the mean is
+                        # near the median. A cap-weighted one need not be: LNCAP's sits far
+                        # above it, so its lower tail reaches this bound, and below the
+                        # members' scale the outsiders reach it most of all.
+                        moved |= np.abs(standardised) > winsorise
+                        standardised = np.clip(standardised, -winsorise, winsorise)
+                clipped_outside += int(np.count_nonzero(moved & ~among))
                 values[t, present, k] = standardised
 
         return CharacteristicPanel(
@@ -261,4 +330,5 @@ class CharacteristicPanel:
             frequency=self.frequency,
             standardised=True,
             winsorised=clipped,
+            clipped_outside=clipped_outside,
         )
