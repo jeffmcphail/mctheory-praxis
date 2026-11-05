@@ -92,6 +92,12 @@ class SpecificRiskNotes:
     kappa_calibrated: bool = False
     kappa_range: tuple[float, float] | None = None
     gamma: Mapping[str, float] = field(default_factory=dict)
+    # The securities with the largest shares of the sum of V squared that gamma is fitted to,
+    # largest first, at most five: who the fit learns most from.
+    v_squared_shares: tuple[tuple[str, float], ...] = ()
+    # Likewise for the square of `relative_residual_sd`, which is v_model in every blend
+    # weight: who sets how far each security's own history is trusted. Not the same list.
+    residual_spread_shares: tuple[tuple[str, float], ...] = ()
     relative_r_squared: float = float("nan")
     level_r_squared: float = float("nan")
     thin_periods: int = 0
@@ -323,6 +329,20 @@ class SpecificRiskModel:
         return f"{head}, kappa {self.kappa_constant:.4f} (normal constant)"
 
 
+def _largest_shares(
+    squares: np.ndarray, securities: Sequence[str], count: int = 5
+) -> tuple[tuple[str, float], ...]:
+    """The securities with the largest shares of a sum of squares, largest first."""
+    total = float(squares.sum())
+    if not total > 0.0:
+        return ()
+    return tuple(
+        (securities[j], float(squares[j] / total))
+        for j in np.argsort(-squares, kind="stable")[:count]
+        if squares[j] > 0.0
+    )
+
+
 def _forecast_average_level(
     levels: np.ndarray, *, model: str, periods: int
 ) -> tuple[float, float]:
@@ -441,6 +461,12 @@ def estimate_specific_risk_model(
             f"characteristic coefficient(s); widen the panel or drop characteristics"
         )
     gamma, *_ = np.linalg.lstsq(flat_z[keep], flat_v[keep], rcond=None)
+    # Who it learns from. V is bounded below by -1 and not at all above, and a least-squares
+    # fit weighs each cell by its square, so one security far enough into the tail can set
+    # gamma for everyone: on the S&P 500 run SBNY, trading on at cents after it left the
+    # index, was 40 percent of the sum.
+    v_squared = np.where(keep.reshape(n_periods, n_securities), relative, 0.0) ** 2
+    v_squared_shares = _largest_shares(v_squared.sum(axis=0), securities)
     fitted = flat_z[keep] @ gamma
     residual_v = flat_v[keep] - fitted
     total_v = flat_v[keep] - flat_v[keep].mean()
@@ -462,6 +488,15 @@ def estimate_specific_risk_model(
     finite = np.isfinite(per_security)
     relative_residual_sd = (
         float(np.std(per_security[finite], ddof=1)) if int(finite.sum()) > 1 else float("nan")
+    )
+    # A standard deviation across securities, so one average far enough out sets it for all of
+    # them: FRC, collapsing while still in the index, was 60 percent of its square.
+    residual_spread_shares = (
+        _largest_shares(
+            np.where(finite, per_security - per_security[finite].mean(), 0.0) ** 2, securities
+        )
+        if int(finite.sum()) > 1
+        else ()
     )
 
     # kappa: what remains between the absolute-return forecast and realised volatility.
@@ -551,6 +586,8 @@ def estimate_specific_risk_model(
             else None
         ),
         gamma={name: float(g) for name, g in zip(names, gamma)},
+        v_squared_shares=v_squared_shares,
+        residual_spread_shares=residual_spread_shares,
         relative_r_squared=relative_r2,
         level_r_squared=level_r2,
         thin_periods=thin,

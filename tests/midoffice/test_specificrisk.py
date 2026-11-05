@@ -383,6 +383,51 @@ def test_the_residual_dispersion_measures_what_the_characteristics_miss():
     assert weak.relative_residual_sd > strong.relative_residual_sd
 
 
+def test_the_notes_name_the_securities_the_v_fit_learns_most_from():
+    """gamma is a least-squares fit to V = |u|/S - 1, which is bounded below and not above,
+    so one security far enough into the tail can set it. On the S&P 500 run SBNY was 40
+    percent of the sum of V squared, and nothing in the fit said so."""
+    returns, securities, characteristics, _, _ = _world(seed=37)
+    returns = returns.copy()
+    returns[-6:, 7] *= 40.0
+    returns[:, 11] = np.nan             # no residual, so no part in the fit
+    model = estimate_specific_risk_model(returns, securities, characteristics, ("Z",))
+
+    absolute = np.abs(returns)
+    levels = np.nanmean(absolute, axis=1)
+    v_squared = np.nansum((absolute / levels[:, None] - 1.0) ** 2, axis=0)
+    share = v_squared / v_squared.sum()
+    largest = np.argsort(-share, kind="stable")[:5]
+    named = model.notes.v_squared_shares
+    assert [code for code, _ in named] == [securities[j] for j in largest]
+    assert named[0][0] == securities[7]
+    assert [s for _, s in named] == pytest.approx([share[j] for j in largest], rel=1e-12)
+
+
+def test_the_notes_name_the_securities_that_set_the_residual_spread():
+    """relative_residual_sd is v_model in every blend weight, and it is a standard deviation
+    across securities of each one's average relative residual, so one security sitting far
+    enough out sets it for all of them. On the S&P 500 run FRC, collapsing while still in the
+    index, was 60 percent of its square and 2 percent of V squared: the two lists differ, and
+    the one naming the spread is the one the blend answers to."""
+    returns, securities, characteristics, _, _ = _world(seed=41)
+    returns = returns.copy()
+    returns[:, 5] *= 6.0                # persistently riskier than its characteristics say
+    model = estimate_specific_risk_model(returns, securities, characteristics, ("Z",))
+
+    absolute = np.abs(returns)
+    relative = absolute / absolute.mean(axis=1)[:, None] - 1.0
+    average = (relative - characteristics @ model.gamma).mean(axis=0)
+    squared = (average - average.mean()) ** 2
+    share = squared / squared.sum()
+    largest = np.argsort(-share, kind="stable")[:5]
+    named = model.notes.residual_spread_shares
+    assert np.std(average, ddof=1) == pytest.approx(model.relative_residual_sd, rel=1e-12)
+    assert [code for code, _ in named] == [securities[j] for j in largest]
+    assert named[0][0] == securities[5]
+    assert [s for _, s in named] == pytest.approx([share[j] for j in largest], rel=1e-12)
+
+
 def test_annualisation_scales_the_level_and_therefore_the_forecast():
     world = _world(seed=29)
     monthly = _fit(world)

@@ -52,6 +52,13 @@ a number.  Outside it the number is a fallback, the characteristic forecast extr
 security nothing was estimated on, and the notes name it as one.  It never appears on the
 floor list: hitting the floor is a statement about an estimate.
 
+**Index membership is one more condition of entry, and only that.**  Given a membership, a
+security enters period t's regression only if it was a member on t as well as having a return,
+a complete row and a weight.  A non-member cell is then exactly a missing return: no part in
+that period's factor returns, no residual, nothing for the specific risk model to learn from.
+It is not a filter on the output -- a security outside the index on the exposure date still
+gets exposures and a forecast, as a holding outside it would.
+
 What this module does not do, and a real Barra model does:
 
 - **Constrained industry factors.**  Industry dummies sum to the unit column, so a design with
@@ -111,6 +118,10 @@ class CrossSectionalNotes:
     winsorised: int = 0
     market_factor: bool = True
     thin_periods: tuple[date, ...] = ()
+    # Per estimated period, its date and how many securities its regression held. A
+    # restriction to index members only removes, so these are where it shows.
+    estimated_dates: tuple[date, ...] = ()
+    cross_section_sizes: tuple[int, ...] = ()
     rank_deficient_periods: tuple[date, ...] = ()
     short_history: tuple[str, ...] = ()
     no_exposures: tuple[str, ...] = ()
@@ -405,18 +416,46 @@ def _weight_block(
     return weights[np.ix_(return_rows, return_cols)]
 
 
+def _membership_block(
+    membership: np.ndarray | None,
+    returns: ReturnPanel,
+    return_rows: list[int],
+    return_cols: list[int],
+) -> np.ndarray | None:
+    if membership is None:
+        return None
+    members = np.asarray(membership)
+    if members.dtype != bool:
+        raise TypeError(
+            f"membership must be a boolean array, got {members.dtype}: a 0/1 float is not a "
+            f"membership, and a NaN in one is truthy"
+        )
+    if members.shape != (len(returns.dates), len(returns.securities)):
+        raise ValueError(
+            f"membership has shape {members.shape}, expected "
+            f"{(len(returns.dates), len(returns.securities))} to match the return panel"
+        )
+    return members[np.ix_(return_rows, return_cols)]
+
+
 def _in_regression(
-    r_block: np.ndarray, x_block: np.ndarray, w_block: np.ndarray | None
+    r_block: np.ndarray,
+    x_block: np.ndarray,
+    w_block: np.ndarray | None,
+    m_block: np.ndarray | None = None,
 ) -> np.ndarray:
     """Dates by securities: who is in each period's regression.
 
-    A return, a complete characteristic row and, when the regression is weighted, a positive
-    weight. One definition for the estimator and for `regression_universe`, because a count
-    taken over a slightly different set is how a factor ends up with no members.
+    A return, a complete characteristic row, when the regression is weighted a positive
+    weight, and when a membership is given, membership that day. One definition for the
+    estimator and for `regression_universe`, because a count taken over a slightly different
+    set is how a factor ends up with no members.
     """
     usable = ~np.isnan(r_block) & ~np.isnan(x_block).any(axis=2)
     if w_block is not None:
         usable &= ~np.isnan(w_block) & (w_block > 0.0)
+    if m_block is not None:
+        usable &= m_block
     return usable
 
 
@@ -425,6 +464,7 @@ def regression_universe(
     characteristics: CharacteristicPanel,
     *,
     regression_weights: np.ndarray | None = None,
+    membership: np.ndarray | None = None,
     min_securities: int = MIN_SECURITIES_PER_PERIOD,
     n_factors: int | None = None,
 ) -> tuple[str, ...]:
@@ -438,6 +478,12 @@ def regression_universe(
     run counted DISCA and DISCK, whose last returns were ten months before the first estimated
     period, toward an industry's floor.
 
+    `membership`, a dates-by-securities boolean array on the return panel's shape, adds one
+    condition: membership on the day. The universe is then the securities that reach a
+    regression on at least one estimated period in which they were members -- one that traded
+    on after leaving the index does not count for having done so. Pass the estimator the same
+    array, or the two sets disagree.
+
     `n_factors` defaults to the panel's own columns; pass the final model's count when the
     panel is only part of it. Industry indicators need not be in `characteristics` at all:
     for a classified security they are never missing, so they cannot change who is in a
@@ -448,7 +494,8 @@ def regression_universe(
     r_block = returns.returns[np.ix_(return_rows, return_cols)]
     x_block = characteristics.values[np.ix_(char_rows, char_cols)]
     w_block = _weight_block(regression_weights, returns, return_rows, return_cols)
-    usable = _in_regression(r_block, x_block, w_block)
+    m_block = _membership_block(membership, returns, return_rows, return_cols)
+    usable = _in_regression(r_block, x_block, w_block, m_block)
     k = characteristics.values.shape[2] if n_factors is None else n_factors
     estimated = usable.sum(axis=1) >= max(min_securities, k + 1)
     ever = usable[estimated].any(axis=0)
@@ -460,6 +507,7 @@ def estimate_cross_sectional_model(
     characteristics: CharacteristicPanel,
     *,
     regression_weights: np.ndarray | None = None,
+    membership: np.ndarray | None = None,
     standardise: bool = True,
     standardise_weights: np.ndarray | None = None,
     winsorise: float | None = 4.0,
@@ -481,6 +529,11 @@ def estimate_cross_sectional_model(
     roughly as the inverse of size, which makes square-root-cap weights the efficient choice.
     Equal weighting lets the smallest, noisiest names set the factor returns -- there are far
     more of them, and in a cap-weighted world almost none of the money.
+
+    `membership` is a dates-by-securities boolean array on the same shape, True where the
+    security was an index member that day. Given one, a period's regression holds only that
+    day's members; a non-member cell is treated exactly as a missing return. None, the
+    default, regresses every security with data.
 
     `standardise_weights` is passed to `CharacteristicPanel.standardise` for the *mean*, and
     should be market capitalisation itself rather than its square root: the point of a
@@ -529,8 +582,10 @@ def estimate_cross_sectional_model(
     n_periods_in, n_secs, n_factors = x_block.shape
 
     w_block = _weight_block(regression_weights, returns, return_rows, return_cols)
+    m_block = _membership_block(membership, returns, return_rows, return_cols)
 
     kept_dates: list[date] = []
+    sizes: list[int] = []
     factor_rows: list[np.ndarray] = []
     residuals = np.full((n_periods_in, n_secs), np.nan)
     thin: list[date] = []
@@ -544,7 +599,7 @@ def estimate_cross_sectional_model(
     periods_constant = np.zeros(n_factors, dtype=int)
     ever_in = np.zeros(n_secs, dtype=bool)
 
-    in_regression = _in_regression(r_block, x_block, w_block)
+    in_regression = _in_regression(r_block, x_block, w_block, m_block)
     for t in range(n_periods_in):
         usable = in_regression[t]
         n_t = int(np.count_nonzero(usable))
@@ -629,6 +684,7 @@ def estimate_cross_sectional_model(
                 sampling_periods += 1
 
         kept_dates.append(shared_dates[t])
+        sizes.append(n_t)
         factor_rows.append(f_t)
 
     if not factor_rows:
@@ -793,6 +849,8 @@ def estimate_cross_sectional_model(
         winsorised=panel.winsorised,
         market_factor=fit_market,
         thin_periods=tuple(thin),
+        estimated_dates=tuple(kept_dates),
+        cross_section_sizes=tuple(sizes),
         rank_deficient_periods=tuple(rank_deficient),
         short_history=tuple(short_history),
         no_exposures=tuple(no_exposures),

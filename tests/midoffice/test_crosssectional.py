@@ -1035,3 +1035,110 @@ def test_a_blend_that_carries_every_floored_forecast_clear_says_so():
         )
         for q in model.qualifications()
     )
+
+
+# ------------------------------------------- point-in-time membership: who the index held
+
+
+def _departures(n_periods: int = 60):
+    """The persistent world inside an index: ten securities leave it halfway through, still
+    trading, and a scattering of single days on which a security was not a member."""
+    returns, chars, caps = _persistent_world(n_periods=n_periods)
+    members = np.random.default_rng(83).random(returns.returns.shape) > 0.05
+    members[n_periods // 2 :, :10] = False
+    return returns, chars, caps, members
+
+
+def test_membership_restricts_each_regression_exactly_as_blanking_the_non_members_would():
+    """A security enters period t's regression only if it passes the existing test and is a
+    member on t. That is the whole change: the model must come out exactly as it does from a
+    panel whose non-member returns were never there -- factor returns, residuals, and the
+    specific risk model fitted to them."""
+    returns, chars, caps, members = _departures()
+    blanked = ReturnPanel(
+        returns.dates,
+        returns.securities,
+        np.where(members, returns.returns, np.nan),
+        returns.frequency,
+    )
+    kw = dict(min_securities=20, specific_risk="blend", capitalisations=caps)
+    masked = _fit(returns, chars, membership=members, **kw)
+    reference = _fit(blanked, chars, **kw)
+    assert np.array_equal(masked.covariance.matrix, reference.covariance.matrix)
+    assert masked.notes.mean_r_squared == reference.notes.mean_r_squared
+    assert masked.notes.sampling_variance == reference.notes.sampling_variance
+    assert masked.notes.regression_universe == reference.notes.regression_universe
+    assert masked.notes.cross_section_sizes == reference.notes.cross_section_sizes
+    fitted = masked.notes.specific_risk_model
+    expected = reference.notes.specific_risk_model
+    assert np.array_equal(fitted.gamma, expected.gamma)
+    assert fitted.relative_residual_sd == expected.relative_residual_sd
+    assert masked.exposures == reference.exposures
+    # And it is a restriction: the departed names lost half their periods.
+    unmasked = _fit(returns, chars, **kw)
+    assert not np.array_equal(masked.covariance.matrix, unmasked.covariance.matrix)
+
+
+def test_a_membership_that_holds_everyone_changes_nothing():
+    returns, chars, caps, _ = _departures()
+    everyone = np.ones(returns.returns.shape, dtype=bool)
+    kw = dict(min_securities=20, specific_risk="blend", capitalisations=caps)
+    held = _fit(returns, chars, membership=everyone, **kw)
+    default = _fit(returns, chars, **kw)
+    assert np.array_equal(held.covariance.matrix, default.covariance.matrix)
+    assert held.exposures == default.exposures
+    assert held.notes.cross_section_sizes == default.notes.cross_section_sizes
+    assert regression_universe(
+        returns, chars, membership=everyone, min_securities=20
+    ) == regression_universe(returns, chars, min_securities=20)
+
+
+def test_the_regression_universe_counts_only_periods_in_which_a_security_was_a_member():
+    """An industry scheme counts its members over this. A security that reached a regression
+    only after leaving the index must not count, and nor may one whose member periods were
+    all too thin to estimate."""
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60, seed=79)
+    raw = returns.returns.copy()
+    raw[:10, 3:] = np.nan               # the first ten periods are thin
+    panel = ReturnPanel(returns.dates, returns.securities, raw, returns.frequency)
+    members = np.ones((60, 40), dtype=bool)
+    members[:, 0] = False               # a return in every period and never a member
+    members[10:, 1] = False             # a member only while the periods were thin
+    members[:59, 2] = False             # a member in the last period alone
+    universe = regression_universe(panel, chars, membership=members, min_securities=20)
+    model = _fit(panel, chars, membership=members, min_securities=20)
+    assert len(model.notes.thin_periods) == 10
+    assert universe == model.notes.regression_universe
+    assert set(returns.securities) - set(universe) == set(returns.securities[:2])
+    assert regression_universe(panel, chars, min_securities=20) == returns.securities
+
+
+def test_the_notes_record_each_estimated_period_and_the_size_of_its_regression():
+    """Restricting to members only removes, so the cross-sections shrink and sampling error
+    rises. The sizes are what show it."""
+    returns, chars, _, members = _departures()
+    raw = returns.returns.copy()
+    raw[3, 15:] = np.nan                # period 3 is thin
+    panel = ReturnPanel(returns.dates, returns.securities, raw, returns.frequency)
+    model = _fit(panel, chars, membership=members, min_securities=20)
+    in_regression = members & np.isfinite(raw)
+    counts = in_regression.sum(axis=1)
+    estimated = counts >= 20
+    assert returns.dates[3] in model.notes.thin_periods
+    assert model.notes.estimated_dates == tuple(
+        d for d, kept in zip(returns.dates, estimated) if kept
+    )
+    assert model.notes.cross_section_sizes == tuple(int(n) for n in counts[estimated])
+    assert len(model.notes.cross_section_sizes) == model.notes.n_periods
+
+
+def test_a_membership_of_the_wrong_shape_or_kind_is_refused():
+    """A 0/1 float array is not a membership: NaN is truthy, and a weight array passed here
+    by mistake would hold every security with a weight."""
+    returns, chars, _, _ = _world(n_secs=40, n_periods=40)
+    with pytest.raises(ValueError, match="to match the return panel"):
+        _fit(returns, chars, membership=np.ones((40, 9), dtype=bool))
+    with pytest.raises(ValueError, match="to match the return panel"):
+        regression_universe(returns, chars, membership=np.ones((40, 9), dtype=bool))
+    with pytest.raises(TypeError, match="boolean"):
+        _fit(returns, chars, membership=np.ones((40, 40)))

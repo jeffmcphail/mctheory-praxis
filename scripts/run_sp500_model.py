@@ -44,6 +44,7 @@ from praxis.midoffice.model.descriptors import (  # noqa: E402
     risk_index_members,
 )
 from praxis.midoffice.model.panel import Frequency, ReturnPanel  # noqa: E402
+from praxis.midoffice.refdata import sp500  # noqa: E402
 from praxis.midoffice.refdata.industries import (  # noqa: E402
     build_scheme,
     combine,
@@ -129,6 +130,45 @@ def screen(standardised: CharacteristicPanel, returns: np.ndarray) -> list[dict]
     return rows
 
 
+def index_membership(
+    snapshot: sp500.Snapshot, dates: tuple[dt.date, ...], securities: tuple[str, ...]
+) -> tuple[np.ndarray, list[int]]:
+    """Dates by securities, True where the security was an index member that day; and the
+    index's own size each day.
+
+    Every date is asked, and CoverageError is not caught here. A regression restricted to
+    members on most days and unrestricted on the few the snapshot cannot answer is a different
+    model, and nothing downstream would show the difference.
+    """
+    mask = np.zeros((len(dates), len(securities)), dtype=bool)
+    sizes: list[int] = []
+    for i, day in enumerate(dates):
+        members = set(sp500.membership(snapshot, day))
+        mask[i] = [code in members for code in securities]
+        sizes.append(len(members))
+    return mask, sizes
+
+
+def unreproduced_changes(
+    snapshot: sp500.Snapshot, start: dt.date, end: dt.date
+) -> list[tuple[dt.date, str, str]]:
+    """The changes inside [start, end] that membership() does not reproduce on their own date.
+
+    There the source table disagrees with itself -- an addition the list carried back never
+    had, or a removal of a name it still holds -- and membership() answers from the list. They
+    are reported with what they do to the cross-sections and not repaired: a quiet repair would
+    be a second membership source that nobody reviewed.
+    """
+    out: list[tuple[dt.date, str, str]] = []
+    for change in sorted(snapshot.changes, key=lambda c: c.date):
+        if not start <= change.date <= end:
+            continue
+        members = set(sp500.membership(snapshot, change.date))
+        out.extend((change.date, t, "added") for t in change.added if t not in members)
+        out.extend((change.date, t, "removed") for t in change.removed if t in members)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("panel", help="the .npz written by fetch_sp500_panel.py")
@@ -148,6 +188,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--equal-weight", action="store_true",
                         help="weight the cross-sectional regression equally; the default "
                              "is Barra's square root of capitalisation")
+    parser.add_argument("--membership", action="store_true",
+                        help="hold each period's regression to that day's index members, from "
+                             "the newest snapshot in --snapshots; without it every panel "
+                             "security with data is regressed")
+    parser.add_argument("--snapshots", default="data/external/sp500")
     args = parser.parse_args(argv)
 
     path = Path(args.panel)
@@ -210,6 +255,51 @@ def main(argv: list[str] | None = None) -> int:
     weights = None if args.equal_weight else np.sqrt(np.where(caps > 0.0, caps, np.nan))
     return_panel = ReturnPanel(panel.dates, panel.securities, returns, Frequency.DAILY)
 
+    # The panel is the index on its first day held fixed. Nothing in it removes a name after
+    # it leaves -- SBNY traded on at cents against a pre-failure share count -- so without a
+    # membership the regression keeps whatever still has a price.
+    membership = None
+    index_sizes: list[int] = []
+    if args.membership:
+        print("\nMembership")
+        try:
+            snapshot = sp500.load_latest(args.snapshots)
+        except FileNotFoundError as error:
+            raise SystemExit(f"  --membership needs a snapshot: {error}") from None
+        print(f"  snapshot {snapshot.content_hash[:12]}, fetched "
+              f"{snapshot.fetched_at:%Y-%m-%d %H:%M} UTC, covering "
+              f"{snapshot.coverage_start} .. {snapshot.coverage_end}")
+        try:
+            membership, index_sizes = index_membership(
+                snapshot, panel.dates, panel.securities
+            )
+        except sp500.CoverageError as error:
+            raise SystemExit(f"  the run stops: {error}") from None
+        print(f"  each period's regression holds only that day's members: "
+              f"{int(membership[0].sum())} of the panel's {panel.n_securities} on "
+              f"{panel.dates[0]}, {int(membership[-1].sum())} on {panel.dates[-1]}")
+        unreproduced = unreproduced_changes(snapshot, panel.dates[0], panel.dates[-1])
+        if unreproduced:
+            print(f"  {len(unreproduced)} change(s) inside the panel's window that "
+                  f"membership() does not reproduce, used as it reads them:")
+        for when, ticker, kind in unreproduced:
+            days = [i for i, d in enumerate(panel.dates) if d >= when]
+            claim = (
+                "recorded as added, but membership() does not have it from that date"
+                if kind == "added"
+                else "recorded as removed, but membership() still has it after that date"
+            )
+            if ticker not in panel.securities:
+                effect = (f"not in the panel, so no cross-section changes on the "
+                          f"{len(days)} panel day(s) from then")
+            else:
+                priced = int(np.isfinite(returns[days, panel.securities.index(ticker)]).sum())
+                effect = (f"in the panel with a return on {priced} of the {len(days)} panel "
+                          f"day(s) from then, "
+                          f"{'left out of' if kind == 'added' else 'kept in'} each of those "
+                          f"days' cross-sections")
+            print(f"  - {when} {ticker} {claim}: {effect}")
+
     scheme = None
     if args.industries:
         print("\nIndustries")
@@ -235,9 +325,12 @@ def main(argv: list[str] | None = None) -> int:
         # over the panel. A member that never enters a regression contributes nothing to its
         # factor, and counting them let a four-member Unclassified -- one member present in
         # most periods -- past a floor of five.
-        universe = regression_universe(return_panel, indices, regression_weights=weights)
+        universe = regression_universe(
+            return_panel, indices, regression_weights=weights, membership=membership
+        )
+        held = "" if membership is None else " while an index member"
         print(f"  {len(universe)} of {panel.n_securities} securities are in at least one "
-              f"estimated period's regression; every count below is over them")
+              f"estimated period's regression{held}; every count below is over them")
         scheme = build_scheme(codes, min_members=args.min_industry, universe=universe)
         print(f"  {scheme.describe()}")
         for name, count in sorted(scheme.counts().items(), key=lambda kv: -kv[1])[:8]:
@@ -262,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         specific_risk="blend",
         capitalisations=caps,
         regression_weights=weights,
+        membership=membership,
         # Industries sum to one per security, which IS the unit column. Fitting a market
         # factor alongside them makes the design exactly singular, not nearly so.
         fit_market=scheme is None,
@@ -286,6 +380,24 @@ def main(argv: list[str] | None = None) -> int:
                   f"regression's by {len(differs)} security(ies): "
                   f"{', '.join(sorted(differs)[:5])}")
 
+    # A restriction to members only removes, so the cross-sections shrink and sampling error
+    # rises with them; the sizes are where that shows.
+    rows = [("in the regression", np.array(notes.cross_section_sizes))]
+    if membership is not None:
+        at = {d: i for i, d in enumerate(panel.dates)}
+        held = [at[d] for d in notes.estimated_dates]
+        rows = [
+            ("index members", np.array(index_sizes)[held]),
+            ("of them in the panel", membership[held].sum(axis=1)),
+            *rows,
+        ]
+    print(f"\n  Securities per estimated period, over {notes.n_periods}")
+    print(f"  {'':<22} {'min':>6} {'median':>7} {'max':>6}   "
+          f"{notes.estimated_dates[0]!s:>10}   {notes.estimated_dates[-1]!s:>10}")
+    for label, counts in rows:
+        print(f"  {label:<22} {counts.min():>6,} {np.median(counts):>7,.0f} "
+              f"{counts.max():>6,}   {counts[0]:>10,}   {counts[-1]:>10,}")
+
     # noise_share cannot see a factor with one member: the regression fits that member
     # exactly, its residual is zero, and the sampling variance looks small. Other Industries
     # read 5.7 percent with one member present in every period. The exactly-1 column can.
@@ -306,6 +418,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"\n  specific risk   median {np.median(specific):.2%}   "
           f"p10 {np.percentile(specific, 10):.2%}   p90 {np.percentile(specific, 90):.2%}")
+    # Who the V fit learns from, and who sets the residual spread -- v_model in every blend
+    # weight, so how far each security's own history is trusted. Not the same names: FRC was
+    # most of the spread and 2 percent of V^2.
+    risk_model = notes.specific_risk_model
+    if risk_model is not None:
+        def named(shares: tuple[tuple[str, float], ...]) -> str:
+            return ", ".join(f"{code} {share:.1%}" for code, share in shares)
+
+        print(f"  EQ 3-14's V fit   largest shares of V^2: "
+              f"{named(risk_model.notes.v_squared_shares)}")
+        print(f"  {'':<17} relative residual sd {risk_model.relative_residual_sd:.3f}, "
+              f"largest shares of its square: "
+              f"{named(risk_model.notes.residual_spread_shares)}")
 
     qualifications = model.qualifications()
     if qualifications:
