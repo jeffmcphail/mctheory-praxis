@@ -2,9 +2,9 @@
 
 ## McTheory Development -- Praxis (Prediction Markets & Systematic Trading)
 
-**Version:** 1.4
+**Version:** 1.5
 **Author:** Jeff McPhail / Claude Chat
-**Date:** April 30, 2026
+**Date:** November 5, 2026
 **Adapted from:** AI Agent Factory protocol (validated, first retro: 30 min vs 2+ hours)
 
 **Changelog:**
@@ -13,6 +13,7 @@
 - v1.2 (2026-04-29): Four new/extended rules from cycles 8-12: extended Rule 20 (ASCII-only) with the Unicode-runtime-recognition pattern using module-level constants; new Rule 21 (CRLF preservation for .bat/.ps1); new Rule 32 (MCP server changes require Claude Desktop full-quit + relaunch including kill of any orphaned Python processes); new Rule 33 (prefer .py file over inline `python -c` for non-trivial diagnostics). Refreshed the Running Services table to reflect Cycle 10's registered tasks plus PraxisLiveCollector and PraxisSmartMoney reactivation. Refreshed the Key Directories tree to include `servers/`, `tests/`, `src/`, `contracts/`, `dashboards/`, `gui/`, `k8s/`, `spikes/`, `examples/`, `battle_results/`, `market_data/`, and `claude/scratch/` -- long-present directories that were never added. Renamed "Testing Rules" to "Testing and Diagnostics Rules". Renumbered subsequent rules accordingly. Total rule count: 40 (was 37).
 - v1.3 (2026-04-30): One new rule from Cycle 15 diagnostic investigation: new Rule 34 (explicit transaction management on SQLite reads against actively-written DBs). Python's sqlite3 module has documented quirks around implicit BEGIN that can cause long-lived connections to see snapshot views from past states. The defensive practice is fresh connections per logical read pass OR `isolation_level=None` OR explicit `conn.commit()` between SELECTs to release the implicit read transaction. Rule lands in the Testing and Diagnostics Rules subsection. Renumbered Retro Rules from 34-40 to 35-41. Total rule count: 41 (was 40).
 - v1.4 (2026-04-30): One new rule from Cycle 17: new Rule 35 (temporal data storage standard). Establishes the canonical schema for any table holding temporally indexed data: INTEGER `timestamp` column in ms-since-epoch UTC, part of the primary key, optionally with a derived `datetime`/`date` TEXT cache in ISO 8601 with `+00:00` offset. Codifies the dual-write migration pattern for high-frequency tables. Lands in a new "Data Storage Rules" subsection between "Testing and Diagnostics Rules" and "Retro Rules". Renumbered Retro Rules from 35-41 to 36-42. Total rule count: 42 (was 41).
+- v1.5 (2026-11-05): One new standing rule from Jeff, set during the mid-office S&P 500 model work: new Rule 43 (every piece of work ends with a retro written in full, whose last item is the exact `git add` for the change). Terminal output gets truncated when it is passed on, so the retro is the record. The Retro Log Format template gains the closing `git add` section, and `.claude/commands/retro.md` lists the full contents. Total rule count: 43 (was 42).
 
 ---
 
@@ -222,6 +223,9 @@ Document what went wrong during implementation, even if fixed.
 
 ## Artifacts
 - `models/lstm/BTC_multi_horizon.joblib` -- updated with 3-model ensemble
+
+## git add (always last -- Rule 43)
+git add engines/lstm_predictor.py engines/crypto_data_collector.py claude/retros/RETRO_<slug>.md
 ```
 
 ---
@@ -405,6 +409,11 @@ These rules operationalize the "ETA and Progress Reporting" section of `WORKFLOW
 40. **Include open items** -- anything that needs Chat's attention for strategy.
 41. **Retros are permanent.** Never delete a retro, even for failed/partial attempts. Failed experiments are data.
 42. **Briefs are permanent once a matching retro exists.** Do not delete Briefs to "clean up" `claude/handoffs/`. The only removable case: a Brief never executed and superseded -- rename to `ARCHIVED_<slug>.md`, do not delete.
+43. **Every piece of work ends with a retro file, written in full -- briefed or not.** (Jeff, 2026-11-05.) The terminal output Jeff passes on gets truncated, so the retro, not the terminal, is the record.
+    - **Where:** `claude/retros/RETRO_<slug>.md`, named and indexed like the existing ones, with its brief at `claude/handoffs/BRIEF_<slug>.md`. Work that has no slot yet gets one beside the existing handoffs: the mid-office work is the `midofficeNN` series (`BRIEF_midoffice01_*` / `RETRO_midoffice01_*` onward), because its pieces arrive as messages rather than Chat-written briefs and must not take numbers from Chat's cycle sequence. Its brief is the request transcribed verbatim, never a reconstruction.
+    - **Contents, in full:** what was asked (the brief, verbatim when available); what changed and why; every table and number that would otherwise be printed; decisions taken; decisions left for Jeff; tests (counts, and what each new one guards); problems found but not fixed; and the key content of every scratch output, copied in -- the session scratch directory is under Temp and can vanish.
+    - **It ends with the exact `git add` command for the change:** every file, tracked and new, the retro included, and nothing else. Commit messages come from Chat; the file list comes from Code. A separate change made in the same session gets its own `git add`, stated before that last block, never merged into it.
+    - **In the terminal, finish with a short summary and the retro's path.**
 
 ---
 
@@ -518,3 +527,4 @@ The MCP server (`servers/praxis_mcp/`) provides `get_collector_health()` for liv
 - Diagnostics in `claude/scratch/` as `.py` files; avoid quote-heavy inline `python -c` (Rule 33)
 - Reads against actively-written SQLite DBs need explicit transaction management: fresh connections per pass, `isolation_level=None`, or `conn.commit()` between SELECTs (Rule 34)
 - Temporal data: store as INTEGER ms-since-epoch UTC `timestamp` column, primary key. Optional `datetime`/`date` TEXT cache renders ISO 8601 with `+00:00` (Rule 35).
+- Every piece of work ends with a full retro whose last item is the exact `git add` for the change; the terminal gets a short summary and the retro's path (Rule 43).
