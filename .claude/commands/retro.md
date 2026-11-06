@@ -20,7 +20,8 @@ The retro must include:
     included, and nothing else. Commit messages come from Chat; the file list comes from Code.
 
 Name and index it like the existing retros, with its brief at claude/handoffs/BRIEF_<slug>.md.
-Mid-office work is the `midofficeNN` series. In the terminal, finish with a short summary and
-the retro's path.
+Mid-office work is the `midofficeNN` series; its briefs are written in Chat and pasted in, so the
+BRIEF_ file is the pasted text verbatim and its Source line says it was written in Chat and
+pasted in. In the terminal, finish with a short summary and the retro's path.
 
 Follow the format defined in claude/CLAUDE_CODE_RULES.md
