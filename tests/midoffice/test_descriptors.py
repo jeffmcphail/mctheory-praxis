@@ -22,6 +22,7 @@ import pytest
 
 from praxis.midoffice.model.descriptors import (
     PRICE_DESCRIPTORS,
+    WINDOW_DESCRIPTORS,
     SecurityPanel,
     blend_to_index,
     build_risk_indices,
@@ -685,3 +686,127 @@ def test_a_membership_of_the_wrong_shape_or_kind_is_refused_wherever_it_is_taken
         fit_index_weights(standardised, "Momentum", panel.returns(), membership=wrong)
     with pytest.raises(TypeError, match="boolean"):
         blend_to_index(standardised, "Size", membership=members.astype(float))
+
+
+# ------------------------------------------------------------- windows with no data in them
+
+
+def _blanked(panel, rows, column):
+    """`panel` with one security's prices, volumes, highs and lows missing on `rows`. The share
+    count stays, as the real panel carries it forward from its last sample."""
+    out = {}
+    for name in ("prices", "unadjusted_prices", "volumes", "highs", "lows"):
+        values = getattr(panel, name).copy()
+        values[rows, column] = np.nan
+        out[name] = values
+    return dataclasses.replace(panel, **out)
+
+
+def _trailing(valid: np.ndarray, window: int) -> np.ndarray:
+    """How many of each trailing window's periods are valid, counted here and not by the code
+    under test; -1 before the first full window."""
+    out = np.full(valid.shape, -1)
+    for t in range(window - 1, valid.shape[0]):
+        out[t] = valid[t - window + 1 : t + 1].sum(axis=0)
+    return out
+
+
+def test_a_security_whose_prices_start_after_the_window_gets_missing_for_every_one():
+    """A sum over an empty window is zero, and RSTR, CMRA and the turnovers used to record it:
+    every day before a security's first price read as no momentum and no trading. S00's
+    prices start at period 100, so every window ending before then is empty; S01's stop after
+    period 50, so at the end of the panel every window is, SERDP's included. The share count
+    is there throughout, which is what let the turnovers read zero rather than missing."""
+    panel, market, _, _ = _panel(n_periods=120)
+    late = _blanked(panel, slice(0, 100), 0)
+    gone = _blanked(late, slice(51, 120), 1)
+    out, _ = compute_descriptors(gone, market_returns=market)
+    assert set(WINDOW_DESCRIPTORS) <= set(out.names)
+    for name in WINDOW_DESCRIPTORS:
+        values = out.values[:, :, out.names.index(name)]
+        if name != "SERDP":
+            # Every window is complete from period 59, the longest being 60 periods.
+            assert np.isnan(values[59:100, 0]).all(), name
+            assert np.isfinite(values[99, 2:]).all(), name
+        assert np.isnan(values[-1, 1]), name
+        assert np.isfinite(values[-1, 2:]).all(), name
+    # A window holding a single observation still gives its value: only the empty ones went.
+    rstr = out.values[101, 0, out.names.index("RSTR")]
+    assert rstr == np.log1p(gone.returns()[101, 0])
+
+
+def test_no_window_descriptor_is_computed_from_an_empty_window_anywhere():
+    """Against each descriptor's own inputs, counted independently: a return for DASTD, RSTR
+    and CMRA, a return with the market's for the market model, a volume for the turnovers, a
+    dollar volume and the market model's window for VLVR. Long gaps, so windows empty and
+    refill, and scattered ones besides."""
+    panel, market, _, _ = _panel(n_periods=120, n_secs=30, seed=11)
+    rng = np.random.default_rng(5)
+    gaps = rng.random(panel.prices.shape) < 0.2
+    gaps[20:100, :6] = True
+    gapped = panel
+    for j in range(panel.n_securities):
+        gapped = _blanked(gapped, np.flatnonzero(gaps[:, j]), j)
+    out, _ = compute_descriptors(gapped, market_returns=market)
+    returns = np.isfinite(gapped.returns())
+    paired = returns & np.isfinite(market)[:, None]
+    traded = np.isfinite(gapped.volumes)
+    dollars = np.isfinite(gapped.volumes * gapped.unadjusted_prices)
+    inputs = {
+        "DASTD": [(returns, 12)],
+        "RSTR": [(returns, 12)],
+        "CMRA": [(returns, 12)],
+        "BTSG": [(paired, 60)],
+        "HALPHA": [(paired, 60)],
+        "SERDP": [(paired, 60)],
+        "STOM": [(traded, 1)],
+        "STOQ": [(traded, 3)],
+        "STOA": [(traded, 12)],
+        "STO5": [(traded, 60)],
+        "VLVR": [(dollars, 12), (paired, 60)],
+    }
+    assert set(inputs) == set(WINDOW_DESCRIPTORS)
+    for name, sources in inputs.items():
+        values = out.values[:, :, out.names.index(name)]
+        empty = np.zeros(values.shape, dtype=bool)
+        for valid, window in sources:
+            empty |= _trailing(valid, window) == 0
+        assert empty.any(), name
+        assert np.isnan(values[empty]).all(), name
+        assert np.isfinite(values[~empty]).any(), name
+
+
+def test_min_coverage_removes_thinly_covered_windows_and_alters_no_value():
+    """S00 trades in the last seven periods alone: six returns of a twelve-period window, so
+    RSTR, CMRA and DASTD sit at a coverage of exactly one half; seven volumes of twelve for
+    STOA; full windows for STOQ and STOM; six of sixty for the market model. The default keeps
+    them all. A rule only ever removes, and what it keeps is the default's value bit for bit."""
+    panel, market, _, _ = _panel(n_periods=120)
+    thin = _blanked(panel, slice(0, 113), 0)
+    default, _ = compute_descriptors(thin, market_returns=market)
+
+    def kept(out) -> set[str]:
+        return {
+            name for name in WINDOW_DESCRIPTORS
+            if np.isfinite(out.values[-1, 0, out.names.index(name)])
+        }
+
+    assert kept(default) == set(WINDOW_DESCRIPTORS)
+    expected = {
+        0.5: {"RSTR", "CMRA", "DASTD", "STOA", "STOQ", "STOM"},
+        0.55: {"STOA", "STOQ", "STOM"},
+        1.0: {"STOQ", "STOM"},
+    }
+    for rule, survivors in expected.items():
+        out, _ = compute_descriptors(thin, market_returns=market, min_coverage=rule)
+        assert kept(out) == survivors, rule
+        present = np.isfinite(out.values)
+        assert (np.isfinite(default.values) | ~present).all(), rule
+        assert np.array_equal(out.values[present], default.values[present]), rule
+
+
+def test_min_coverage_is_a_fraction_of_the_window():
+    panel, market, _, _ = _panel(n_periods=24, n_secs=5)
+    for bad in (-0.1, 1.5):
+        with pytest.raises(ValueError, match="fraction of a window"):
+            compute_descriptors(panel, market_returns=market, min_coverage=bad)

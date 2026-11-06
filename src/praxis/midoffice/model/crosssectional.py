@@ -52,11 +52,22 @@ a number.  Outside it the number is a fallback, the characteristic forecast extr
 security nothing was estimated on, and the notes name it as one.  It never appears on the
 floor list: hitting the floor is a statement about an estimate.
 
+**Each period's regression is fixed the day before its return.**  A characteristic dated t is
+computed from day t's close -- LNCAP from that day's price -- and day t's return ends at the
+same close, so regressing one on the other puts the return inside its own exposure: a stock
+that rose today is bigger today, and Size looks as though it paid, every day.  With `lag=1`,
+the default and Barra's convention, period t's regression takes its exposures, their
+standardisation, its weights and its membership from the shared date before t, and only its
+returns from t.  The model's exposures are still the last date's: they are as of today and
+forecast forward.  `lag=0` regresses same-day, which is right only for characteristics known
+before the return they are paired with -- a synthetic world built that way, say.
+
 **Index membership is one more condition of entry, and only that.**  Given a membership, a
-security enters period t's regression only if it was a member on t as well as having a return,
-a complete row and a weight.  A non-member cell is then exactly a missing return: no part in
-that period's factor returns, no residual, nothing for the specific risk model to learn from.
-Where this module standardises, the same array decides whose values set the scale -- see
+security enters period t's regression only if it was a member on the date its exposures are
+read -- the day before t, under the lag -- as well as having a return on t, a complete row and
+a weight.  A non-member cell is then exactly a missing return: no part in that period's factor
+returns, no residual, nothing for the specific risk model to learn from.  Where this module
+standardises, the same array decides whose values set the scale -- see
 `CharacteristicPanel.standardise`.  It is not a filter on the output -- a security outside the
 index on the exposure date still gets exposures and a forecast, as a holding outside it would.
 
@@ -155,6 +166,11 @@ class CrossSectionalNotes:
     collinear_constant: tuple[int, ...] = ()
     # The securities in at least one estimated period's regression.
     regression_universe: tuple[str, ...] = ()
+    # How many shared dates before each return its exposures, weights and membership were
+    # read; see `regression_design`.
+    lag: int = 1
+    # The estimated factor returns, period by period: what the covariance was estimated from.
+    factor_returns: FactorReturns | None = field(default=None, repr=False, compare=False)
 
     @property
     def effective_observations(self) -> float:
@@ -454,6 +470,89 @@ def _in_regression(
     return usable
 
 
+def _lagged(block: np.ndarray | None, lag: int) -> np.ndarray | None:
+    """`block` moved `lag` rows later: row t holds what row t - lag did, and the first `lag`
+    rows hold nothing -- nan, or False for a membership."""
+    if block is None or lag == 0:
+        return block
+    out = np.zeros_like(block) if block.dtype == bool else np.full_like(block, np.nan)
+    out[lag:] = block[:-lag]
+    return out
+
+
+@dataclass(frozen=True)
+class RegressionDesign:
+    """What each period's regression is handed, before any market column is added.
+
+    One row per date the return panel and the characteristic panel share, in return-panel
+    order. Row t holds that date's returns and, read `lag` shared dates earlier, everything
+    else that defines its regression: the exposures, the weights and the membership. The first
+    `lag` rows have no earlier date to read, so they hold no exposures and are in no regression.
+    `in_regression` is the estimator's own test of entry, applied to these.
+    """
+
+    dates: tuple[date, ...]
+    exposure_dates: tuple[date | None, ...]
+    securities: tuple[str, ...]
+    names: tuple[str, ...]
+    lag: int
+    returns: np.ndarray
+    exposures: np.ndarray
+    weights: np.ndarray | None
+    members: np.ndarray | None
+    in_regression: np.ndarray
+
+
+def regression_design(
+    returns: ReturnPanel,
+    characteristics: CharacteristicPanel,
+    *,
+    regression_weights: np.ndarray | None = None,
+    membership: np.ndarray | None = None,
+    lag: int = 1,
+) -> RegressionDesign:
+    """Each period's return, and the exposures, weights and membership its regression reads.
+
+    One definition for the estimator and `regression_universe`, and the thing a test of the
+    timing reads: under a lag of one, nothing in row t but its returns may depend on a price
+    dated t. Pricing day t differently must move row t's returns and leave its exposures,
+    weights and `in_regression` bit for bit where they were.
+
+    The lag counts shared dates, so a date the characteristic panel lacks is stepped over
+    rather than read: staler, never later.
+    """
+    if isinstance(lag, bool) or not isinstance(lag, (int, np.integer)) or lag < 0:
+        raise ValueError(f"lag must be a whole number of periods, zero or more; got {lag!r}")
+    lag = int(lag)
+    return_rows, char_rows, return_cols, char_cols = _align(returns, characteristics)
+    if lag >= len(return_rows):
+        raise ValueError(
+            f"a lag of {lag} leaves none of the {len(return_rows)} shared date(s) with an "
+            f"earlier one to read its exposures from"
+        )
+    dates = tuple(returns.dates[i] for i in return_rows)
+    r_block = returns.returns[np.ix_(return_rows, return_cols)]
+    x_block = _lagged(characteristics.values[np.ix_(char_rows, char_cols)], lag)
+    w_block = _lagged(
+        _weight_block(regression_weights, returns, return_rows, return_cols), lag
+    )
+    m_block = _lagged(
+        _membership_block(membership, returns, return_rows, return_cols), lag
+    )
+    return RegressionDesign(
+        dates=dates,
+        exposure_dates=tuple(None if t < lag else dates[t - lag] for t in range(len(dates))),
+        securities=tuple(returns.securities[j] for j in return_cols),
+        names=characteristics.names,
+        lag=lag,
+        returns=r_block,
+        exposures=x_block,
+        weights=w_block,
+        members=m_block,
+        in_regression=_in_regression(r_block, x_block, w_block, m_block),
+    )
+
+
 def regression_universe(
     returns: ReturnPanel,
     characteristics: CharacteristicPanel,
@@ -462,6 +561,7 @@ def regression_universe(
     membership: np.ndarray | None = None,
     min_securities: int = MIN_SECURITIES_PER_PERIOD,
     n_factors: int | None = None,
+    lag: int = 1,
 ) -> tuple[str, ...]:
     """The securities in at least one estimated period's regression, known before estimating.
 
@@ -474,10 +574,10 @@ def regression_universe(
     period, toward an industry's floor.
 
     `membership`, a dates-by-securities boolean array on the return panel's shape, adds one
-    condition: membership on the day. The universe is then the securities that reach a
-    regression on at least one estimated period in which they were members -- one that traded
-    on after leaving the index does not count for having done so. Pass the estimator the same
-    array, or the two sets disagree.
+    condition: membership on the date the exposures are read. The universe is then the
+    securities that reach a regression on at least one estimated period in which they were
+    members -- one that traded on after leaving the index does not count for having done so.
+    Pass the estimator the same array and the same `lag`, or the two sets disagree.
 
     `n_factors` defaults to the panel's own columns; pass the final model's count when the
     panel is only part of it. Industry indicators need not be in `characteristics` at all:
@@ -485,16 +585,18 @@ def regression_universe(
     regression. The estimator records the same set as
     `CrossSectionalNotes.regression_universe`, which is how a caller checks the two agreed.
     """
-    return_rows, char_rows, return_cols, char_cols = _align(returns, characteristics)
-    r_block = returns.returns[np.ix_(return_rows, return_cols)]
-    x_block = characteristics.values[np.ix_(char_rows, char_cols)]
-    w_block = _weight_block(regression_weights, returns, return_rows, return_cols)
-    m_block = _membership_block(membership, returns, return_rows, return_cols)
-    usable = _in_regression(r_block, x_block, w_block, m_block)
+    design = regression_design(
+        returns,
+        characteristics,
+        regression_weights=regression_weights,
+        membership=membership,
+        lag=lag,
+    )
+    usable = design.in_regression
     k = characteristics.values.shape[2] if n_factors is None else n_factors
     estimated = usable.sum(axis=1) >= max(min_securities, k + 1)
     ever = usable[estimated].any(axis=0)
-    return tuple(returns.securities[j] for j, inside in zip(return_cols, ever) if inside)
+    return tuple(code for code, inside in zip(design.securities, ever) if inside)
 
 
 def estimate_cross_sectional_model(
@@ -503,6 +605,7 @@ def estimate_cross_sectional_model(
     *,
     regression_weights: np.ndarray | None = None,
     membership: np.ndarray | None = None,
+    lag: int = 1,
     standardise: bool = True,
     standardise_weights: np.ndarray | None = None,
     winsorise: float | None = 4.0,
@@ -526,11 +629,19 @@ def estimate_cross_sectional_model(
     more of them, and in a cap-weighted world almost none of the money.
 
     `membership` is a dates-by-securities boolean array on the same shape, True where the
-    security was an index member that day. Given one, a period's regression holds only that
-    day's members; a non-member cell is treated exactly as a missing return. When this call
-    standardises, the same array is the estimation universe the standardisation is taken over,
-    so the two cannot disagree about who is a member. None, the default, regresses and
-    standardises over every security with data.
+    security was an index member that day. Given one, a period's regression holds only the
+    members on the date its exposures are read; a non-member cell is treated exactly as a
+    missing return. When this call standardises, the same array is the estimation universe
+    the standardisation is taken over, so the two cannot disagree about who is a member. None,
+    the default, regresses and standardises over every security with data.
+
+    `lag` is how many shared dates before each return the rest of its regression is read:
+    the exposures, the weights and the membership, all from the same earlier date -- see
+    `regression_design`. The default, 1, is Barra's convention, and the one any
+    characteristic computed from a day's prices needs: at 0 that day's return is regressed on
+    exposures built from the price that produced it. The first `lag` dates are not periods at
+    all. The exposures the model forecasts with are unaffected -- `exposure_index` reads them
+    as of its date, as before.
 
     `standardise_weights` is passed to `CharacteristicPanel.standardise` for the *mean*, and
     should be market capitalisation itself rather than its square root: the point of a
@@ -580,8 +691,20 @@ def estimate_cross_sectional_model(
             standardise_weights, winsorise=winsorise, membership=standardise_members
         )
 
-    r_block = returns.returns[np.ix_(return_rows, return_cols)]
-    x_block = panel.values[np.ix_(char_rows, char_cols)]
+    # Every period's inputs from one place: day t's returns, and everything else read `lag`
+    # shared dates earlier. The standardisation above is per date, so the exposures read for
+    # period t were standardised over the members of the date they were read from.
+    design = regression_design(
+        returns,
+        panel,
+        regression_weights=regression_weights,
+        membership=membership,
+        lag=lag,
+    )
+    lag = design.lag
+    r_block = design.returns
+    x_chars = design.exposures
+    x_block = x_chars
 
     names = list(panel.names)
     if fit_market:
@@ -591,7 +714,7 @@ def estimate_cross_sectional_model(
 
     n_periods_in, n_secs, n_factors = x_block.shape
 
-    w_block = _weight_block(regression_weights, returns, return_rows, return_cols)
+    w_block = design.weights
 
     kept_dates: list[date] = []
     sizes: list[int] = []
@@ -608,8 +731,9 @@ def estimate_cross_sectional_model(
     periods_constant = np.zeros(n_factors, dtype=int)
     ever_in = np.zeros(n_secs, dtype=bool)
 
-    in_regression = _in_regression(r_block, x_block, w_block, m_block)
-    for t in range(n_periods_in):
+    in_regression = design.in_regression
+    # The first `lag` dates have nothing earlier to read: they are not periods, thin or not.
+    for t in range(lag, n_periods_in):
         usable = in_regression[t]
         n_t = int(np.count_nonzero(usable))
         if n_t < max(min_securities, n_factors + 1):
@@ -755,16 +879,19 @@ def estimate_cross_sectional_model(
                     f"{(len(returns.dates), len(returns.securities))} to match the "
                     f"return panel"
                 )
-            cap_block = caps[np.ix_(return_rows, return_cols)]
+            # Read with the exposures, as the regression weights are: a security's size while
+            # it was being measured is its size on the date its regression was fixed.
+            cap_block = _lagged(caps[np.ix_(return_rows, return_cols)], lag)
         # Estimated over the regression universe and nothing else. A security in no estimated
         # period's regression has no residual; it must not shape S, V, gamma, kappa or the
         # blend weights, nor be counted in the notes as something the model was fitted on.
+        # Each residual is paired with the exposures its own regression read.
         fitted_on = np.flatnonzero(ever_in)
         universe = {shared_securities[j] for j in fitted_on}
         risk_model = estimate_specific_risk_model(
             residuals[:, fitted_on],
             tuple(shared_securities[j] for j in fitted_on),
-            panel.values[np.ix_(char_rows, [char_cols[j] for j in fitted_on])],
+            x_chars[:, fitted_on, :],
             panel.names,
             capitalisations=None if cap_block is None else cap_block[:, fitted_on],
             annualisation=vol_scale,
@@ -881,6 +1008,8 @@ def estimate_cross_sectional_model(
         regression_universe=tuple(
             code for code, inside in zip(shared_securities, ever_in) if inside
         ),
+        lag=lag,
+        factor_returns=factors,
     )
 
     return FactorModel(

@@ -60,6 +60,23 @@ PRICE_DESCRIPTORS = (
     "VLVR",
 )
 
+WINDOW_DESCRIPTORS = (
+    "DASTD",
+    "CMRA",
+    "BTSG",
+    "HALPHA",
+    "SERDP",
+    "RSTR",
+    "STOM",
+    "STOQ",
+    "STOA",
+    "STO5",
+    "VLVR",
+)
+"""The descriptors computed over a trailing window of a security's own history, which
+`compute_descriptors`' `min_coverage` applies to. HILO, LPRI, LNCAP and LCAPCB are one day's
+values and have no window."""
+
 _RISK_INDEX = {
     "Volatility": ("BTSG", "DASTD", "HILO", "LPRI", "CMRA", "SERDP"),
     "Momentum": ("RSTR", "HALPHA"),
@@ -189,13 +206,40 @@ class SecurityPanel:
         return max(int(round(months)), 1)
 
 
-def _rolling(values: np.ndarray, window: int, fn) -> np.ndarray:
-    """Apply `fn` to each trailing window, leaving nan where there is not enough history."""
+def _covered(valid: np.ndarray, window: int, min_coverage: float) -> np.ndarray:
+    """Dates by securities: whether the trailing window ending there holds at least one valid
+    observation, and at least `min_coverage` of the window. False before the first full one."""
+    n_periods = valid.shape[0]
+    out = np.zeros(valid.shape, dtype=bool)
+    if window > n_periods:
+        return out
+    running = np.zeros((n_periods + 1, valid.shape[1]), dtype=np.int64)
+    np.cumsum(valid, axis=0, dtype=np.int64, out=running[1:])
+    counts = running[window:] - running[: n_periods - window + 1]
+    out[window - 1 :] = (counts > 0) & (counts / window >= min_coverage)
+    return out
+
+
+def _rolling(
+    values: np.ndarray,
+    window: int,
+    fn,
+    *,
+    min_coverage: float = 0.0,
+    valid: np.ndarray | None = None,
+) -> np.ndarray:
+    """Apply `fn` to each trailing window, leaving nan where there is not enough history --
+    and where the window holds no valid observation, or less than `min_coverage` of it.
+
+    `valid` marks the observations that count, the finite `values` by default. A sum over a
+    window with none is a zero that measures nothing, so it is not taken.
+    """
     n_periods, n_securities = values.shape
     out = np.full((n_periods, n_securities), np.nan)
+    enough = _covered(np.isfinite(values) if valid is None else valid, window, min_coverage)
     for t in range(window - 1, n_periods):
         block = values[t - window + 1 : t + 1, :]
-        out[t, :] = fn(block)
+        out[t, :] = np.where(enough[t], fn(block), np.nan)
     return out
 
 
@@ -214,12 +258,13 @@ def _nan_std(block: np.ndarray, *, ddof: int = 1) -> np.ndarray:
 
 
 def _market_model(
-    returns: np.ndarray, market: np.ndarray, window: int
+    returns: np.ndarray, market: np.ndarray, window: int, min_coverage: float = 0.0
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Rolling OLS of each security on the market: alpha, beta, residual sd, residuals.
 
     Residuals come back full-length with nan outside the last window, because SERDP needs the
-    series rather than its summary.
+    series rather than its summary. A window needs three observations to fit, and at least
+    `min_coverage` of it.
     """
     n_periods, n_securities = returns.shape
     alpha = np.full((n_periods, n_securities), np.nan)
@@ -232,7 +277,7 @@ def _market_model(
         for j in range(n_securities):
             y = returns[lo : t + 1, j]
             ok = np.isfinite(y) & np.isfinite(x)
-            if int(ok.sum()) < 3:
+            if int(ok.sum()) < 3 or int(ok.sum()) / window < min_coverage:
                 continue
             design = np.column_stack([np.ones(int(ok.sum())), x[ok]])
             coefficients, *_ = np.linalg.lstsq(design, y[ok], rcond=None)
@@ -260,6 +305,7 @@ def compute_descriptors(
     beta_window_months: float = 60.0,
     volatility_window_months: float | None = None,
     membership: np.ndarray | None = None,
+    min_coverage: float = 0.0,
 ) -> tuple[CharacteristicPanel, dict[str, str]]:
     """Compute USE3's price-and-volume descriptors over the panel.
 
@@ -282,6 +328,16 @@ def compute_descriptors(
     `membership`, a dates-by-securities boolean array, is the estimation universe LCAPCB's
     normalisation is taken over -- the one descriptor here whose definition is cross-sectional.
     Everything else is a security's own history.
+
+    **A window with no valid observation gives no value.**  The window descriptors --
+    `WINDOW_DESCRIPTORS` -- are missing wherever their window holds no data, and wherever it
+    holds less than `min_coverage` of the window: the fraction of its periods with a valid
+    observation of what the descriptor is computed from -- a return for DASTD, RSTR and CMRA,
+    a return with the market's for the market-model ones, a volume for the turnovers. A sum
+    over an empty window is zero, and before this RSTR, CMRA and the turnovers recorded that
+    zero as a value: every day before a security's first price read as no momentum and no
+    trading. The default, 0, removes the empty windows alone; the market model's own floor of
+    three observations, and DASTD's of two, still apply above it.
     """
     wanted = tuple(names) if names is not None else PRICE_DESCRIPTORS
     unknown = set(wanted) - set(PRICE_DESCRIPTORS)
@@ -289,6 +345,11 @@ def compute_descriptors(
         raise ValueError(
             f"unknown descriptor(s): {sorted(unknown)}; this module computes "
             f"{list(PRICE_DESCRIPTORS)}"
+        )
+    if not 0.0 <= min_coverage <= 1.0:
+        raise ValueError(
+            f"min_coverage is the fraction of a window with valid data, so it lies in "
+            f"[0, 1]; got {min_coverage}"
         )
 
     n_periods, n_securities = panel.prices.shape
@@ -382,7 +443,9 @@ def compute_descriptors(
             if panel.frequency is Frequency.DAILY
             else 1.0
         )
-        computed["DASTD"] = _rolling(returns, window, _nan_std) * scale
+        computed["DASTD"] = (
+            _rolling(returns, window, _nan_std, min_coverage=min_coverage) * scale
+        )
 
     if "HILO" in wanted:
         if panel.highs is None or panel.lows is None:
@@ -408,7 +471,10 @@ def compute_descriptors(
         window = panel.periods_for(12.0)
         if "RSTR" in wanted:
             computed["RSTR"] = _rolling(
-                log_excess, window, lambda b: np.nansum(b, axis=0)
+                log_excess,
+                window,
+                lambda b: np.nansum(b, axis=0),
+                min_coverage=min_coverage,
             )
         if "CMRA" in wanted:
 
@@ -423,7 +489,9 @@ def compute_descriptors(
                         np.nan,
                     )
 
-            computed["CMRA"] = _rolling(log_excess, window, _range)
+            computed["CMRA"] = _rolling(
+                log_excess, window, _range, min_coverage=min_coverage
+            )
 
     # --- Market-model descriptors ---------------------------------------------------
     needs_market = {"BTSG", "HALPHA", "SERDP"} & set(wanted)
@@ -433,7 +501,9 @@ def compute_descriptors(
                 skipped[name] = "no market_returns supplied"
         else:
             window = min(panel.periods_for(beta_window_months), n_periods)
-            alpha, beta, residual_sd, residuals = _market_model(returns, market, window)
+            alpha, beta, residual_sd, residuals = _market_model(
+                returns, market, window, min_coverage
+            )
             if "HALPHA" in wanted:
                 computed["HALPHA"] = alpha
             if "BTSG" in wanted:
@@ -483,7 +553,14 @@ def compute_descriptors(
                 f"every value would be missing"
             )
             continue
-        traded = _rolling(panel.volumes, window, lambda b: np.nansum(b, axis=0))
+        # Covered by the days that traded: a window of share counts and no volume is a
+        # turnover nobody measured, not a turnover of zero.
+        traded = _rolling(
+            panel.volumes,
+            window,
+            lambda b: np.nansum(b, axis=0),
+            min_coverage=min_coverage,
+        )
         with warnings.catch_warnings():
             # A security with no shares reported anywhere in the window is a legitimate
             # state -- it is named in the load report -- and numpy's "mean of empty slice"
@@ -505,10 +582,13 @@ def compute_descriptors(
             skipped["VLVR"] = "needs market_returns for the residual standard deviation"
         else:
             window = min(panel.periods_for(beta_window_months), n_periods)
-            _, _, residual_sd, _ = _market_model(returns, market, window)
+            _, _, residual_sd, _ = _market_model(returns, market, window, min_coverage)
             months = panel.periods_for(12.0)
             dollar = _rolling(
-                panel.volumes * panel.traded_prices, months, lambda b: np.nansum(b, axis=0)
+                panel.volumes * panel.traded_prices,
+                months,
+                lambda b: np.nansum(b, axis=0),
+                min_coverage=min_coverage,
             )
             with np.errstate(divide="ignore", invalid="ignore"):
                 ratio = np.where(

@@ -373,13 +373,50 @@ standardisation and every regression, so no two can disagree about who is a memb
 What it buys is the index at zero. Standardised over every panel security, the S&P 500 run's
 members carried a cap-weighted Size exposure of +0.013 on its last day, at a dispersion of
 0.88: the ex-members trading on in the lower tail had widened the scale for everyone. Over the
-members, the cap-weighted mean of every style exposure is zero to rounding on every estimated
-period -- at most 2e-16 -- and the run checks it each time.
+members, the cap-weighted mean of every style exposure is zero to rounding on every date an
+estimated period or the forecast reads -- at most 2e-16 -- and the run checks it each time.
 
-The outsiders sit in the tails, so many hit a bound: 100,018 of their values over the panel.
+The outsiders sit in the tails, so many hit a bound: 100,011 of their values over the panel.
 `CharacteristicPanel.clipped_outside` counts them, by either bound, since for LNCAP the second
 one binds: 19 of the 45 ex-members with a price on the last day hit it, one of them the raw
 bound too.
+
+### Each regression is fixed the day before its return
+
+A characteristic dated t is computed from day t's close, and day t's return ends at that close,
+so regressing one on the other puts the return inside its own exposure. Under `lag=1` -- the
+estimator's default and Barra's convention -- period t's regression reads its exposures, their
+standardisation, its weights and its membership from the shared date before, and only its
+returns from day t. The forecast exposures are still the last date's: they are as of today and
+forecast forward. `regression_design` is the one place each period's inputs are assembled, for
+the estimator, for `regression_universe`, and for the test that guards it: price every security
+on one day by its own random factor, rerun from prices with the blend's weights held fixed, and
+that period's exposures, weights, membership and regression universe come back bit for bit
+while every one of its returns moves. On the real panel too -- and at a lag of zero the same
+check fails, which is what makes it a guard.
+
+Same-day was not a small error on the S&P 500 run. Momentum earned +26.8% a year (t = 9.1),
+because RSTR holds today's return: the exposure moves 3.2 standard deviations per unit of the
+day's return. Read the day before, it earns +2.4% (t = 0.8). Mean R-squared falls from 0.312 to
+0.294 and the Volatility factor's volatility from 9.4% to 7.6%, since HILO, DASTD and CMRA hold
+today's move as well; the specific risk model's Volatility coefficient halves, +0.42 to +0.19,
+for the same reason -- today's range predicting today's residual.
+
+Size went the other way, and the decomposition says why. On its own, same-day Size is inflated
+exactly as expected -- today's cap holds today's return -- at +8.3% a year against +4.1%
+lagged. But Momentum's exposure moves nearly four times as far with the day's return and is
++0.38 correlated with Size, so in the joint regression it takes the look-ahead and over-corrects
+Size: +0.05% a year same-day, +4.9% lagged.
+
+SERDP exists at the last date alone, so under the lag it enters no regression, only the
+forecast Volatility exposure, where it moves the members' exposures by 0.27 rms; the run flags
+it. BTSG, HALPHA and VLVR reach the estimated periods only from 2025-04-23, 386 of 938, so the
+blends change composition inside the window too.
+
+`fit_index_weights` pools every period's returns into one regression, each descriptor paired
+with the same day's return: in-sample weight selection, and same-day look-ahead besides. The run
+script does not call it -- its blends are equal-weighted -- and the look-ahead test holds fitted
+weights fixed for that reason.
 
 ### Weights: two different arrays, easily confused
 
@@ -575,6 +612,19 @@ Three details that are easy to get wrong and are pinned by tests:
 * **SERDP comes out a few percent below its AR(1) theoretical value**, consistently across
   rho. That is the definition rather than the implementation: it is built on *fitted*
   market-model residuals, and OLS forces those orthogonal to the regressors.
+
+### A window with no data gives no value
+
+RSTR, CMRA and the turnovers sum over their windows, and a sum over an empty window is zero.
+Every day before a security's first price -- a current ticker carried back to before it traded
+-- read as no momentum and no trading: 94,882 values on the S&P 500 panel, 10,965 of them on
+index members. The window descriptors are now missing wherever their window holds no valid
+observation, and `min_coverage` extends that to windows holding less than a given fraction of
+valid data. Its default, 0, changes the empty case alone -- on the S&P 500 panel those 94,882
+zeros, checked value by value, and nothing else -- and the run reports what a 50% rule would
+remove (29,506 values, 7,086 on members) without applying it. It also checks, against each
+descriptor's own inputs counted independently, that no value was computed from an empty window.
+The model barely moves: mean R-squared by -0.0001, the Volatility factor's volatility by 1.6%.
 
 ### Two price bases, and the trap between them
 

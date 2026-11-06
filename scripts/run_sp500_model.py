@@ -35,9 +35,11 @@ from praxis.midoffice.model.covariance import (  # noqa: E402
 )
 from praxis.midoffice.model.crosssectional import (  # noqa: E402
     estimate_cross_sectional_model,
+    regression_design,
     regression_universe,
 )
 from praxis.midoffice.model.descriptors import (  # noqa: E402
+    TRADING_DAYS_PER_MONTH,
     SecurityPanel,
     build_risk_indices,
     compute_descriptors,
@@ -85,8 +87,9 @@ def screen(
     from data up to day t can only explain day t+1's return. Regressing it on day t's return
     would use the price that produced it to predict itself.
 
-    Given a membership, each regression holds to the members on the return's day, as the
-    model's own do: a descriptor earns its place on the securities the model is estimated on.
+    Given a membership, each regression holds to the members on the exposure's day, as the
+    model's own do: a descriptor earns its place on the securities the model is estimated on,
+    and who those are is fixed with the exposures, before the return.
     """
     rows = []
     for k, name in enumerate(standardised.names):
@@ -97,7 +100,7 @@ def screen(
             x, y = exposure[t], future[t]
             ok = np.isfinite(x) & np.isfinite(y)
             if membership is not None:
-                ok &= membership[t + 1]
+                ok &= membership[t]
             if int(ok.sum()) < 30:
                 continue
             xs, ys = x[ok], y[ok]
@@ -163,6 +166,73 @@ def clipped_outside_on(
         hit = day.standardise(caps[t : t + 1], membership=membership[t : t + 1])
         have = int(np.count_nonzero(np.isfinite(day.values[0, :, 0]) & ~membership[t]))
         out.append((name, hit.clipped_outside, have))
+    return out
+
+
+def trailing_counts(valid: np.ndarray, window: int) -> np.ndarray:
+    """How many of each trailing window's periods are valid; -1 before the first full window."""
+    if window > valid.shape[0]:
+        return np.full(valid.shape, -1, dtype=np.int64)
+    running = np.concatenate(
+        [np.zeros((1, valid.shape[1]), dtype=np.int64), np.cumsum(valid, axis=0, dtype=np.int64)]
+    )
+    out = np.full(valid.shape, -1, dtype=np.int64)
+    out[window - 1 :] = running[window:] - running[: valid.shape[0] - window + 1]
+    return out
+
+
+def window_coverage(
+    panel: SecurityPanel,
+    descriptors: CharacteristicPanel,
+    market: np.ndarray,
+    beta_window_months: float,
+    membership: np.ndarray | None,
+) -> list[tuple[str, int, int, int, int]]:
+    """Per window descriptor: its values, how many were computed from a window holding no
+    valid observation -- which must be none -- and how many from under half their window, all
+    of them and on index members that day.
+
+    Worked out from the panel's own prices, volumes and market series, not taken from the
+    code that computed the descriptors, so a descriptor still summing an empty window shows.
+    Each descriptor's inputs are restated here: a return for DASTD, RSTR and CMRA, a return on
+    a day the market has one for the market model, a volume for the turnovers, and for VLVR
+    both a dollar volume and the market model's window.
+    """
+    returns = panel.returns()
+    has_return = np.isfinite(returns)
+    paired = has_return & np.isfinite(market)[:, None]
+    traded = np.isfinite(panel.volumes)
+    dollars = np.isfinite(panel.volumes * panel.traded_prices)
+    year = panel.periods_for(12.0)
+    beta = min(panel.periods_for(beta_window_months), len(panel.dates))
+    inputs = {
+        "DASTD": [(has_return, panel.periods_for(65.0 / TRADING_DAYS_PER_MONTH))],
+        "RSTR": [(has_return, year)],
+        "CMRA": [(has_return, year)],
+        "BTSG": [(paired, beta)],
+        "HALPHA": [(paired, beta)],
+        "SERDP": [(paired, beta)],
+        "STOM": [(traded, panel.periods_for(1.0))],
+        "STOQ": [(traded, panel.periods_for(3.0))],
+        "STOA": [(traded, year)],
+        "VLVR": [(dollars, year), (paired, beta)],
+    }
+    out = []
+    for name, sources in inputs.items():
+        if name not in descriptors.names:
+            continue
+        values = np.isfinite(descriptors.values[:, :, descriptors.names.index(name)])
+        empty = np.zeros(values.shape, dtype=bool)
+        coverage = np.ones(values.shape)
+        for valid, window in sources:
+            counts = trailing_counts(valid, window)
+            empty |= counts == 0
+            coverage = np.minimum(coverage, np.where(counts > 0, counts / window, 1.0))
+        thin = values & ~empty & (coverage < 0.5)
+        on_members = int((thin & membership).sum()) if membership is not None else 0
+        out.append(
+            (name, int(values.sum()), int((values & empty).sum()), int(thin.sum()), on_members)
+        )
     return out
 
 
@@ -265,6 +335,10 @@ def main(argv: list[str] | None = None) -> int:
                              "the newest snapshot in --snapshots; without it every panel "
                              "security with data is regressed")
     parser.add_argument("--snapshots", default="data/external/sp500")
+    parser.add_argument("--min-coverage", type=float, default=0.0,
+                        help="the fraction of a window descriptor's window that must hold "
+                             "valid data for it to have a value (default 0: any data at all; "
+                             "an empty window never gives one)")
     args = parser.parse_args(argv)
 
     path = Path(args.panel)
@@ -331,10 +405,31 @@ def main(argv: list[str] | None = None) -> int:
         market_returns=market,
         beta_window_months=args.beta_window,
         membership=membership,
+        min_coverage=args.min_coverage,
     )
     print(f"  computed {len(descriptors.names)}: {', '.join(descriptors.names)}")
     for name, reason in sorted(skipped.items()):
         print(f"  - {name}: {reason}")
+
+    # An empty window sums to zero, and RSTR, CMRA and the turnovers once recorded that zero as
+    # a value: 18,645 of RSTR's, 4,679 of them on index members and 4,334 of those before the
+    # security's first price. Checked against each descriptor's own inputs, so the check does
+    # not share the code it checks.
+    coverage = window_coverage(panel, descriptors, market, args.beta_window, membership)
+    rule = ("any valid observation" if args.min_coverage == 0.0
+            else f"at least {args.min_coverage:.0%} of the window valid")
+    empty = [(name, bad) for name, _, bad, _, _ in coverage if bad]
+    print(f"  window descriptors need {rule}; from a window with none, over "
+          f"{sum(n for _, n, _, _, _ in coverage):,} values: "
+          f"{'none' if not empty else sum(bad for _, bad in empty)}")
+    for name, bad in empty:
+        print(f"  ! {name}: {bad:,} values computed from a window holding no valid observation")
+    print(f"  from under half their window, which a 50% rule would remove "
+          f"({'all/on members' if membership is not None else 'all'}):")
+    cells = [f"{name} {thin:,}" + (f"/{members:,}" if membership is not None else "")
+             for name, _, _, thin, members in coverage]
+    for i in range(0, len(cells), 5):
+        print(f"    {'  '.join(cells[i:i + 5])}")
 
     caps = panel.market_capitalisation()
     # Over the estimation universe: the members set each day's clip bounds, cap-weighted mean
@@ -455,10 +550,37 @@ def main(argv: list[str] | None = None) -> int:
     )
     notes = model.notes
     print(f"  {model.describe()}")
+    # Barra's convention, and the descriptor screen's: everything that defines period t's
+    # regression is fixed the day before, so today's cap -- which holds today's return -- can
+    # make no stock look as though it outperformed today.
+    print(f"  each period regresses day t's returns on the exposures, weights and membership "
+          f"of {'day t' if notes.lag == 0 else f'{notes.lag} trading day(s) earlier'}; the "
+          f"forecast exposures are {panel.dates[-1]}'s")
     print(f"  mean cross-sectional R-squared {notes.mean_r_squared:.3f}")
     print(f"  {len(notes.rank_deficient_periods)} collinear period(s) of {notes.n_periods} "
           f"estimated; {sum(notes.empty_periods)} factor-period(s) left out for having no "
           f"member present")
+    at = {d: i for i, d in enumerate(panel.dates)}
+    estimated_rows = [at[d] for d in notes.estimated_dates]
+    # The dates the estimated periods read their exposures, weights and membership from.
+    read_rows = [row - notes.lag for row in estimated_rows]
+    if membership is not None:
+        # Read with the exposures, so a name is in the regression on the day it leaves the
+        # index and out of it on the day it joins.
+        unheld = regression_design(
+            return_panel, indices, regression_weights=weights, lag=notes.lag
+        ).in_regression[estimated_rows]
+        held_in = regression_design(
+            return_panel, indices, regression_weights=weights, membership=membership,
+            lag=notes.lag,
+        ).in_regression[estimated_rows]
+        same_day = unheld & membership[estimated_rows]
+        mask_moves = int((membership[read_rows] != membership[estimated_rows]).sum())
+        print(f"  membership read on the exposures' date: against same-day membership, "
+              f"{int((held_in != same_day).sum())} security-period(s) of the regressions "
+              f"move -- {int((held_in & ~same_day).sum())} in, on the day a name left the "
+              f"index, {int((same_day & ~held_in).sum())} out, on the day one joined; the "
+              f"mask itself differs on {mask_moves}")
     if scheme is not None and scheme.universe is not None:
         # The universe was worked out before the industries existed. It can differ from the
         # regression's only if a security has no classification at all, or the model has
@@ -470,45 +592,65 @@ def main(argv: list[str] | None = None) -> int:
                   f"regression's by {len(differs)} security(ies): "
                   f"{', '.join(sorted(differs)[:5])}")
 
-    # The index at zero style exposure, exactly: on every estimated period the cap-weighted mean
-    # of each style exposure over that day's estimation universe is zero to rounding, and the
-    # equal-weighted dispersion one. That is what lets an exposure read as relative to the
-    # index. Nothing after the second standardisation clips, so nothing may move it.
-    at = {d: i for i, d in enumerate(panel.dates)}
-    held = [at[d] for d in notes.estimated_dates]
+    # A blend is read the way its factor was estimated only if the forecast date carries the
+    # descriptors the estimated periods did. SERDP exists at the last date alone, so under the
+    # lag it is in no regression and only in the forecast exposures.
+    for name in style_names:
+        for descriptor in risk_index_members(name):
+            if descriptor not in standardised.names:
+                continue
+            k = standardised.names.index(descriptor)
+            carried = int(np.isfinite(standardised.values[read_rows, :, k]).any(axis=1).sum())
+            forecast = int(np.isfinite(standardised.values[-1, :, k]).sum())
+            if forecast and not carried:
+                print(f"  ! {name}: {descriptor} is in {forecast} securities' forecast "
+                      f"exposures and in none of the {notes.n_periods} estimated periods', so "
+                      f"the factor was estimated on a blend without it")
+            elif carried and not forecast:
+                print(f"  ! {name}: {descriptor} is in {carried} estimated periods' exposures "
+                      f"and in no forecast exposure")
+
+    # The index at zero style exposure, exactly: on every date an estimated period or the
+    # forecast reads, the cap-weighted mean of each style exposure over that date's estimation
+    # universe is zero to rounding, and the equal-weighted dispersion one. That is what lets an
+    # exposure read as relative to the index. Nothing after the second standardisation clips,
+    # so nothing may move it.
+    checked = sorted(set(read_rows) | {len(panel.dates) - 1})
     columns = [indices.names.index(name) for name in style_names]
     means, spreads, bounds, sizes = estimation_moments(
-        indices.values[held][:, :, columns],
-        caps[held],
-        None if membership is None else membership[held],
+        indices.values[checked][:, :, columns],
+        caps[checked],
+        None if membership is None else membership[checked],
     )
     worst = float(np.nanmax(np.abs(means)))
     eps = np.finfo(float).eps
     over = np.abs(means) > bounds
     universe_label = "index members" if membership is not None else "securities"
     in_eps = f" ({worst / eps:.1f} eps)" if worst < 1e3 * eps else ""
-    print(f"\n  Style exposures over each estimated period's {universe_label} with a value, "
-          f"all {len(held)} periods: cap-weighted mean at most {worst:.1e} from zero{in_eps}, "
-          f"equal-weighted sd at most {float(np.nanmax(np.abs(spreads - 1.0))):.1e} from one")
+    print(f"\n  Style exposures over the {universe_label} with a value, on all {len(checked)} "
+          f"dates an estimated period or the forecast reads: cap-weighted mean at most "
+          f"{worst:.1e} from zero{in_eps}, equal-weighted sd at most "
+          f"{float(np.nanmax(np.abs(spreads - 1.0))):.1e} from one")
     if over.any():
         t, k = np.unravel_index(int(np.nanargmax(np.where(over, np.abs(means), -1.0))),
                                 means.shape)
-        print(f"  ! {int(over.sum())} of {over.size} style-period means are past rounding, so "
+        print(f"  ! {int(over.sum())} of {over.size} style-date means are past rounding, so "
               f"the index is not at zero exposure; the largest, {means[t, k]:+.4f}, is "
-              f"{style_names[k]} on {notes.estimated_dates[t]}")
-    print(f"  {'on ' + str(notes.estimated_dates[-1]):<22} {'cap-wtd mean':>13} "
+              f"{style_names[k]} on {panel.dates[checked[t]]}")
+    print(f"  {'on ' + str(panel.dates[checked[-1]]):<22} {'cap-wtd mean':>13} "
           f"{'eq-wtd sd':>10} {'n':>5}")
     for k, name in enumerate(style_names):
         print(f"  {name:<22} {means[-1, k]:>+13.1e} {spreads[-1, k]:>10.6f} "
               f"{sizes[-1, k]:>5}")
 
     # A restriction to members only removes, so the cross-sections shrink and sampling error
-    # rises with them; the sizes are where that shows.
+    # rises with them; the sizes are where that shows. The index is counted on the date each
+    # regression reads its membership from.
     rows = [("in the regression", np.array(notes.cross_section_sizes))]
     if membership is not None:
         rows = [
-            ("index members", np.array(index_sizes)[held]),
-            ("of them in the panel", membership[held].sum(axis=1)),
+            ("index members", np.array(index_sizes)[read_rows]),
+            ("of them in the panel", membership[read_rows].sum(axis=1)),
             *rows,
         ]
     print(f"\n  Securities per estimated period, over {notes.n_periods}")
@@ -523,15 +665,20 @@ def main(argv: list[str] | None = None) -> int:
     # read 5.7 percent with one member present in every period. The exactly-1 column can.
     print(f"\n  Over the {notes.n_periods} estimated periods. noise share is blind to a "
           f"one-member factor; the exactly-1 column is not.")
-    print(f"  {'':<22} {'':>11} {'':>12}   periods with a member present")
-    print(f"  {'factor':<22} {'annual vol':>11} {'noise share':>12}   "
+    # The mean is each factor's plain average return over the periods, annualised. Under
+    # same-day exposures Size's was inflated: today's cap holds today's return.
+    print(f"  {'':<22} {'':>11} {'':>12} {'':>12}   periods with a member present")
+    print(f"  {'factor':<22} {'annual vol':>11} {'annual mean':>12} {'noise share':>12}   "
           f"{'>=1':>6} {'exactly 1':>10} {'none':>6}")
     volatilities = np.sqrt(np.diag(model.covariance.matrix))
+    average = (
+        notes.factor_returns.returns.mean(axis=0) * return_panel.frequency.periods_per_year
+    )
     for i, fid in enumerate(model.factor_ids):
         share = notes.noise_share[i] if notes.noise_share else float("nan")
-        print(f"  {model.factor_names[fid]:<22} {volatilities[i]:>10.2%} {share:>11.1%}   "
-              f"{notes.present_periods[i]:>6,} {notes.single_member_periods[i]:>10,} "
-              f"{notes.empty_periods[i]:>6,}")
+        print(f"  {model.factor_names[fid]:<22} {volatilities[i]:>10.2%} {average[i]:>+11.2%} "
+              f"{share:>11.1%}   {notes.present_periods[i]:>6,} "
+              f"{notes.single_member_periods[i]:>10,} {notes.empty_periods[i]:>6,}")
 
     specific = np.array(
         [ev.specific.by_issuer[code] for code, ev in model.exposures.items()]

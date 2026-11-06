@@ -21,6 +21,7 @@ from praxis.midoffice.model.crosssectional import (
     MARKET_FACTOR,
     MIN_SECURITIES_PER_PERIOD,
     estimate_cross_sectional_model,
+    regression_design,
     regression_universe,
 )
 from praxis.midoffice.model.panel import Frequency, ReturnPanel
@@ -70,6 +71,9 @@ def _fit(returns, chars, **kw):
     kw.setdefault("standardise", False)
     kw.setdefault("annualise", False)
     kw.setdefault("min_securities", 10)
+    # These worlds build day t's return from day t's characteristics, so they are read
+    # same-day. A model on characteristics computed from prices never is: see the lag tests.
+    kw.setdefault("lag", 0)
     return estimate_cross_sectional_model(returns, chars, **kw)
 
 
@@ -587,7 +591,7 @@ def test_the_regression_universe_is_known_before_estimating_and_agrees_with_it()
     weights[:, 3] = 0.0                 # never any weight
     panel = ReturnPanel(returns.dates, returns.securities, raw, returns.frequency)
     universe = regression_universe(
-        panel, chars, regression_weights=weights, min_securities=20
+        panel, chars, regression_weights=weights, min_securities=20, lag=0
     )
     model = _fit(panel, chars, regression_weights=weights, min_securities=20)
     assert len(model.notes.thin_periods) == 10
@@ -1089,8 +1093,8 @@ def test_a_membership_that_holds_everyone_changes_nothing():
     assert held.exposures == default.exposures
     assert held.notes.cross_section_sizes == default.notes.cross_section_sizes
     assert regression_universe(
-        returns, chars, membership=everyone, min_securities=20
-    ) == regression_universe(returns, chars, min_securities=20)
+        returns, chars, membership=everyone, min_securities=20, lag=0
+    ) == regression_universe(returns, chars, min_securities=20, lag=0)
 
 
 def test_the_regression_universe_counts_only_periods_in_which_a_security_was_a_member():
@@ -1105,12 +1109,14 @@ def test_the_regression_universe_counts_only_periods_in_which_a_security_was_a_m
     members[:, 0] = False               # a return in every period and never a member
     members[10:, 1] = False             # a member only while the periods were thin
     members[:59, 2] = False             # a member in the last period alone
-    universe = regression_universe(panel, chars, membership=members, min_securities=20)
+    universe = regression_universe(
+        panel, chars, membership=members, min_securities=20, lag=0
+    )
     model = _fit(panel, chars, membership=members, min_securities=20)
     assert len(model.notes.thin_periods) == 10
     assert universe == model.notes.regression_universe
     assert set(returns.securities) - set(universe) == set(returns.securities[:2])
-    assert regression_universe(panel, chars, min_securities=20) == returns.securities
+    assert regression_universe(panel, chars, min_securities=20, lag=0) == returns.securities
 
 
 def test_the_notes_record_each_estimated_period_and_the_size_of_its_regression():
@@ -1291,3 +1297,173 @@ def test_the_estimator_standardises_over_the_membership_it_regresses_on():
     # Not what standardising over everyone gives, which is what it used to do.
     everyone = _fit(returns, raw.standardise(caps), membership=members, **kw)
     assert everyone.exposures != inside.exposures
+
+
+# --------------------------------- the lag: each regression fixed the day before its return
+
+
+def _timed(n_periods: int = 40, n_secs: int = 50, seed: int = 97):
+    """Characteristics, returns, weights and a membership, every value distinct, so a row read
+    from the wrong date shows. S0000 joins on period 10, S0001 leaves on period 20, and S0002
+    is a member on the last date alone."""
+    rng = np.random.default_rng(seed)
+    dates = _dates(n_periods)
+    secs = tuple(f"S{i:04d}" for i in range(n_secs))
+    chars = CharacteristicPanel(
+        dates, secs, ("C0", "C1"), rng.normal(size=(n_periods, n_secs, 2)), Frequency.MONTHLY
+    ).standardise()
+    returns = ReturnPanel(
+        dates, secs, rng.normal(scale=0.05, size=(n_periods, n_secs)), Frequency.MONTHLY
+    )
+    weights = rng.uniform(0.5, 2.0, size=(n_periods, n_secs))
+    members = np.ones((n_periods, n_secs), dtype=bool)
+    members[:10, 0] = False
+    members[20:, 1] = False
+    members[:-1, 2] = False
+    return returns, chars, weights, members
+
+
+def test_each_period_reads_its_exposures_weights_and_membership_from_the_date_before():
+    returns, chars, weights, members = _timed()
+    design = regression_design(returns, chars, regression_weights=weights, membership=members)
+    assert design.lag == 1
+    assert design.dates == returns.dates
+    assert design.exposure_dates == (None,) + returns.dates[:-1]
+    assert np.array_equal(design.returns, returns.returns)
+    assert np.array_equal(design.exposures[1:], chars.values[:-1])
+    assert np.array_equal(design.weights[1:], weights[:-1])
+    assert np.array_equal(design.members[1:], members[:-1])
+    # The first date has nothing earlier to read, so it is in no regression.
+    assert np.isnan(design.exposures[0]).all()
+    assert not design.members[0].any() and not design.in_regression[0].any()
+    same_day = regression_design(
+        returns, chars, regression_weights=weights, membership=members, lag=0
+    )
+    assert same_day.exposure_dates == returns.dates
+    assert np.array_equal(same_day.exposures, chars.values)
+
+
+def test_a_name_is_regressed_on_the_day_it_leaves_and_not_on_the_day_it_joins():
+    """Membership is read with the exposures. On the day a name joins, its regression was fixed
+    when it was not yet a member; on the day one leaves, it still was one."""
+    returns, chars, weights, members = _timed()
+    inside = regression_design(
+        returns, chars, regression_weights=weights, membership=members
+    ).in_regression
+    assert not inside[10, 0] and inside[11, 0]
+    assert inside[20, 1] and not inside[21, 1]
+    assert not inside[:, 2].any()
+    same_day = regression_design(
+        returns, chars, regression_weights=weights, membership=members, lag=0
+    ).in_regression
+    assert same_day[10, 0] and not same_day[20, 1] and same_day[-1, 2]
+
+
+def test_the_estimator_fits_the_lagged_design_and_forecasts_with_the_last_dates_exposures():
+    """The lag reaches the fit: each period's factor returns are the weighted regression of
+    that date's returns on the row before, redone here by hand. The exposures the model
+    forecasts with are still the last date's -- as of today, forecast forward."""
+    returns, chars, weights, members = _timed()
+    model = estimate_cross_sectional_model(
+        returns,
+        chars,
+        regression_weights=weights,
+        membership=members,
+        standardise=False,
+        annualise=False,
+        min_securities=20,
+    )
+    design = regression_design(returns, chars, regression_weights=weights, membership=members)
+    notes = model.notes
+    assert notes.lag == 1
+    assert notes.estimated_dates == returns.dates[1:]
+    assert returns.dates[0] not in notes.thin_periods
+    for row, fitted in zip(range(1, len(returns.dates)), notes.factor_returns.returns):
+        usable = design.in_regression[row]
+        x = np.column_stack([np.ones(int(usable.sum())), design.exposures[row][usable]])
+        w = design.weights[row, usable]
+        root = np.sqrt(w * (usable.sum() / w.sum()))
+        expected, *_ = np.linalg.lstsq(
+            x * root[:, None], design.returns[row, usable] * root, rcond=None
+        )
+        assert fitted == pytest.approx(expected, rel=1e-12, abs=1e-15)
+    market, *styles = model.factor_ids
+    assert len(model.exposures) > 40
+    for code, vector in model.exposures.items():
+        j = returns.securities.index(code)
+        assert vector.exposures[market] == 1.0
+        assert [vector.exposures.get(fid, 0.0) for fid in styles] == list(chars.values[-1, j])
+
+
+def test_the_regression_universe_agrees_with_the_estimator_under_the_lag():
+    """S0002 is a member on the last date alone: same-day it reaches one regression, but read
+    the day before it reaches none, and both counts must agree with their estimator."""
+    returns, chars, weights, members = _timed()
+    kw = dict(regression_weights=weights, membership=members, min_securities=20)
+    for lag in (0, 1):
+        universe = regression_universe(returns, chars, lag=lag, **kw)
+        model = estimate_cross_sectional_model(
+            returns, chars, lag=lag, standardise=False, **kw
+        )
+        assert universe == model.notes.regression_universe, lag
+        assert ("S0002" in universe) == (lag == 0), lag
+
+
+def test_the_specific_risk_model_learns_from_the_exposures_each_residual_was_regressed_on(
+    monkeypatch,
+):
+    """Its characteristics and its capitalisations are read with the regression's, so no
+    residual is explained by an exposure built from the price that produced it."""
+    from praxis.midoffice.model import crosssectional
+
+    captured = {}
+    real = crosssectional.estimate_specific_risk_model
+
+    def spy(residuals, securities, characteristics, names, **kw):
+        captured.update(
+            securities=securities,
+            characteristics=characteristics,
+            capitalisations=kw.get("capitalisations"),
+        )
+        return real(residuals, securities, characteristics, names, **kw)
+
+    monkeypatch.setattr(crosssectional, "estimate_specific_risk_model", spy)
+    returns, chars, weights, members = _timed()
+    caps = weights**2
+    estimate_cross_sectional_model(
+        returns,
+        chars,
+        regression_weights=weights,
+        membership=members,
+        standardise=False,
+        min_securities=20,
+        specific_risk="model",
+        capitalisations=caps,
+    )
+    design = regression_design(returns, chars, regression_weights=weights, membership=members)
+    columns = [returns.securities.index(code) for code in captured["securities"]]
+    assert np.array_equal(
+        captured["characteristics"], design.exposures[:, columns], equal_nan=True
+    )
+    assert np.array_equal(captured["capitalisations"][1:], caps[:-1, columns])
+    assert np.isnan(captured["capitalisations"][0]).all()
+
+
+def test_a_lag_must_be_a_whole_number_of_periods_the_panel_can_supply():
+    returns, chars, _, _ = _timed()
+    for bad in (-1, 1.5, True):
+        with pytest.raises(ValueError, match="whole number"):
+            regression_design(returns, chars, lag=bad)
+    with pytest.raises(ValueError, match="earlier one"):
+        estimate_cross_sectional_model(
+            returns, chars, lag=len(returns.dates), standardise=False
+        )
+
+
+def test_the_notes_carry_the_factor_returns_the_covariance_was_estimated_from():
+    returns, chars, _, _ = _world(n_secs=60, n_periods=48)
+    model = _fit(returns, chars)
+    series = model.notes.factor_returns
+    assert series.dates == model.notes.estimated_dates
+    assert series.names == tuple(model.factor_names[fid] for fid in model.factor_ids)
+    assert series.returns.shape == (model.notes.n_periods, len(model.factor_ids))
