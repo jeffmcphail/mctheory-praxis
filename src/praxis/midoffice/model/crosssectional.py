@@ -98,7 +98,7 @@ from ..risk.exposures import ExposureVector, SpecificRisk
 from .characteristics import CharacteristicPanel, _checked_membership
 from .covariance import CovarianceEstimate, CovarianceEstimator, SampleCovariance
 from .panel import FactorReturns, Frequency, ReturnPanel
-from .specificrisk import SpecificRiskModel, estimate_specific_risk_model
+from .specificrisk import RESIDUAL_SPREADS, SpecificRiskModel, estimate_specific_risk_model
 from .timeseries import MIN_OBSERVATIONS, FactorModel
 
 MIN_SECURITIES_PER_PERIOD = 30
@@ -130,6 +130,9 @@ class CrossSectionalNotes:
     winsorised: int = 0
     market_factor: bool = True
     thin_periods: tuple[date, ...] = ()
+    # Periods that held enough securities and were not estimated, the caller's `periods`
+    # ruling them out.
+    excluded_periods: tuple[date, ...] = ()
     # Per estimated period, its date and how many securities its regression held. A
     # restriction to index members only removes, so these are where it shows.
     estimated_dates: tuple[date, ...] = ()
@@ -231,6 +234,17 @@ class CrossSectionalNotes:
             out.append(
                 f"{len(self.thin_periods)} period(s) dropped for having fewer than "
                 f"{self.min_securities} securities: {shown}{more}"
+            )
+        if self.excluded_periods:
+            shown = ", ".join(str(d) for d in self.excluded_periods[:3])
+            more = (
+                f" and {len(self.excluded_periods) - 3} more"
+                if len(self.excluded_periods) > 3
+                else ""
+            )
+            out.append(
+                f"{len(self.excluded_periods)} period(s) held enough securities and were not "
+                f"estimated, the caller's periods ruling them out: {shown}{more}"
             )
         empty = sum(self.empty_periods)
         if empty:
@@ -449,6 +463,22 @@ def _membership_block(
     return members[np.ix_(return_rows, return_cols)]
 
 
+def _periods_block(
+    periods: np.ndarray | None, returns: ReturnPanel, return_rows: list[int]
+) -> np.ndarray | None:
+    """`periods`, refused unless it is one boolean per return-panel date, read on the shared
+    dates."""
+    if periods is None:
+        return None
+    allowed = np.asarray(periods)
+    if allowed.dtype != bool or allowed.shape != (len(returns.dates),):
+        raise ValueError(
+            f"periods must be a boolean array with one entry per return-panel date, shape "
+            f"({len(returns.dates)},); got {allowed.dtype} {allowed.shape}"
+        )
+    return allowed[return_rows]
+
+
 def _in_regression(
     r_block: np.ndarray,
     x_block: np.ndarray,
@@ -562,6 +592,7 @@ def regression_universe(
     min_securities: int = MIN_SECURITIES_PER_PERIOD,
     n_factors: int | None = None,
     lag: int = 1,
+    periods: np.ndarray | None = None,
 ) -> tuple[str, ...]:
     """The securities in at least one estimated period's regression, known before estimating.
 
@@ -577,7 +608,8 @@ def regression_universe(
     condition: membership on the date the exposures are read. The universe is then the
     securities that reach a regression on at least one estimated period in which they were
     members -- one that traded on after leaving the index does not count for having done so.
-    Pass the estimator the same array and the same `lag`, or the two sets disagree.
+    Pass the estimator the same array and the same `lag`, or the two sets disagree -- and the
+    same `periods`, the estimator's own: a period it rules out is estimated by neither.
 
     `n_factors` defaults to the panel's own columns; pass the final model's count when the
     panel is only part of it. Industry indicators need not be in `characteristics` at all:
@@ -595,6 +627,10 @@ def regression_universe(
     usable = design.in_regression
     k = characteristics.values.shape[2] if n_factors is None else n_factors
     estimated = usable.sum(axis=1) >= max(min_securities, k + 1)
+    at = {d: i for i, d in enumerate(returns.dates)}
+    allowed = _periods_block(periods, returns, [at[d] for d in design.dates])
+    if allowed is not None:
+        estimated &= allowed
     ever = usable[estimated].any(axis=0)
     return tuple(code for code, inside in zip(design.securities, ever) if inside)
 
@@ -606,6 +642,7 @@ def estimate_cross_sectional_model(
     regression_weights: np.ndarray | None = None,
     membership: np.ndarray | None = None,
     lag: int = 1,
+    periods: np.ndarray | None = None,
     standardise: bool = True,
     standardise_weights: np.ndarray | None = None,
     winsorise: float | None = 4.0,
@@ -619,6 +656,7 @@ def estimate_cross_sectional_model(
     exposure_index: int = -1,
     annualise: bool = True,
     first_factor_id: int = 1,
+    residual_spread: str = "mad",
 ) -> FactorModel:
     """Regress returns cross-sectionally on characteristics, period by period.
 
@@ -642,6 +680,13 @@ def estimate_cross_sectional_model(
     exposures built from the price that produced it. The first `lag` dates are not periods at
     all. The exposures the model forecasts with are unaffected -- `exposure_index` reads them
     as of its date, as before.
+
+    `periods`, one boolean per date of the return panel, says which dates' periods may be
+    estimated. One marked False is not, however many securities it holds, and the notes name
+    it among `excluded_periods` rather than the thin ones. A caller whose estimated periods
+    must be one model -- each factor built from the same descriptors as the exposure it is
+    forecast on, say -- marks the rest. None, the default, estimates every period with enough
+    securities. Give `regression_universe` the same array.
 
     `standardise_weights` is passed to `CharacteristicPanel.standardise` for the *mean*, and
     should be market capitalisation itself rather than its square root: the point of a
@@ -668,6 +713,9 @@ def estimate_cross_sectional_model(
 
     `capitalisations`, a dates-by-securities array on the return panel's shape, calibrates
     kappa against size the way USE3 does. Without it kappa falls back to the normal constant.
+
+    `residual_spread` is how the specific risk model measures the spread its blend weights
+    answer to -- see `specificrisk.estimate_specific_risk_model`: "mad", the default, or "sd".
     """
     # Dates and securities common to both, in panel order.
     return_rows, char_rows, return_cols, char_cols = _align(returns, characteristics)
@@ -675,6 +723,7 @@ def estimate_cross_sectional_model(
     shared_securities = tuple(returns.securities[j] for j in return_cols)
 
     m_block = _membership_block(membership, returns, return_rows, return_cols)
+    allowed = _periods_block(periods, returns, return_rows)
 
     panel = characteristics
     if standardise:
@@ -721,6 +770,7 @@ def estimate_cross_sectional_model(
     factor_rows: list[np.ndarray] = []
     residuals = np.full((n_periods_in, n_secs), np.nan)
     thin: list[date] = []
+    excluded: list[date] = []
     rank_deficient: list[date] = []
     r_squareds: list[float] = []
     sampling = np.zeros(n_factors)
@@ -738,6 +788,9 @@ def estimate_cross_sectional_model(
         n_t = int(np.count_nonzero(usable))
         if n_t < max(min_securities, n_factors + 1):
             thin.append(shared_dates[t])
+            continue
+        if allowed is not None and not allowed[t]:
+            excluded.append(shared_dates[t])
             continue
         ever_in |= usable
 
@@ -854,6 +907,10 @@ def estimate_cross_sectional_model(
             f"specific_risk must be 'historical', 'model' or 'blend', got "
             f"{specific_risk!r}"
         )
+    if residual_spread not in RESIDUAL_SPREADS:
+        raise ValueError(
+            f"residual_spread must be one of {RESIDUAL_SPREADS}; got {residual_spread!r}"
+        )
 
     exposure_slice = panel.values[char_rows[exposure_index], :, :][char_cols, :]
     short_history: list[str] = []
@@ -895,6 +952,7 @@ def estimate_cross_sectional_model(
             panel.names,
             capitalisations=None if cap_block is None else cap_block[:, fitted_on],
             annualisation=vol_scale,
+            residual_spread=residual_spread,
         )
         exposure_rows = {
             code: {
@@ -985,6 +1043,7 @@ def estimate_cross_sectional_model(
         winsorised=panel.winsorised,
         market_factor=fit_market,
         thin_periods=tuple(thin),
+        excluded_periods=tuple(excluded),
         estimated_dates=tuple(kept_dates),
         cross_section_sizes=tuple(sizes),
         rank_deficient_periods=tuple(rank_deficient),

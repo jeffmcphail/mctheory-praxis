@@ -42,6 +42,15 @@ from .panel import Frequency
 TRADING_DAYS_PER_MONTH = 23.0
 """USE3's own figure, stated in the DASTD definition."""
 
+USE4_BETA_WINDOW = 252
+"""USE4's market-model window, in trading days."""
+
+USE4_BETA_HALF_LIFE = 63.0
+"""USE4's market-model half-life, in trading days."""
+
+USE3_BETA_WINDOW_MONTHS = 60.0
+"""USE3's market-model window, in months."""
+
 PRICE_DESCRIPTORS = (
     "LNCAP",
     "LCAPCB",
@@ -257,6 +266,40 @@ def _nan_std(block: np.ndarray, *, ddof: int = 1) -> np.ndarray:
     return out
 
 
+def market_model_window(
+    panel: SecurityPanel,
+    beta_window_months: float | None = None,
+    beta_half_life: float | None = None,
+) -> tuple[int, float | None]:
+    """The market model `compute_descriptors` fits, in the panel's own periods: its window,
+    capped at the panel's length, and its half-life -- None where every period of the window
+    is weighted equally.
+
+    The defaults are USE4's on a daily panel, 252 trading days with a half-life of 63, and
+    USE3's on any other, 60 months weighted equally: USE4's beta is a daily estimator, and a
+    year of monthly returns is too few to fit one on. `beta_window_months` sets the window in
+    its place, converted by `periods_for`; `beta_half_life` the half-life, in the panel's own
+    periods, `math.inf` weighting every period equally.
+    """
+    daily = panel.frequency is Frequency.DAILY
+    if beta_window_months is None:
+        window = USE4_BETA_WINDOW if daily else panel.periods_for(USE3_BETA_WINDOW_MONTHS)
+    else:
+        window = panel.periods_for(beta_window_months)
+    if beta_half_life is None:
+        half_life = USE4_BETA_HALF_LIFE if daily else None
+    elif np.isposinf(beta_half_life):
+        half_life = None
+    elif np.isfinite(beta_half_life) and beta_half_life > 0.0:
+        half_life = float(beta_half_life)
+    else:
+        raise ValueError(
+            f"beta_half_life is a number of periods, so positive -- math.inf for equal "
+            f"weights -- or None for the panel's default; got {beta_half_life!r}"
+        )
+    return min(window, panel.n_periods), half_life
+
+
 def _market_model(
     returns: np.ndarray,
     market: np.ndarray,
@@ -330,7 +373,7 @@ def compute_descriptors(
     market_returns: np.ndarray | None = None,
     risk_free: np.ndarray | None = None,
     names: Sequence[str] | None = None,
-    beta_window_months: float = 60.0,
+    beta_window_months: float | None = None,
     volatility_window_months: float | None = None,
     membership: np.ndarray | None = None,
     min_coverage: float = 0.5,
@@ -371,18 +414,26 @@ def compute_descriptors(
     security's first price read as no momentum and no trading. The market model's own floor of
     three observations, and DASTD's of two, still apply.
 
-    `rstr_skip` is how many of the panel's periods -- trading days on a daily panel -- are
-    excluded from the end of RSTR's twelve-month window. The default, 0, is the definition
-    here: the window's log excess returns summed, the latest included. USE4 skips 21 trading
-    days, so that a month's short-term reversal does not cancel the momentum being measured.
-    The window keeps its length and its start, so RSTR has a value from the same date; the
-    sum covers its earlier periods, and the coverage rule is applied to those.
+    `rstr_skip` is how many of the panel's periods -- trading days on a daily panel -- are cut
+    from the end of RSTR's twelve-month window: the academic twelve-minus-one reading, so that
+    a month's short-term reversal does not cancel the momentum being measured. The window
+    keeps its start, so RSTR has a value from the same date; the sum covers its earlier
+    periods, and the coverage rule is applied to those. The default, 0, cuts nothing. At 21 on
+    the S&P 500 run nothing material moved -- Momentum's mean rose from +2.44% to +3.23% a year
+    at a t of 1.09 -- and R-squared fell 0.0006. USE4's lag is a different reading, a full
+    twelve-month window ending `rstr_skip` periods back; it was measured in midoffice03 and is
+    not built.
 
-    `beta_half_life`, in the panel's own periods -- trading days on a daily panel -- weights
-    the market model behind BTSG, HALPHA, SERDP and VLVR's residual sd: each period's weight
-    halves every `beta_half_life` periods back from the window's end. None, the default,
-    weights every period of the window equally. USE4 estimates beta over 252 trading days
-    with a half-life of 63.
+    **The market model** behind BTSG, HALPHA, SERDP and VLVR's residual sd is USE4's on a
+    daily panel by default: 252 trading days, each period's weight halving every 63 back from
+    the window's end. USE3's 60 months need more days than a five-year daily panel has, so a
+    regression over them fits once, at the last date; the 36 months the S&P 500 run once used
+    instead kept beta, the screen's strongest descriptor, out of 552 of its 938 estimated
+    periods. On a panel of any other frequency the default is USE3's 60 months, weighted
+    equally. `beta_window_months` sets the window in its place, and `beta_half_life` the
+    half-life, in the panel's own periods -- trading days on a daily panel; `math.inf` weights
+    every period equally, by ordinary least squares. `market_model_window` says what a call
+    fits.
     """
     wanted = tuple(names) if names is not None else PRICE_DESCRIPTORS
     unknown = set(wanted) - set(PRICE_DESCRIPTORS)
@@ -407,13 +458,7 @@ def compute_descriptors(
             f"{year}-period window, so at least 0 and fewer than {year}; got {rstr_skip!r}"
         )
     rstr_skip = int(rstr_skip)
-    if beta_half_life is not None and not (
-        np.isfinite(beta_half_life) and beta_half_life > 0.0
-    ):
-        raise ValueError(
-            f"beta_half_life is a number of periods, so positive and finite, or None for "
-            f"equal weights; got {beta_half_life!r}"
-        )
+    beta_window, beta_half_life = market_model_window(panel, beta_window_months, beta_half_life)
 
     n_periods, n_securities = panel.prices.shape
     members = _checked_membership(
@@ -570,9 +615,8 @@ def compute_descriptors(
             for name in sorted(needs_market):
                 skipped[name] = "no market_returns supplied"
         else:
-            window = min(panel.periods_for(beta_window_months), n_periods)
             alpha, beta, residual_sd, residuals = _market_model(
-                returns, market, window, min_coverage, beta_half_life
+                returns, market, beta_window, min_coverage, beta_half_life
             )
             if "HALPHA" in wanted:
                 computed["HALPHA"] = alpha
@@ -651,9 +695,8 @@ def compute_descriptors(
         elif market is None:
             skipped["VLVR"] = "needs market_returns for the residual standard deviation"
         else:
-            window = min(panel.periods_for(beta_window_months), n_periods)
             _, _, residual_sd, _ = _market_model(
-                returns, market, window, min_coverage, beta_half_life
+                returns, market, beta_window, min_coverage, beta_half_life
             )
             months = panel.periods_for(12.0)
             dollar = _rolling(
@@ -695,6 +738,91 @@ def risk_index_members(index: str) -> tuple[str, ...]:
             f"unknown risk index {index!r}; this module covers {sorted(_RISK_INDEX)}"
         )
     return _RISK_INDEX[index]
+
+
+SIZE_NONLINEARITY = ("use4", "use3")
+"""How Size Nonlinearity is built: USE4's way, from the Size exposure, or USE3's, the blend of
+LCAPCB. See `nonlinear_size`."""
+
+
+def _checked_size_nonlinearity(size_nonlinearity: str) -> str:
+    if size_nonlinearity not in SIZE_NONLINEARITY:
+        raise ValueError(
+            f"size_nonlinearity must be one of {SIZE_NONLINEARITY}; got {size_nonlinearity!r}"
+        )
+    return size_nonlinearity
+
+
+def index_descriptors(index: str, size_nonlinearity: str = "use4") -> tuple[str, ...]:
+    """The descriptors a risk index's exposure is built from: Table 8-1's, as
+    `risk_index_members` gives them, except Size Nonlinearity built USE4's way -- a function of
+    the Size exposure, and so of Size's descriptors."""
+    if _checked_size_nonlinearity(size_nonlinearity) == "use4" and index == "Size Nonlinearity":
+        return risk_index_members("Size")
+    return risk_index_members(index)
+
+
+def nonlinear_size(
+    size: np.ndarray,
+    *,
+    cap_weights: np.ndarray | None = None,
+    regression_weights: np.ndarray | None = None,
+    membership: np.ndarray | None = None,
+    bound: float = 4.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """USE4's Size Nonlinearity, date by date, from the Size exposure: the exposure, and a
+    dates-by-securities mask of the values its clip moved.
+
+    The Size exposure is cubed, and the cube treated as any descriptor is but for the raw MAD
+    clip. On a cube that clip binds at |z| of about 1.2 -- the median |z| of a normal, 0.6745,
+    cubed is 0.31, four times 1.4826 times that is 1.82, and 1.82 is the cube of 1.22 -- so it
+    would flatten the tails the cube is there to measure. The cube is standardised instead over
+    the estimation universe -- cap-weighted mean, equal-weighted standard deviation -- and
+    clipped at +/-`bound`. It is then orthogonalised against Size: each date's least-squares
+    fit on Size and a constant, weighted by `regression_weights` over the estimation universe,
+    is taken out, and what is left standardised again, exactly. Its regression-weighted
+    covariance with Size over the estimation universe is then zero to rounding on every date,
+    so the pair no longer splits one size effect between two collinear exposures.
+
+    `membership` is the estimation universe, as everywhere: the members set the moments and
+    the fit, and everyone else with a Size exposure is put on their scale. Without
+    `regression_weights` the fit weighs every security equally.
+    """
+    size = np.asarray(size, dtype=float)
+    n_dates, n_securities = size.shape
+    held = _checked_membership(membership, (n_dates, n_securities), "(dates x securities)")
+    weights = np.ones(size.shape)
+    if regression_weights is not None:
+        weights = np.asarray(regression_weights, dtype=float)
+        if weights.shape != size.shape:
+            raise ValueError(
+                f"regression_weights have shape {weights.shape}, expected {size.shape} "
+                f"(dates x securities)"
+            )
+    standardised = _restandardise(size**3, cap_weights, held)
+    with np.errstate(invalid="ignore"):
+        moved = np.abs(standardised) > bound
+    clipped = np.clip(standardised, -bound, bound)
+    residual = np.full_like(size, np.nan)
+    for t in range(n_dates):
+        present = np.isfinite(size[t]) & np.isfinite(clipped[t])
+        inside = present & np.isfinite(weights[t]) & (weights[t] > 0.0)
+        if held is not None:
+            inside &= held[t]
+        if int(inside.sum()) < 3:
+            continue
+        w = weights[t, inside]
+        x, y = size[t, inside], clipped[t, inside]
+        x_mean = float(np.average(x, weights=w))
+        y_mean = float(np.average(y, weights=w))
+        spread = float(w @ (x - x_mean) ** 2)
+        if spread <= 0.0:
+            continue
+        slope = float(w @ ((x - x_mean) * (y - y_mean))) / spread
+        residual[t, present] = (
+            clipped[t, present] - y_mean - slope * (size[t, present] - x_mean)
+        )
+    return _restandardise(residual, cap_weights, held), moved
 
 
 def _restandardise(
@@ -808,6 +936,8 @@ def build_risk_indices(
     cap_weights: np.ndarray | None = None,
     indices: Iterable[str] | None = None,
     membership: np.ndarray | None = None,
+    size_nonlinearity: str = "use4",
+    regression_weights: np.ndarray | None = None,
 ) -> CharacteristicPanel:
     """Descriptors in, risk indices out: the exposures a cross-sectional model consumes.
 
@@ -821,12 +951,19 @@ def build_risk_indices(
     The result is standardised and drops straight into
     `estimate_cross_sectional_model(..., standardise=False)`. Pass the `membership` the
     descriptors were standardised over, and the estimator the same.
+
+    `size_nonlinearity` says how Size Nonlinearity is built. "use4", the default, builds it
+    from the Size exposure, cubed and orthogonalised against Size -- see `nonlinear_size` --
+    and needs only Size's descriptors; pass the `regression_weights` the model will be
+    estimated with, which the orthogonalisation is weighted by. "use3" blends LCAPCB, USE3's
+    raw cube, which is 0.93 correlated with Size on the S&P 500 run.
     """
     if not panel.standardised:
         raise ValueError(
             "build_risk_indices needs a standardised descriptor panel; call "
             "CharacteristicPanel.standardise first"
         )
+    _checked_size_nonlinearity(size_nonlinearity)
     wanted = list(indices) if indices is not None else list(_RISK_INDEX)
     unknown = set(wanted) - set(_RISK_INDEX)
     if unknown:
@@ -834,27 +971,42 @@ def build_risk_indices(
     available = [
         name
         for name in wanted
-        if any(member in panel.names for member in _RISK_INDEX[name])
+        if any(
+            member in panel.names for member in index_descriptors(name, size_nonlinearity)
+        )
     ]
     if not available:
         raise ValueError(
             "the descriptor panel carries no member of any requested risk index"
         )
-    columns = [
-        blend_to_index(
+
+    def blended(name: str) -> np.ndarray:
+        return blend_to_index(
             panel,
             name,
             weights=None if weights is None else weights.get(name),
             cap_weights=cap_weights,
             membership=membership,
         )
+
+    columns = {
+        name: blended(name)
         for name in available
-    ]
+        if not (name == "Size Nonlinearity" and size_nonlinearity == "use4")
+    }
+    if "Size Nonlinearity" in available and size_nonlinearity == "use4":
+        size = columns["Size"] if "Size" in columns else blended("Size")
+        columns["Size Nonlinearity"], _ = nonlinear_size(
+            size,
+            cap_weights=cap_weights,
+            regression_weights=regression_weights,
+            membership=membership,
+        )
     return CharacteristicPanel(
         dates=panel.dates,
         securities=panel.securities,
         names=tuple(available),
-        values=np.stack(columns, axis=2),
+        values=np.stack([columns[name] for name in available], axis=2),
         frequency=panel.frequency,
         standardised=True,
     )
@@ -865,6 +1017,8 @@ def blend_composition(
     index: str,
     rows: Sequence[int],
     counted: np.ndarray | None = None,
+    *,
+    size_nonlinearity: str = "use4",
 ) -> dict[str, np.ndarray]:
     """Which of a risk index's descriptors its blend drew on, on each of `rows`.
 
@@ -873,10 +1027,14 @@ def blend_composition(
     the market model's three, a long window after the rest. Per descriptor of `index` the panel
     carries, in Table 8-1 order: a boolean per row, True where it holds a value for at least
     one security `counted` there. `counted`, rows by securities, is whose exposures the
-    question is about -- a period's regression, say -- and everyone by default.
+    question is about -- a period's regression, say -- and everyone by default. The
+    descriptors are `index_descriptors`', so Size Nonlinearity built USE4's way, the default,
+    is read as built from Size's.
     """
     rows = [int(row) for row in rows]
-    members = [name for name in risk_index_members(index) if name in panel.names]
+    members = [
+        name for name in index_descriptors(index, size_nonlinearity) if name in panel.names
+    ]
     shape = (len(rows), len(panel.securities))
     if counted is None:
         counted = np.ones(shape, dtype=bool)

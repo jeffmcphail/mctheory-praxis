@@ -79,6 +79,10 @@ DEFAULT_AVERAGE_PERIODS = 3
 MIN_PERIODS = 12
 """Below this there is not enough history to separate a level from a trend in S_t."""
 
+RESIDUAL_SPREADS = ("mad", "sd")
+"""How `relative_residual_sd` is measured across securities: 1.4826 times the median absolute
+deviation from the median, or the standard deviation."""
+
 
 @dataclass(frozen=True)
 class SpecificRiskNotes:
@@ -95,8 +99,13 @@ class SpecificRiskNotes:
     # The securities with the largest shares of the sum of V squared that gamma is fitted to,
     # largest first, at most five: who the fit learns most from.
     v_squared_shares: tuple[tuple[str, float], ...] = ()
-    # Likewise for the square of `relative_residual_sd`, which is v_model in every blend
-    # weight: who sets how far each security's own history is trusted. Not the same list.
+    # How `relative_residual_sd` was measured, and both measures: 1.4826 times the MAD of the
+    # securities' average relative residuals, and their standard deviation.
+    residual_spread: str = "mad"
+    residual_spread_mad: float = float("nan")
+    residual_spread_sd: float = float("nan")
+    # Likewise for the square of the standard deviation: who would set how far each
+    # security's own history is trusted, were the spread measured by it. Not the same list.
     residual_spread_shares: tuple[tuple[str, float], ...] = ()
     relative_r_squared: float = float("nan")
     level_r_squared: float = float("nan")
@@ -390,6 +399,7 @@ def estimate_specific_risk_model(
     deciles: int = 10,
     min_periods: int = MIN_PERIODS,
     annualisation: float = 1.0,
+    residual_spread: str = "mad",
 ) -> SpecificRiskModel:
     """Fit EQ 3-12 to 3-14 from a residual panel and a characteristic panel.
 
@@ -404,7 +414,20 @@ def estimate_specific_risk_model(
     Only cells with a residual take part. S, V and gamma need one by construction; the kappa
     calibration is held to the same cells on both of its sides, so a characteristic row or a
     capitalisation recorded in a period the security was not in the regression moves nothing.
+
+    `residual_spread` says how `relative_residual_sd` -- v_model's root in every blend weight --
+    is measured across the securities' average relative residuals. "mad", the default, is
+    1.4826 times their median absolute deviation from the median, which estimates a standard
+    deviation on normal data and which one security far out barely moves; it falls back to the
+    standard deviation where it is zero. "sd" is the standard deviation, which one security far
+    enough out does set: on the S&P 500 run FRC, collapsing while still in the index, is 72
+    percent of its square, and starting the sample 24 days earlier moved it from 0.361 to 0.281,
+    where the MAD's moved from 0.1333 to 0.1334. The notes carry both.
     """
+    if residual_spread not in RESIDUAL_SPREADS:
+        raise ValueError(
+            f"residual_spread must be one of {RESIDUAL_SPREADS}; got {residual_spread!r}"
+        )
     residuals = np.asarray(residuals, dtype=float)
     characteristics = np.asarray(characteristics, dtype=float)
     securities = tuple(securities)
@@ -486,9 +509,14 @@ def estimate_specific_risk_model(
         if present.any():
             per_security[j] = float(column[present].mean())
     finite = np.isfinite(per_security)
-    relative_residual_sd = (
-        float(np.std(per_security[finite], ddof=1)) if int(finite.sum()) > 1 else float("nan")
-    )
+    spread_sd = spread_mad = float("nan")
+    if int(finite.sum()) > 1:
+        averages = per_security[finite]
+        spread_sd = float(np.std(averages, ddof=1))
+        spread_mad = 1.4826 * float(np.median(np.abs(averages - np.median(averages))))
+        if spread_mad <= 0.0:
+            spread_mad = spread_sd
+    relative_residual_sd = spread_mad if residual_spread == "mad" else spread_sd
     # A standard deviation across securities, so one average far enough out sets it for all of
     # them: FRC, collapsing while still in the index, was 60 percent of its square.
     residual_spread_shares = (
@@ -587,6 +615,9 @@ def estimate_specific_risk_model(
         ),
         gamma={name: float(g) for name, g in zip(names, gamma)},
         v_squared_shares=v_squared_shares,
+        residual_spread=residual_spread,
+        residual_spread_mad=spread_mad,
+        residual_spread_sd=spread_sd,
         residual_spread_shares=residual_spread_shares,
         relative_r_squared=relative_r2,
         level_r_squared=level_r2,

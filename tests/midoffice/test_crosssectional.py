@@ -820,15 +820,20 @@ def test_the_blend_leans_on_the_model_for_a_new_issue_and_on_history_for_an_old_
     blanked = returns.returns.copy()
     blanked[:-4, :3] = np.nan
     thin = ReturnPanel(returns.dates, returns.securities, blanked, returns.frequency)
-    model = _fit(thin, chars, min_securities=20, specific_risk="blend")
+    model = _fit(thin, chars, min_securities=20, specific_risk="blend", residual_spread="sd")
     risk_model = model.notes.specific_risk_model
     assert risk_model is not None
     # Thresholds would be wrong here: the weight depends on how much these particular
     # characteristics explain, and in this fixture they explain a great deal, so the model
-    # keeps real weight even at sixty periods. The claim is the ordering and its size.
+    # keeps real weight even at sixty periods. The claim is the ordering and its size, on the
+    # standard deviation of the residual spread. The MAD, the default, is smaller on this
+    # fixture -- its securities' averages are spread unevenly -- and keeps more on the model.
     assert risk_model.model_weight(4) > 0.75
     assert risk_model.model_weight(4) > 2.0 * risk_model.model_weight(60)
     assert risk_model.model_weight(60) < 0.5
+    by_mad = _fit(thin, chars, min_securities=20, specific_risk="blend")
+    mad_model = by_mad.notes.specific_risk_model
+    assert mad_model.model_weight(4) > mad_model.model_weight(60) > risk_model.model_weight(60)
 
 
 def test_a_useless_characteristic_degrades_the_blend_to_the_historical_estimate():
@@ -873,6 +878,8 @@ def test_an_unknown_specific_risk_method_is_refused():
     returns, chars, _ = _persistent_world()
     with pytest.raises(ValueError, match="'historical', 'model' or 'blend'"):
         _fit(returns, chars, min_securities=20, specific_risk="bayesian")
+    with pytest.raises(ValueError, match="residual_spread"):
+        _fit(returns, chars, min_securities=20, residual_spread="iqr")
 
 
 def test_capitalisations_of_the_wrong_shape_are_refused_by_the_estimator():
@@ -992,7 +999,9 @@ def test_a_blend_says_which_floor_was_hit_the_characteristic_forecasts_or_the_de
     tail = dataclasses.replace(chars, values=values)
     long_history, short_history = returns.securities[:2]
 
-    blended = _fit(panel, tail, min_securities=20, specific_risk="blend")
+    # On the standard deviation of the residual spread, which leaves the model less weight at
+    # 120 periods than the MAD does here: the margin below is the history's.
+    blended = _fit(panel, tail, min_securities=20, specific_risk="blend", residual_spread="sd")
     notes = blended.notes
     floor = notes.specific_risk_model.floor_level(0.1)
     assert notes.floored_specific_risk == (long_history, short_history)
@@ -1117,6 +1126,42 @@ def test_the_regression_universe_counts_only_periods_in_which_a_security_was_a_m
     assert universe == model.notes.regression_universe
     assert set(returns.securities) - set(universe) == set(returns.securities[:2])
     assert regression_universe(panel, chars, min_securities=20, lag=0) == returns.securities
+
+
+def test_a_period_the_caller_rules_out_is_not_estimated_and_is_named_apart_from_the_thin():
+    """`periods` says which periods may be estimated: the S&P 500 run's rule that a factor keep
+    one definition across the sample sets it. A period ruled out is skipped whatever it holds
+    and named among `excluded_periods` -- a thin one stays thin -- and every other period's
+    factor returns are bit for bit those estimated without the rule, no period's regression
+    reading another's. A security regressed only in ruled-out periods leaves the universe, by
+    `regression_universe` and by the estimator alike."""
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60, seed=83)
+    raw = returns.returns.copy()
+    raw[:3, 30:] = np.nan               # the first three periods are thin
+    raw[5:, 39] = np.nan                # S0039 has returns in periods 3 and 4 alone
+    panel = ReturnPanel(returns.dates, returns.securities, raw, returns.frequency)
+    allowed = np.ones(60, dtype=bool)
+    allowed[[1, 3, 4]] = False          # one thin period and two that are not
+    full = _fit(panel, chars, min_securities=35)
+    ruled = _fit(panel, chars, min_securities=35, periods=allowed)
+    assert ruled.notes.thin_periods == full.notes.thin_periods == returns.dates[:3]
+    assert ruled.notes.excluded_periods == returns.dates[3:5]
+    assert full.notes.excluded_periods == ()
+    kept = [k for k, d in enumerate(full.notes.estimated_dates) if d not in returns.dates[3:5]]
+    assert ruled.notes.estimated_dates == tuple(full.notes.estimated_dates[k] for k in kept)
+    assert (
+        ruled.notes.factor_returns.returns.tobytes()
+        == full.notes.factor_returns.returns[kept].tobytes()
+    )
+    universe = regression_universe(panel, chars, min_securities=35, lag=0, periods=allowed)
+    assert universe == ruled.notes.regression_universe
+    assert set(full.notes.regression_universe) - set(universe) == {"S0039"}
+    assert any("the caller's periods ruling them out" in q for q in ruled.qualifications())
+    for bad in (np.ones(59, dtype=bool), np.ones(60)):
+        with pytest.raises(ValueError, match="one entry per return-panel date"):
+            _fit(panel, chars, min_securities=35, periods=bad)
+        with pytest.raises(ValueError, match="one entry per return-panel date"):
+            regression_universe(panel, chars, min_securities=35, lag=0, periods=bad)
 
 
 def test_the_notes_record_each_estimated_period_and_the_size_of_its_regression():

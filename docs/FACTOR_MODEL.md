@@ -414,9 +414,31 @@ read on a blend it was never estimated on. It is in no blend now, so every forec
 built from the descriptors the last estimated period's were, and the run stops if a descriptor
 contributes to a forecast exposure and to no estimated period's. Computing SERDP historically
 waits for a reason to; it has never had a usable period in the screen. The run also prints each
-index's blend over the estimated periods, with the date each descriptor enters: BTSG, HALPHA and
-VLVR only on 2025-04-23, 386 of 938, because the market model's window is 828 trading days -- so
-for the first 552 periods Volatility has no beta.
+index's blend over the estimated periods, with the date each descriptor enters. Under the
+828-day market model the run once used, BTSG, HALPHA and VLVR entered only on 2025-04-23, 386
+of 938 periods, so for the first 552 Volatility had no beta; under USE4's 252 days, the default
+now, every descriptor is in every estimated period, and the run holds each factor to one blend
+across the sample -- see below.
+
+### One definition per factor across the sample
+
+`blend_to_index` averages whichever of an index's descriptors a security has, so an index whose
+blend gains a descriptor partway through the sample is two factors under one name, estimated on
+one and forecast on the other. The run estimates a period only if every risk index's blend in it
+-- over the securities its regression holds -- has exactly the descriptors the forecast's has,
+and afterwards asserts it of every estimated period, by the estimator's own test of who each
+regression held; one that fails stops the run. `estimate_cross_sectional_model` and
+`regression_universe` take the rule as `periods`, one boolean per date: a period ruled out is not
+estimated whatever it holds, and the notes name it apart from the thin ones.
+
+On the S&P 500 run the rule drops 24 periods, 2023-01-04 to 2023-02-07. HALPHA gives Momentum a
+value 24 days before RSTR's twelve-month window fills, so in them Momentum is HALPHA alone,
+Volatility has no CMRA and Trading Activity no STOA or VLVR. The estimation starts on 2023-02-08,
+the same 938 periods as before; each one's factor returns are what they were, bit for bit, and
+the regression universe loses VNO, regressed in the 24 alone. Under the 828-day window the rule
+would leave 386 periods. `--mixed-blends` estimates every period as before; then only a
+descriptor in the forecast exposures and in no estimated period's stops the run, and the periods
+blended otherwise are flagged.
 
 `fit_index_weights` now pairs each descriptor with the next period's return, as the regressions
 read their exposures. Same-day, its Momentum fit on the S&P 500 panel gave RSTR +2.41 and HALPHA
@@ -596,6 +618,19 @@ model, one with a long history gets its own sample estimate, and better characte
 more weight because `relative_residual_sd` is smaller. The blend beats both of its inputs, and
 is the only one of the three that is good in every regime.
 
+`relative_residual_sd` is measured across the securities' average relative residuals, by
+default as 1.4826 times their median absolute deviation from the median -- the scale the
+winsorising clip uses, for the same reason. Measured by their standard deviation, one security
+far enough out sets it for every blend weight: on the S&P 500 run FRC, collapsing while still
+in the index, is 72% of its square, and starting the sample 24 days earlier moved it from 0.361
+to 0.281. The MAD-based spread is 0.1333 on the 938 periods and 0.1334 on the 962. At the
+median history of 938 periods the characteristics' weight in a blended forecast rises from
+0.41% to 2.92%, and the forecasts delivered move by 0.68 points rms, their median from 23.40% to
+23.77%; the largest move is SBNY's, 69.5% to 59.5%. Between the two samples the delivered
+forecasts move by 0.46 points rms under the MAD and 0.81 under the standard deviation.
+`residual_spread="sd"` -- `--residual-spread sd` -- keeps the standard deviation, and the notes
+carry both.
+
 ## Descriptors: building the exposures instead of assuming them
 
 `descriptors.py` implements Appendix A of the US-E3 handbook: the raw measurements underneath
@@ -637,34 +672,74 @@ two phantom identities, lose their only complete row. 0 is still available. The 
 against each descriptor's own inputs counted independently, that no value was computed from an
 empty window or from under the rule's fraction of one.
 
-### Two definitions, measured before anyone chooses them
+### USE3 by default, USE4 where USE3's choice measures badly
 
-**RSTR's skip.** `rstr_skip` excludes that many trading days from the end of RSTR's
-twelve-month window; the window keeps its start, so RSTR has a value from the same date. The
-default, 0, is the definition used everywhere here. USE4 skips 21, so that a month's
-short-term reversal does not cancel the momentum being measured. On the S&P 500 run, skipping
-21 raises Momentum's mean return from +2.44% to +3.23% a year (t 0.81 to 1.09) and moves its
-volatility from 7.16% to 7.11%; mean R-squared falls by 0.0006. Read the other way -- a full
-twelve months ending 21 days back, compared on the same cells -- Momentum's mean goes from
-+1.85% to +1.75%.
+The policy for the definitions: USE3's by default, and USE4's wherever USE3's choice produces a
+measured problem on this panel, each kept switchable.
 
-**The market model's window.** BTSG, HALPHA, SERDP and VLVR's residual sd come from one
-regression on the market: in the run, over 828 trading days (36 months), every day weighted
-equally. `compute_descriptors`' own default, 60 months, is 1,380 days, more than this panel's
-1,214, so it would fit once, on the last date. At 828 days the three blended ones first have
-values on 2025-04-22, so they reach only 386 of the 938 estimated periods: for 552, Volatility
-has no beta, the descriptor the screen ranks first. USE4 estimates beta over 252 trading days
-with a half-life of 63, and `--beta-days 252 --beta-half-life 63` runs that. BTSG and HALPHA then
-have values from 2023-01-03, and VLVR -- held back by its twelve-month dollar volume -- from
-2023-02-07, so all three are in every estimated period. On the default's 938 periods mean
-R-squared rises from 0.2942 to 0.2994 and the Volatility factor's volatility from 7.63% to
-8.63%, while Momentum's falls from 7.16% to 6.57% and Size's from 7.57% to 6.90%. The 252-day
-window does most of it, R-squared +0.0046; the half-life adds +0.0007. BTSG still leads the
-screen. Run as it stands, the shorter window also starts the estimation 24 days earlier,
-because HALPHA alone gives Momentum a value before RSTR's window fills -- so in those 24
-periods Momentum is HALPHA alone, which the run's blend line shows.
+**The market model is USE4's.** BTSG, HALPHA, SERDP and VLVR's residual sd come from one
+regression on the market, and on a daily panel `compute_descriptors` now fits USE4's by
+default -- 252 trading days, each day's weight halving every 63 back from the window's end --
+and the run no longer overrides it. USE3's 60 months are 1,380 days, more than this panel's
+1,214, so they would fit once, on the last date; the 828 days (36 months) the run used instead
+kept the three blended descriptors out of 552 of its 938 estimated periods, beta among them,
+the descriptor the screen ranks first. Under USE4's they have values from 2023-01-03 and VLVR,
+held back by its twelve-month dollar volume, from 2023-02-07, so all three are in every
+estimated period. On those 938 periods mean R-squared rises from 0.2942 to 0.2994 and the
+Volatility factor's volatility from 7.63% to 8.63%, while Momentum's falls from 7.16% to 6.57%
+and Size's from 7.57% to 6.90%; the 252-day window does most of it, the half-life adds +0.0007
+of R-squared. `--beta-window 36 --beta-half-life inf` runs the 828 equally weighted days and
+reproduces the old run bit for bit. On a panel of any other frequency the default stays USE3's
+60 months, equally weighted: USE4's beta is a daily estimator.
 
-Neither default is changed.
+**RSTR's skip stays 0.** `rstr_skip` cuts that many trading days from the end of RSTR's
+twelve-month window -- the academic twelve-minus-one reading; the window keeps its start, so
+RSTR has a value from the same date. On the S&P 500 run, cutting 21 raised Momentum's mean
+return from +2.44% to +3.23% a year (t 0.81 to 1.09) and moved its volatility from 7.16% to
+7.11%, nothing else material, and mean R-squared fell by 0.0006. USE4's lag is the other
+reading, a full twelve months ending 21 days back; compared on the same cells it moved
+Momentum's mean from +1.85% to +1.75%. It is not built.
+
+### Size Nonlinearity, USE4's way
+
+USE3's Size Nonlinearity is LCAPCB, the cube of the standardised log cap, and on the S&P 500 run
+it is 0.933 correlated with Size across the members: the regression splits one size effect
+between two collinear exposures, and their factor returns come out -0.82 correlated. The raw
+clip every descriptor gets makes it worse. On a cube it binds at |z| of about 1.2 -- the median
+|z| of a normal, 0.6745, cubed is 0.31, four times 1.4826 times that is 1.82, the cube of 1.22 --
+and it moved 20% of the members' LCAPCB values, flattening the tails the cube is there to
+measure.
+
+`build_risk_indices` now builds it USE4's way, `size_nonlinearity="use4"` by default: the Size
+exposure cubed; standardised over the estimation universe -- cap-weighted mean,
+equal-weighted standard deviation -- and clipped at +/-4, without the raw clip, which moves 1%
+of member values; orthogonalised against Size, date by date, by a fit on Size and a constant
+weighted by the regression weights over the members; and standardised again, exactly. The run
+checks that on every date an estimated period or the forecast reads, the regression-weighted
+covariance of the two over the members is zero to rounding -- at most 1.0e-15 -- and stops if
+it is not. LCAPCB is still computed and screened, and is in no blend; "use3" builds the raw cube
+as before, bit for bit. On the 938 periods:
+
+| | USE3's raw cube | USE4's | no Size Nonlinearity |
+|---|---|---|---|
+| exposures' correlation, equal-weighted (median date) | +0.933 | +0.551 | |
+| exposures' correlation, by the regression weights (last date) | +0.911 | 0.000 | |
+| factor returns' correlation, in the covariance | -0.824 | -0.308 | |
+| Size: vol, mean a year | 6.90%, +4.69% | 4.03%, +2.86% | 4.03%, +2.89% |
+| Size Nonlinearity: vol, mean, noise share | 6.38%, -2.24%, 18.6% | 2.54%, +0.40%, 41.8% | |
+| Size against no Size Nonlinearity: correlation | 0.7935 | 0.9998 | |
+| the pair's risk, smallest 85 members | 12.16% | 11.94% | 12.52% |
+| the pair's risk, largest 50 members | 3.45% | 0.38% | 0.05% |
+| the pair's risk, the index | 0.01% | 0.01% | 0.01% |
+| mean R-squared | 0.2994 | 0.2981 | 0.2938 |
+
+With the cube orthogonal, Size's factor return is what it is without Size Nonlinearity in the
+model -- their difference has a volatility of 0.06% a year, against 3.8% with the raw cube --
+and the largest 50 members, which hold no size bet to speak of, carry 0.38% of size-pair risk
+where the raw cube gave them 3.45%. What is left of Size Nonlinearity is small and noisy: a
+volatility of 2.54%, 42% of its variance the sampling error of its own estimation. Equally
+weighted the two exposures are still +0.55 correlated; the orthogonality is in the regression's
+weights, which are the ones its fit uses.
 
 ### Two price bases, and the trap between them
 

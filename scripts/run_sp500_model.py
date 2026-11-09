@@ -40,14 +40,18 @@ from praxis.midoffice.model.crosssectional import (  # noqa: E402
     regression_universe,
 )
 from praxis.midoffice.model.descriptors import (  # noqa: E402
+    SIZE_NONLINEARITY,
     TRADING_DAYS_PER_MONTH,
     SecurityPanel,
     blend_composition,
     build_risk_indices,
     compute_descriptors,
+    index_descriptors,
+    market_model_window,
     risk_index_members,
 )
 from praxis.midoffice.model.panel import Frequency, ReturnPanel  # noqa: E402
+from praxis.midoffice.model.specificrisk import RESIDUAL_SPREADS  # noqa: E402
 from praxis.midoffice.refdata import sp500  # noqa: E402
 from praxis.midoffice.refdata.industries import (  # noqa: E402
     build_scheme,
@@ -204,7 +208,7 @@ def window_coverage(
     panel: SecurityPanel,
     descriptors: CharacteristicPanel,
     market: np.ndarray,
-    beta_window_months: float,
+    beta_window: int,
     membership: np.ndarray | None,
     min_coverage: float,
     rstr_skip: int = 0,
@@ -218,8 +222,8 @@ def window_coverage(
     code that computed the descriptors, so a descriptor still summing an empty window shows.
     Each descriptor's inputs are restated here: a return for DASTD, RSTR and CMRA, a return on
     a day the market has one for the market model, a volume for the turnovers, and for VLVR
-    both a dollar volume and the market model's window. RSTR's are the periods it sums: its
-    window less the last `rstr_skip`.
+    both a dollar volume and the market model's window, `beta_window` periods. RSTR's are the
+    periods it sums: its window less the last `rstr_skip`.
     """
     returns = panel.returns()
     has_return = np.isfinite(returns)
@@ -227,7 +231,7 @@ def window_coverage(
     traded = np.isfinite(panel.volumes)
     dollars = np.isfinite(panel.volumes * panel.traded_prices)
     year = panel.periods_for(12.0)
-    beta = min(panel.periods_for(beta_window_months), len(panel.dates))
+    beta = beta_window
     # Each source: what counts as valid, over how many periods, ending how many periods back.
     inputs = {
         "DASTD": [(has_return, panel.periods_for(65.0 / TRADING_DAYS_PER_MONTH), 0)],
@@ -300,6 +304,50 @@ def estimation_moments(
     return means, spreads, bounds, sizes
 
 
+def size_pair_moments(
+    size: np.ndarray,
+    nonlinearity: np.ndarray,
+    weights: np.ndarray | None,
+    caps: np.ndarray,
+    membership: np.ndarray | None,
+    bound: float = 4.0,
+) -> dict[str, np.ndarray]:
+    """Per date, over the estimation universe -- the members with both exposures and, if the
+    regression is weighted, a positive weight: the regression-weighted covariance of the Size
+    and Size Nonlinearity exposures; its first-order rounding bound, n * eps * the weighted
+    mean of |S - S_w| |N - N_w|; their equal-weighted correlation; and how many members' Size
+    exposures, cubed and standardised over the members with one, lie past `bound` -- the
+    values USE4's clip moves. A covariance inside its bound is zero to machine precision.
+
+    Worked out here from the exposures, not taken from the code that built them.
+    """
+    n_dates, n_securities = size.shape
+    eps = np.finfo(float).eps
+    out = {key: np.full(n_dates, np.nan) for key in ("covariance", "bound", "correlation")}
+    out["clipped"] = np.zeros(n_dates, dtype=int)
+    for t in range(n_dates):
+        sized = np.isfinite(size[t])
+        if membership is not None:
+            sized &= membership[t]
+        if int(sized.sum()) > 1:
+            cube = size[t, sized] ** 3
+            w = np.nan_to_num(caps[t, sized], nan=0.0)
+            if w.sum() <= 0.0:
+                w = np.ones(cube.size)
+            z = (cube - np.average(cube, weights=w)) / np.std(cube, ddof=1)
+            out["clipped"][t] = int(np.count_nonzero(np.abs(z) > bound))
+        row = np.ones(n_securities) if weights is None else weights[t]
+        inside = sized & np.isfinite(nonlinearity[t]) & np.isfinite(row) & (row > 0.0)
+        if int(inside.sum()) < 3:
+            continue
+        s, x, w = size[t, inside], nonlinearity[t, inside], row[inside]
+        product = (s - np.average(s, weights=w)) * (x - np.average(x, weights=w))
+        out["covariance"][t] = float(w @ product) / float(w.sum())
+        out["bound"][t] = int(inside.sum()) * eps * float(w @ np.abs(product)) / float(w.sum())
+        out["correlation"][t] = float(np.corrcoef(s, x)[0, 1])
+    return out
+
+
 def index_membership(
     snapshot: sp500.Snapshot, dates: tuple[dt.date, ...], securities: tuple[str, ...]
 ) -> tuple[np.ndarray, list[int]]:
@@ -342,9 +390,10 @@ def unreproduced_changes(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("panel", help="the .npz written by fetch_sp500_panel.py")
-    parser.add_argument("--beta-window", type=float, default=36.0,
-                        help="months of history for BTSG/HALPHA/SERDP (default 36; the "
-                             "USE3 value of 60 needs more days than a 5-year panel has)")
+    parser.add_argument("--beta-window", type=float, default=None,
+                        help="the market model's window in months, in place of the library's "
+                             "default of 252 trading days (USE4's); the USE3 value of 60 needs "
+                             "more days than a 5-year panel has")
     parser.add_argument("--half-life", type=float, default=90.0,
                         help="volatility half-life in trading days (BIM301S uses 90)")
     parser.add_argument("--newey-west-lags", type=int, default=10)
@@ -368,15 +417,31 @@ def main(argv: list[str] | None = None) -> int:
                              "valid data for it to have a value (default 0.5; 0 takes any "
                              "data at all, and an empty window never gives one)")
     parser.add_argument("--rstr-skip", type=int, default=0,
-                        help="trading days excluded from the end of RSTR's twelve-month window "
-                             "(default 0, every day summed; USE4 skips 21)")
+                        help="trading days cut from the end of RSTR's twelve-month window, "
+                             "the academic twelve-minus-one reading (default 0, every day "
+                             "summed)")
     parser.add_argument("--beta-days", type=int, default=None,
-                        help="the market model's window in trading days, in place of "
-                             "--beta-window (USE4 uses 252)")
+                        help="the market model's window in trading days, in place of the "
+                             "library's default and of --beta-window")
     parser.add_argument("--beta-half-life", type=float, default=None,
-                        help="the market model's half-life in trading days (default none: "
-                             "every day of the window weighted equally; USE4 uses 63)")
+                        help="the market model's half-life in trading days, in place of the "
+                             "library's default of 63 (USE4's); inf weights every day of the "
+                             "window equally")
+    parser.add_argument("--size-nonlinearity", choices=SIZE_NONLINEARITY, default="use4",
+                        help="build Size Nonlinearity USE4's way, from the Size exposure, cubed "
+                             "and orthogonalised against Size (the default), or USE3's, the "
+                             "blend of LCAPCB")
+    parser.add_argument("--residual-spread", choices=RESIDUAL_SPREADS, default="mad",
+                        help="how the specific risk model's residual spread, which sets every "
+                             "blend weight, is measured: 1.4826 x the MAD (the default) or the "
+                             "standard deviation")
+    parser.add_argument("--mixed-blends", action="store_true",
+                        help="estimate every period with enough securities, whatever its "
+                             "blends are built from; by default a period is estimated only if "
+                             "every risk index's blend in it has exactly the descriptors the "
+                             "forecast's has")
     args = parser.parse_args(argv)
+    # None leaves the window to the library.
     beta_months = (
         args.beta_window if args.beta_days is None
         else args.beta_days / TRADING_DAYS_PER_MONTH
@@ -457,13 +522,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  RSTR sums its twelve-month window less the last {args.rstr_skip} trading "
               f"day(s)")
     # The window sets the date the market model's descriptors first have a value, and so
-    # when the blends change composition; the half-life how far back a beta remembers.
-    window = min(panel.periods_for(beta_months), len(panel.dates))
+    # when the blends change composition; the half-life how far back a beta remembers. Read
+    # from the library, which is what fitted it.
+    window, half_life = market_model_window(panel, beta_months, args.beta_half_life)
+    given = [f"--{flag} {value:g}" for flag, value in (
+        ("beta-window", args.beta_window), ("beta-days", args.beta_days),
+        ("beta-half-life", args.beta_half_life)) if value is not None]
     print(f"  the market model -- BTSG, HALPHA, SERDP, and VLVR's residual sd -- is a regression "
-          f"on the market over {window} trading days"
-          + ("" if args.beta_days is not None else f" ({args.beta_window:g} months)")
-          + (", every day weighted equally" if args.beta_half_life is None
-             else f", half-life {args.beta_half_life:g} trading days"))
+          f"on the market over {window} trading days, "
+          + ("every day weighted equally" if half_life is None
+             else f"half-life {half_life:g} trading days")
+          + (f" ({', '.join(given)})" if given else " (the library's default, USE4's)"))
 
     # An empty window sums to zero, and RSTR, CMRA and the turnovers once recorded that zero as
     # a value: 18,645 of RSTR's, 4,679 of them on index members and 4,334 of those before the
@@ -471,8 +540,7 @@ def main(argv: list[str] | None = None) -> int:
     # twelve-month RSTR summed over five months is a five-month momentum. Both checked against
     # each descriptor's own inputs, so the check does not share the code it checks.
     coverage = window_coverage(
-        panel, descriptors, market, beta_months, membership, args.min_coverage,
-        args.rstr_skip,
+        panel, descriptors, market, window, membership, args.min_coverage, args.rstr_skip,
     )
     rule = ("any valid observation" if args.min_coverage == 0.0
             else f"at least {args.min_coverage:.0%} of the window valid")
@@ -529,32 +597,78 @@ def main(argv: list[str] | None = None) -> int:
     for row in thin:
         print(f"  {row['name']:<10} {'-':>6} {row['periods']:>8,}   too few usable periods")
 
+    # "Regression Weighting Scheme: Square root of capitalisation" appears on every model
+    # sheet in the Equity Risk Model Reference Guide. Equal weighting lets the smallest,
+    # noisiest names set the factor returns -- there are far more of them, and in a
+    # cap-weighted world almost none of the money. Needed before the risk indices, because
+    # Size Nonlinearity is orthogonalised against Size by them, and before the industries,
+    # because which securities a regression sees depends on them.
+    weights = None if args.equal_weight else np.sqrt(np.where(caps > 0.0, caps, np.nan))
+    return_panel = ReturnPanel(panel.dates, panel.securities, returns, Frequency.DAILY)
+
     print("\nRisk indices")
-    blendable = without(standardised, UNBLENDED)
+    unblended = dict(UNBLENDED)
+    use4_size = args.size_nonlinearity == "use4"
+    if use4_size:
+        unblended["LCAPCB"] = ("USE3's raw cube; Size Nonlinearity is built from the Size "
+                               "exposure instead, USE4's way")
+    blendable = without(standardised, unblended)
     available = [
         name
         for name in ("Volatility", "Momentum", "Size", "Size Nonlinearity",
                      "Trading Activity")
-        if any(m in blendable.names for m in risk_index_members(name))
+        if any(m in blendable.names for m in index_descriptors(name, args.size_nonlinearity))
     ]
     indices = build_risk_indices(
-        blendable, cap_weights=caps, indices=available, membership=membership
+        blendable, cap_weights=caps, indices=available, membership=membership,
+        size_nonlinearity=args.size_nonlinearity, regression_weights=weights,
     )
     style_names = indices.names
     for name in indices.names:
+        if name == "Size Nonlinearity" and use4_size:
+            print(f"  {name:<20} the Size exposure cubed, standardised and clipped at +/-4, "
+                  f"orthogonalised against Size with the regression weights, standardised "
+                  f"again (USE4)")
+            continue
         members = [m for m in risk_index_members(name) if m in blendable.names]
         print(f"  {name:<20} {', '.join(members)}")
-    for name, reason in UNBLENDED.items():
+    for name, reason in unblended.items():
         if name in standardised.names:
             print(f"  - {name} is in no blend: {reason}")
 
-    # "Regression Weighting Scheme: Square root of capitalisation" appears on every model
-    # sheet in the Equity Risk Model Reference Guide. Equal weighting lets the smallest,
-    # noisiest names set the factor returns -- there are far more of them, and in a
-    # cap-weighted world almost none of the money. Needed before the industries, because
-    # which securities a regression sees depends on the weights.
-    weights = None if args.equal_weight else np.sqrt(np.where(caps > 0.0, caps, np.nan))
-    return_panel = ReturnPanel(panel.dates, panel.securities, returns, Frequency.DAILY)
+    # One definition per factor across the sample. blend_to_index averages whichever of an
+    # index's descriptors a security has, so a blend changes composition where one starts or
+    # stops having values, and a factor estimated on one blend and forecast on another is two
+    # factors under one name. So a period is estimated only if every index's blend in it, over
+    # the securities its regression holds, has exactly the descriptors the forecast's has.
+    # Worked out before the industries, whose universe is the estimated periods'.
+    design = regression_design(
+        return_panel, indices, regression_weights=weights, membership=membership
+    )
+    forecast_row = len(panel.dates) - 1
+    complete = np.isfinite(indices.values[forecast_row]).all(axis=1)[None, :]
+    period_rows = np.arange(design.lag, len(panel.dates))
+    unlike: dict[int, list[str]] = {}
+    for name in style_names:
+        read = blend_composition(
+            blendable, name, period_rows - design.lag, design.in_regression[period_rows],
+            size_nonlinearity=args.size_nonlinearity,
+        )
+        wanted = blend_composition(
+            blendable, name, [forecast_row], complete, size_nonlinearity=args.size_nonlinearity
+        )
+        for k, t in enumerate(period_rows):
+            have = [d for d, present in read.items() if present[k]]
+            missing = [d for d, present in wanted.items() if present[0] and not read[d][k]]
+            extra = [d for d in have if not wanted[d][0]]
+            if missing or extra:
+                unlike.setdefault(int(t), []).append(
+                    f"{name} from {', '.join(have) or 'nothing'}"
+                    + (f", without {', '.join(missing)}" if missing else "")
+                    + (f", with {', '.join(extra)} the forecast's lacks" if extra else "")
+                )
+    one_blend = np.array([t >= design.lag and t not in unlike for t in range(len(panel.dates))])
+    periods = None if args.mixed_blends else one_blend
 
     scheme = None
     if args.industries:
@@ -582,7 +696,8 @@ def main(argv: list[str] | None = None) -> int:
         # factor, and counting them let a four-member Unclassified -- one member present in
         # most periods -- past a floor of five.
         universe = regression_universe(
-            return_panel, indices, regression_weights=weights, membership=membership
+            return_panel, indices, regression_weights=weights, membership=membership,
+            periods=periods,
         )
         held = "" if membership is None else " while an index member"
         print(f"  {len(universe)} of {panel.n_securities} securities are in at least one "
@@ -612,6 +727,8 @@ def main(argv: list[str] | None = None) -> int:
         capitalisations=caps,
         regression_weights=weights,
         membership=membership,
+        periods=periods,
+        residual_spread=args.residual_spread,
         # Industries sum to one per security, which IS the unit column. Fitting a market
         # factor alongside them makes the design exactly singular, not nearly so.
         fit_market=scheme is None,
@@ -664,62 +781,90 @@ def main(argv: list[str] | None = None) -> int:
                   f"regression's by {len(differs)} security(ies): "
                   f"{', '.join(sorted(differs)[:5])}")
 
-    # Each risk index's blend, period by period. blend_to_index averages whichever descriptors a
-    # security has, so a blend changes composition when a descriptor starts having values --
-    # BTSG, HALPHA and VLVR a market-model window after the rest. A forecast exposure is read
-    # on the blend its factor was estimated on only if it is built from the same descriptors:
-    # one in the forecast exposures and in no estimated period's -- SERDP, were it blended --
-    # stops the run, and any other difference from the last estimated period's is flagged.
-    forecast_row = len(panel.dates) - 1
+    # Each risk index's blend, period by period, by the estimator's own test of who each
+    # regression held: the rule above, checked on what was estimated. Every estimated period's
+    # blend must be the forecast's -- built from the descriptors the forecast exposures are --
+    # or the run stops. Under --mixed-blends a descriptor in the forecast exposures and in no
+    # estimated period's -- SERDP, were it blended -- still stops it, and the periods blended
+    # otherwise are flagged.
     forecast_held = np.array([code in model.exposures for code in panel.securities])[None, :]
     print(f"  each risk index's blend over the {notes.n_periods} estimated periods: every "
           f"descriptor from the first period whose regression reads it, and in how many")
     stops: list[str] = []
     mismatched: list[str] = []
     for name in style_names:
-        estimated = blend_composition(blendable, name, read_rows, held_in)
-        forecast = blend_composition(blendable, name, [forecast_row], forecast_held)
+        estimated = blend_composition(
+            blendable, name, read_rows, held_in, size_nonlinearity=args.size_nonlinearity
+        )
+        forecast = blend_composition(
+            blendable, name, [forecast_row], forecast_held,
+            size_nonlinearity=args.size_nonlinearity,
+        )
         grouped: dict[str, list[str]] = {}
         starts: dict[str, int] = {}
         for descriptor, present in estimated.items():
-            periods = np.flatnonzero(present)
-            if periods.size:
-                label = f"from {notes.estimated_dates[periods[0]]}"
-                if periods[-1] != present.size - 1:
-                    label += f" to {notes.estimated_dates[periods[-1]]}"
-                label += f" ({periods.size})"
+            where = np.flatnonzero(present)
+            if where.size:
+                label = f"from {notes.estimated_dates[where[0]]}"
+                if where[-1] != present.size - 1:
+                    label += f" to {notes.estimated_dates[where[-1]]}"
+                label += f" ({where.size})"
             else:
                 label = "in none"
             grouped.setdefault(label, []).append(descriptor)
-            starts.setdefault(label, int(periods[0]) if periods.size else present.size)
+            starts.setdefault(label, int(where[0]) if where.size else present.size)
         print(f"    {name:<20} " + "; ".join(
             f"{', '.join(grouped[label])} {label}" for label in sorted(grouped, key=starts.get)
         ))
-        in_forecast = [d for d, present in forecast.items() if present[0]]
-        in_last = [d for d, present in estimated.items() if present[-1]]
-        for descriptor in in_forecast:
-            if not estimated[descriptor].any():
+        for descriptor, present in forecast.items():
+            if present[0] and not estimated[descriptor].any():
                 carried = np.isfinite(
                     blendable.values[forecast_row, :, blendable.names.index(descriptor)]
                 ) & forecast_held[0]
                 stops.append(f"{name}'s {descriptor}, in {int(carried.sum())} securities' "
                              f"forecast exposures and none of the {notes.n_periods} estimated "
                              f"periods'")
-        if in_forecast != in_last:
-            mismatched.append(f"{name}: the forecast exposures are blended from "
-                           f"{', '.join(in_forecast) or 'nothing'} and the last estimated "
-                           f"period's from {', '.join(in_last) or 'nothing'}")
-    for note in mismatched:
-        print(f"  ! {note}")
+        off = np.zeros(notes.n_periods, dtype=bool)
+        for descriptor, present in estimated.items():
+            off |= present != forecast[descriptor][0]
+        if off.any():
+            where = np.flatnonzero(off)
+            mismatched.append(f"{name}: {where.size} of the {notes.n_periods} estimated periods, "
+                              f"from {notes.estimated_dates[where[0]]} to "
+                              f"{notes.estimated_dates[where[-1]]}, are blended from other "
+                              f"descriptors than the forecast exposures")
     if stops:
         raise SystemExit(
             "  the run stops: a descriptor contributes to a forecast exposure and to no "
             "estimated period's, so its factor would be read on a blend it was never estimated "
             "on -- " + "; ".join(stops)
         )
+    if mismatched and periods is not None:
+        raise SystemExit(
+            "  the run stops: an estimated period's blend is not the forecast's, so a factor "
+            "would be estimated on one definition and forecast on another -- "
+            + "; ".join(mismatched)
+        )
+    for note in mismatched:
+        print(f"  ! {note}")
     if not mismatched:
-        print(f"  the forecast exposures, {panel.dates[forecast_row]}'s, are blended from the "
-              f"descriptors the last estimated period's were, in every index")
+        print(f"  every estimated period's blend is the forecast exposures', "
+              f"{panel.dates[forecast_row]}'s, in every index: one definition per factor "
+              f"across the sample")
+    # What the rule left out: the periods that held enough securities to be estimated.
+    if notes.excluded_periods:
+        dropped = [at[d] for d in notes.excluded_periods]
+        print(f"  {len(dropped)} period(s) held enough securities and are not estimated, a "
+              f"risk index's blend in each not being the forecast's:")
+        runs: list[list[int]] = []
+        for t in dropped:
+            if runs and t == runs[-1][-1] + 1 and unlike[t] == unlike[runs[-1][-1]]:
+                runs[-1].append(t)
+            else:
+                runs.append([t])
+        for run in runs:
+            print(f"    {panel.dates[run[0]]} to {panel.dates[run[-1]]} ({len(run)}): "
+                  + "; ".join(unlike[run[0]]))
 
     # The index at zero style exposure, exactly: on every date an estimated period or the
     # forecast reads, the cap-weighted mean of each style exposure over that date's estimation
@@ -753,6 +898,41 @@ def main(argv: list[str] | None = None) -> int:
     for k, name in enumerate(style_names):
         print(f"  {name:<22} {means[-1, k]:>+13.1e} {spreads[-1, k]:>10.6f} "
               f"{sizes[-1, k]:>5}")
+
+    # The size pair. USE3's raw cube is 0.93 correlated with Size, so the regression splits one
+    # size effect between two collinear exposures; USE4's is orthogonal to Size by
+    # construction, and on every date the regression-weighted covariance of the two over the
+    # estimation universe is zero to rounding, or the run stops.
+    if "Size" in style_names and "Size Nonlinearity" in style_names:
+        pair = size_pair_moments(
+            indices.values[checked][:, :, indices.names.index("Size")],
+            indices.values[checked][:, :, indices.names.index("Size Nonlinearity")],
+            None if weights is None else weights[checked],
+            caps[checked],
+            None if membership is None else membership[checked],
+        )
+        last_day = panel.dates[checked[-1]]
+        if use4_size:
+            worst = float(np.nanmax(np.abs(pair["covariance"])))
+            past = np.abs(pair["covariance"]) > pair["bound"]
+            print(f"  Size Nonlinearity, USE4's, on the same dates: its clip at +/-4 moved "
+                  f"{int(pair['clipped'].sum()):,} values of the {universe_label}, "
+                  f"{int(pair['clipped'][-1])} on {last_day}; its regression-weighted covariance "
+                  f"with Size over them is at most {worst:.1e} ({worst / eps:.1f} eps), inside "
+                  f"rounding on {int((~past).sum())} of the {past.size} dates")
+            if past.any():
+                t = int(np.nanargmax(np.where(past, np.abs(pair["covariance"]), -1.0)))
+                raise SystemExit(
+                    f"  the run stops: Size Nonlinearity is not orthogonal to Size on "
+                    f"{int(past.sum())} date(s), so the pair splits one size effect between "
+                    f"them -- the largest covariance, {pair['covariance'][t]:+.2e}, on "
+                    f"{panel.dates[checked[t]]}, against a rounding bound of "
+                    f"{pair['bound'][t]:.1e}"
+                )
+        else:
+            print(f"  Size Nonlinearity, USE3's raw cube, on the same dates: correlated with "
+                  f"Size over the {universe_label} {float(np.nanmedian(pair['correlation'])):+.3f} "
+                  f"at the median, {pair['correlation'][-1]:+.3f} on {last_day}")
 
     # A restriction to members only removes, so the cross-sections shrink and sampling error
     # rises with them; the sizes are where that shows. The index is counted on the date each
@@ -796,19 +976,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"\n  specific risk   median {np.median(specific):.2%}   "
           f"p10 {np.percentile(specific, 10):.2%}   p90 {np.percentile(specific, 90):.2%}")
-    # Who the V fit learns from, and who sets the residual spread -- v_model in every blend
+    # Who the V fit learns from, and what the residual spread is -- v_model in every blend
     # weight, so how far each security's own history is trusted. Not the same names: FRC was
-    # most of the spread and 2 percent of V^2.
+    # most of the standard deviation's square and 2 percent of V^2, which is why the spread is
+    # measured by the MAD unless --residual-spread sd.
     risk_model = notes.specific_risk_model
     if risk_model is not None:
         def named(shares: tuple[tuple[str, float], ...]) -> str:
             return ", ".join(f"{code} {share:.1%}" for code, share in shares)
 
-        print(f"  EQ 3-14's V fit   largest shares of V^2: "
-              f"{named(risk_model.notes.v_squared_shares)}")
-        print(f"  {'':<17} relative residual sd {risk_model.relative_residual_sd:.3f}, "
-              f"largest shares of its square: "
-              f"{named(risk_model.notes.residual_spread_shares)}")
+        spread = risk_model.notes
+        print(f"  EQ 3-14's V fit   largest shares of V^2: {named(spread.v_squared_shares)}")
+        print(f"  {'':<17} relative residual spread {risk_model.relative_residual_sd:.3f}, "
+              + (f"1.4826 x the MAD of the securities' average relative residuals; their sd "
+                 f"{spread.residual_spread_sd:.3f}" if spread.residual_spread == "mad" else
+                 f"the sd of the securities' average relative residuals; 1.4826 x their MAD "
+                 f"{spread.residual_spread_mad:.3f}"))
+        print(f"  {'':<17} largest shares of the sd's square: "
+              f"{named(spread.residual_spread_shares)}")
+        # What the spread is for: the characteristics' weight in a blended forecast, at the
+        # history a security in the regression typically has.
+        history = held_in.sum(axis=0)
+        typical = int(np.median(history[history > 1]))
+        print(f"  {'':<17} the characteristics' weight in a blended forecast, at the median "
+              f"history of {typical} periods: {risk_model.model_weight(typical):.2%}")
 
     qualifications = model.qualifications()
     if qualifications:

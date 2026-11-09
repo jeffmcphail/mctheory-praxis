@@ -14,6 +14,7 @@ method -- rather than as a claimed reproduction of Barra's numbers.
 from __future__ import annotations
 
 import dataclasses
+import math
 import warnings
 from datetime import date
 
@@ -29,6 +30,9 @@ from praxis.midoffice.model.descriptors import (
     build_risk_indices,
     compute_descriptors,
     fit_index_weights,
+    index_descriptors,
+    market_model_window,
+    nonlinear_size,
     risk_index_members,
 )
 from praxis.midoffice.model.panel import Frequency
@@ -132,13 +136,13 @@ def test_rstr_is_the_cumulative_twelve_period_excess_log_return():
 
 
 def test_rstr_can_skip_the_end_of_its_window_and_by_default_skips_nothing():
-    """USE4 excludes the last 21 trading days from RSTR, so that a month's short-term reversal
-    does not cancel the momentum being measured. A skip of k sums the window less its last k
-    periods; 0, the default, sums them all -- the definition before the parameter, bit for bit.
-    The window keeps its start, so the first value falls on the same date, and the coverage
-    rule is applied to the periods summed: S00, with returns in the window's last seven
-    periods alone, covers seven of twelve unskipped and four of the nine summed at a skip of
-    three."""
+    """The academic twelve-minus-one momentum cuts the last month from RSTR's window, so that a
+    month's short-term reversal does not cancel the momentum being measured. A skip of k sums
+    the window less its last k periods; 0, the default, sums them all -- the definition before
+    the parameter, bit for bit. The window keeps its start, so the first value falls on the
+    same date, and the coverage rule is applied to the periods summed: S00, with returns in
+    the window's last seven periods alone, covers seven of twelve unskipped and four of the
+    nine summed at a skip of three."""
     panel, market, _, _ = _panel()
     risk_free = np.full(panel.n_periods, 0.003)
 
@@ -177,12 +181,13 @@ def test_btsg_recovers_beta_times_residual_volatility():
     assert float(np.mean(measured / truth)) == pytest.approx(1.0, abs=0.1)
 
 
-def test_the_market_model_can_be_weighted_by_a_half_life_and_by_default_is_not():
+def test_the_market_model_can_be_weighted_by_a_half_life_and_on_a_monthly_panel_is_not():
     """USE4 estimates beta over 252 trading days with a half-life of 63. Given a half-life, the
     market model is weighted least squares, each period's weight halving every half-life back
     from the window's end, and the residual sd the weighted one, its degrees of freedom taken
     on Kish's effective count -- here against that fit computed independently, on a window
-    with gaps. The default weights every period equally, as before."""
+    with gaps. On a monthly panel the default is USE3's, every period weighted equally, as an
+    infinite half-life asks."""
     panel, market, _, _ = _panel()
     rng = np.random.default_rng(4)
     gaps = rng.random(panel.prices.shape) < 0.1
@@ -192,7 +197,7 @@ def test_the_market_model_can_be_weighted_by_a_half_life_and_by_default_is_not()
     names = ("BTSG", "HALPHA", "SERDP", "VLVR")
     default, _ = compute_descriptors(gapped, market_returns=market, names=names)
     unweighted, _ = compute_descriptors(
-        gapped, market_returns=market, names=names, beta_half_life=None
+        gapped, market_returns=market, names=names, beta_half_life=math.inf
     )
     assert default.values.tobytes() == unweighted.values.tobytes()
     weighted, _ = compute_descriptors(
@@ -217,9 +222,46 @@ def test_the_market_model_can_be_weighted_by_a_half_life_and_by_default_is_not()
     assert not np.allclose(
         weighted.values[t, :, 0], default.values[t, :, 0], equal_nan=True
     )
-    for bad in (0.0, -6.0, float("nan"), float("inf")):
+    for bad in (0.0, -6.0, float("nan"), -math.inf):
         with pytest.raises(ValueError, match="beta_half_life"):
             compute_descriptors(panel, market_returns=market, beta_half_life=bad)
+
+
+def test_on_a_daily_panel_the_market_model_defaults_to_use4s_and_any_other_stays_runnable():
+    """USE3's 60 months need more days than a five-year daily panel has, so on a daily panel
+    the default is USE4's: 252 trading days, half-life 63 -- the same fit as asking for them,
+    bit for bit. A window in months and an infinite half-life still give USE3's equal weights
+    over any window: 36 months on a daily panel is 828 days, capped at the panel's length."""
+    daily, market, _, _ = _panel(n_periods=300, n_secs=12, frequency=Frequency.DAILY)
+    monthly, _, _, _ = _panel()
+    assert market_model_window(daily) == (252, 63.0)
+    assert market_model_window(monthly) == (60, None)
+    assert market_model_window(daily, 36.0, math.inf) == (300, None)
+    assert market_model_window(daily, 10.0, 21.0) == (230, 21.0)
+    assert market_model_window(monthly, None, 6.0) == (60, 6.0)
+    names = ("BTSG", "HALPHA", "SERDP", "VLVR")
+
+    def fitted(**kw):
+        out, _ = compute_descriptors(daily, market_returns=market, names=names, **kw)
+        return out.values
+
+    default = fitted()
+    asked = fitted(beta_window_months=252 / 23.0, beta_half_life=63.0)
+    assert default.tobytes() == asked.tobytes()
+    assert np.isfinite(default[251, :, 0]).all() and np.isnan(default[250, :, 0]).all()
+    equal = fitted(beta_window_months=10.0, beta_half_life=math.inf)
+    returns = daily.returns()
+    t = daily.n_periods - 1
+    x = market[t - 229 : t + 1]
+    for j in range(daily.n_securities):
+        y = returns[t - 229 : t + 1, j]
+        design = np.column_stack([np.ones(x.size), x])
+        (alpha, beta), *_ = np.linalg.lstsq(design, y, rcond=None)
+        error = y - design @ np.array([alpha, beta])
+        sd = np.sqrt(error @ error / (x.size - 2))
+        assert equal[t, j, names.index("HALPHA")] == pytest.approx(alpha, rel=1e-12, abs=1e-15)
+        assert equal[t, j, names.index("BTSG")] == pytest.approx(max(beta, 0.0) * sd, rel=1e-12)
+    assert not np.allclose(equal[t], default[t], equal_nan=True)
 
 
 def test_a_negative_beta_sets_btsg_to_zero_as_the_definition_requires():
@@ -807,6 +849,106 @@ def test_lcapcb_is_the_cube_of_log_cap_normalised_over_the_members():
     loose, _ = compute_descriptors(panel, market_returns=market, names=("LNCAP", "LCAPCB"))
     assert np.array_equal(loose.values[0], out.values[0])
     assert not np.allclose(loose.values[-1, :, 1], out.values[-1, :, 1])
+
+
+def test_size_nonlinearity_is_built_use4s_way_by_default_and_is_orthogonal_to_size():
+    """USE4: the Size exposure cubed; standardised over the members -- cap-weighted mean,
+    equal-weighted sd -- and clipped at +/-4; orthogonalised against Size by a fit on Size and
+    a constant, weighted by the regression weights over the members; standardised again,
+    exactly. Here against that computed independently, an outsider put on the members' scale
+    like everyone else. On every date the members' regression-weighted covariance of the two
+    is zero to rounding, their cap-weighted mean zero and their equal-weighted sd one."""
+    panel, market, members = _leavers()
+    caps = panel.market_capitalisation()
+    weights = np.sqrt(caps)
+    descriptors = compute_descriptors(panel, market_returns=market, membership=members)[
+        0
+    ].standardise(caps, membership=members)
+    indices = build_risk_indices(
+        descriptors, cap_weights=caps, membership=members, regression_weights=weights
+    )
+    size = indices.values[:, :, indices.names.index("Size")]
+    snl = indices.values[:, :, indices.names.index("Size Nonlinearity")]
+    eps = np.finfo(float).eps
+    for t in range(panel.n_periods):
+        inside = members[t] & np.isfinite(size[t])
+        cube = size[t] ** 3
+        z = np.clip(
+            (cube - np.average(cube[inside], weights=caps[t][inside]))
+            / np.std(cube[inside], ddof=1),
+            -4.0,
+            4.0,
+        )
+        w, s = weights[t][inside], size[t][inside]
+        s_mean, z_mean = np.average(s, weights=w), np.average(z[inside], weights=w)
+        slope = (w @ ((s - s_mean) * (z[inside] - z_mean))) / (w @ (s - s_mean) ** 2)
+        e = z - z_mean - slope * (size[t] - s_mean)
+        expected = (e - np.average(e[inside], weights=caps[t][inside])) / np.std(
+            e[inside], ddof=1
+        )
+        assert snl[t] == pytest.approx(expected, rel=1e-9, abs=1e-12), t
+        x = snl[t][inside]
+        product = (s - np.average(s, weights=w)) * (x - np.average(x, weights=w))
+        assert abs(w @ product) <= inside.sum() * eps * (w @ np.abs(product)), t
+        assert abs(np.average(x, weights=caps[t][inside])) < 1e-14, t
+        assert np.std(x, ddof=1) == pytest.approx(1.0, rel=1e-13), t
+
+
+def test_nonlinear_sizes_clip_is_four_sds_of_the_cube_where_four_mads_would_bind_at_1_2():
+    """The raw MAD clip every descriptor gets would bind on a cube at |z| of about 1.2 -- on
+    20,000 normal draws the four-MAD bound on z cubed is the cube of 1.22, and it would move
+    over a fifth of them -- flattening the tails the cube is there to measure. USE4's clip is
+    at +/-4 of the cube standardised: it moves the values past that, and no others."""
+    z = np.random.default_rng(5).normal(size=(1, 20_000))
+    cube = z**3
+    mad = 1.4826 * np.median(np.abs(cube - np.median(cube)))
+    assert (4.0 * mad) ** (1.0 / 3.0) == pytest.approx(1.22, abs=0.02)
+    assert np.mean(np.abs(cube) > 4.0 * mad) > 0.2
+    _, moved = nonlinear_size(z)
+    standardised = (cube - np.average(cube[0], weights=np.ones(z.size))) / np.std(
+        cube[0], ddof=1
+    )
+    assert np.array_equal(moved, np.abs(standardised) > 4.0)
+    assert 0 < moved.sum() < 0.02 * z.size
+
+
+def test_size_nonlinearity_built_use3s_way_is_the_lcapcb_blend_as_before():
+    """size_nonlinearity="use3" is today's raw cube, bit for bit, and needs LCAPCB; "use4"
+    needs Size's descriptors alone, and every other index is the same under both. A blend's
+    composition reads Size Nonlinearity as built from whichever it is built from."""
+    panel, market, _, _ = _panel()
+    caps = panel.market_capitalisation()
+    descriptors = compute_descriptors(panel, market_returns=market)[0].standardise(caps)
+    use3 = build_risk_indices(descriptors, cap_weights=caps, size_nonlinearity="use3")
+    use4 = build_risk_indices(descriptors, cap_weights=caps)
+    k = use3.names.index("Size Nonlinearity")
+    assert use3.names == use4.names
+    old = blend_to_index(descriptors, "Size Nonlinearity", cap_weights=caps)
+    assert use3.values[:, :, k].tobytes() == old.tobytes()
+    assert not np.allclose(use4.values[:, :, k], old, equal_nan=True)
+    rest = [use3.names.index(name) for name in use3.names if name != "Size Nonlinearity"]
+    assert use3.values[:, :, rest].tobytes() == use4.values[:, :, rest].tobytes()
+    keep = [j for j, name in enumerate(descriptors.names) if name != "LCAPCB"]
+    no_cube = dataclasses.replace(
+        descriptors,
+        names=tuple(descriptors.names[j] for j in keep),
+        values=descriptors.values[:, :, keep],
+    )
+    assert "Size Nonlinearity" in build_risk_indices(no_cube, cap_weights=caps).names
+    assert "Size Nonlinearity" not in build_risk_indices(
+        no_cube, cap_weights=caps, size_nonlinearity="use3"
+    ).names
+    assert index_descriptors("Size Nonlinearity") == ("LNCAP",)
+    assert index_descriptors("Size Nonlinearity", "use3") == ("LCAPCB",)
+    assert index_descriptors("Momentum") == risk_index_members("Momentum")
+    rows = np.arange(panel.n_periods)
+    assert list(blend_composition(descriptors, "Size Nonlinearity", rows)) == ["LNCAP"]
+    assert list(
+        blend_composition(descriptors, "Size Nonlinearity", rows, size_nonlinearity="use3")
+    ) == ["LCAPCB"]
+    for bad in ("use5", None):
+        with pytest.raises(ValueError, match="size_nonlinearity"):
+            build_risk_indices(descriptors, size_nonlinearity=bad)
 
 
 def test_fitted_weights_learn_from_the_members_alone():

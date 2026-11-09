@@ -188,7 +188,7 @@ def test_the_blend_approaches_the_sample_estimate_given_enough_history():
 
 def test_the_model_weight_falls_monotonically_with_history():
     model = _fit(_world(seed=1))
-    weights = [model.model_weight(n) for n in (0, 2, 15, 60, 240, 1000)]
+    weights = [model.model_weight(n) for n in (0, 2, 15, 60, 240, 1000, 10_000)]
     assert weights[0] == 1.0
     assert all(a >= b for a, b in zip(weights, weights[1:]))
     assert weights[-1] < 0.1
@@ -405,15 +405,17 @@ def test_the_notes_name_the_securities_the_v_fit_learns_most_from():
 
 
 def test_the_notes_name_the_securities_that_set_the_residual_spread():
-    """relative_residual_sd is v_model in every blend weight, and it is a standard deviation
-    across securities of each one's average relative residual, so one security sitting far
-    enough out sets it for all of them. On the S&P 500 run FRC, collapsing while still in the
-    index, was 60 percent of its square and 2 percent of V squared: the two lists differ, and
-    the one naming the spread is the one the blend answers to."""
+    """relative_residual_sd is v_model in every blend weight. Measured as a standard deviation
+    across securities of each one's average relative residual, one security sitting far enough
+    out sets it for all of them. On the S&P 500 run FRC, collapsing while still in the index,
+    was 60 percent of its square and 2 percent of V squared: the two lists differ, and the one
+    naming the standard deviation's shares is the one a blend under it answers to."""
     returns, securities, characteristics, _, _ = _world(seed=41)
     returns = returns.copy()
     returns[:, 5] *= 6.0                # persistently riskier than its characteristics say
-    model = estimate_specific_risk_model(returns, securities, characteristics, ("Z",))
+    model = estimate_specific_risk_model(
+        returns, securities, characteristics, ("Z",), residual_spread="sd"
+    )
 
     absolute = np.abs(returns)
     relative = absolute / absolute.mean(axis=1)[:, None] - 1.0
@@ -423,9 +425,48 @@ def test_the_notes_name_the_securities_that_set_the_residual_spread():
     largest = np.argsort(-share, kind="stable")[:5]
     named = model.notes.residual_spread_shares
     assert np.std(average, ddof=1) == pytest.approx(model.relative_residual_sd, rel=1e-12)
+    assert model.notes.residual_spread_sd == model.relative_residual_sd
     assert [code for code, _ in named] == [securities[j] for j in largest]
     assert named[0][0] == securities[5]
     assert [s for _, s in named] == pytest.approx([share[j] for j in largest], rel=1e-12)
+
+
+def test_the_residual_spread_is_the_mad_by_default_which_no_one_security_sets():
+    """1.4826 times the median absolute deviation of the securities' average relative
+    residuals from their median: near the standard deviation where nothing is far out, and
+    barely moved by one security persistently six times riskier than its characteristics say,
+    which multiplies the standard deviation -- FRC on the S&P 500 run, 2 percent of V squared
+    and most of the standard deviation's square. Its characteristic is near zero, so it moves
+    gamma little. The notes carry both, and "sd" is the standard deviation, blend weights and
+    all."""
+    returns, securities, characteristics, z, _ = _world(seed=41)
+    loud = returns.copy()
+    loud[:, int(np.argmin(np.abs(z)))] *= 6.0
+
+    def spreads(panel):
+        model = estimate_specific_risk_model(panel, securities, characteristics, ("Z",))
+        return model, model.notes.residual_spread_mad, model.notes.residual_spread_sd
+
+    quiet_model, quiet_mad, quiet_sd = spreads(returns)
+    loud_model, loud_mad, loud_sd = spreads(loud)
+    absolute = np.abs(loud)
+    relative = absolute / absolute.mean(axis=1)[:, None] - 1.0
+    average = (relative - characteristics @ loud_model.gamma).mean(axis=0)
+    mad = 1.4826 * np.median(np.abs(average - np.median(average)))
+    assert loud_model.relative_residual_sd == pytest.approx(mad, rel=1e-12)
+    assert loud_model.notes.residual_spread == "mad"
+    assert quiet_mad == pytest.approx(quiet_sd, rel=0.25)
+    assert abs(loud_mad / quiet_mad - 1.0) < 0.05
+    assert loud_sd / quiet_sd > 3.0
+    by_sd = estimate_specific_risk_model(
+        loud, securities, characteristics, ("Z",), residual_spread="sd"
+    )
+    assert by_sd.relative_residual_sd == loud_sd
+    assert by_sd.model_weight(60) < loud_model.model_weight(60)
+    with pytest.raises(ValueError, match="residual_spread"):
+        estimate_specific_risk_model(
+            loud, securities, characteristics, ("Z",), residual_spread="iqr"
+        )
 
 
 def test_annualisation_scales_the_level_and_therefore_the_forecast():
