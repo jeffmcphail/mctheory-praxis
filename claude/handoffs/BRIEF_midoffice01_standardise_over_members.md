@@ -2,8 +2,7 @@
 
 **Series:** praxis, mid-office (`midofficeNN`, Rule 43 of `claude/CLAUDE_CODE_RULES.md`)
 **Date:** 2026-11-05
-**Source:** Jeff's request in the Claude Code session, transcribed verbatim below. No Chat-written
-brief preceded it; this file records the request as given, so the brief/retro pair exists.
+**Source:** written in Chat and pasted into the Claude Code session; transcribed verbatim below.
 **Retro:** `claude/retros/RETRO_midoffice01_standardise_over_members.md`
 **Builds on:** f72310b (each period's regression held to that day's index members), 17a588d,
 c1275ab, 7cfe835 -- the S&P 500 model work before the `midofficeNN` series, which has no retros.

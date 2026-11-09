@@ -1,7 +1,7 @@
 # Retro: Mid-office 01 -- standardise over index members (the estimation universe)
 
-**Brief:** `claude/handoffs/BRIEF_midoffice01_standardise_over_members.md` -- Jeff's request,
-transcribed verbatim; it was given in the Code session, not as a Chat-written brief
+**Brief:** `claude/handoffs/BRIEF_midoffice01_standardise_over_members.md` -- written in Chat and
+pasted into the Code session, transcribed verbatim
 **Date:** 2026-11-05
 **Duration:** about 45 minutes of implementation and measurement (12:05-12:45 EST by the file
 times), then this retro
