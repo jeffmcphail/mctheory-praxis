@@ -57,6 +57,15 @@ class PolygonError(RuntimeError):
     """A request failed, or returned a status this client will not interpret."""
 
 
+class PolygonNotFoundError(PolygonError):
+    """Polygon knows nothing under the id asked for: an HTTP 404, or a NOT_FOUND status.
+
+    A PolygonError still, so every caller that catches those keeps working. Separate because
+    for one endpoint it is an answer rather than a failure: the ticker events endpoint covers
+    listed securities only, and answers 404 "No events found for given ID" for a delisted one.
+    """
+
+
 _KEY_PARAM = re.compile(r"([?&]apiKey=)[^&\s]*", re.IGNORECASE)
 
 
@@ -69,6 +78,17 @@ def _redact(text: str) -> str:
     which is how a human writes one by hand.  A test of the retry path caught it.
     """
     return _KEY_PARAM.sub(r"\1<redacted>", text)
+
+
+def _not_found_detail(error: urllib.error.HTTPError) -> str:
+    """The server's own message on a 404, when its body is Polygon's JSON -- "No events found
+    for given ID" says something "HTTP 404" does not -- redacted like everything else."""
+    try:
+        body = json.loads(error.read().decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 - no body, or not JSON: the status line is all there is
+        return ""
+    message = body.get("message") or body.get("error") if isinstance(body, dict) else None
+    return f": {_redact(str(message))}" if message else ""
 
 
 class Transport(Protocol):
@@ -93,6 +113,10 @@ class HttpTransport:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as error:
                 # 429 and 5xx are worth retrying; a 401 or 404 will not improve.
+                if error.code == 404:
+                    raise PolygonNotFoundError(
+                        f"HTTP 404 for {_redact(url)}{_not_found_detail(error)}"
+                    ) from None
                 if error.code not in (429, 500, 502, 503, 504):
                     raise PolygonError(
                         f"HTTP {error.code} for {_redact(url)}"
@@ -155,8 +179,8 @@ class PolygonClient:
         if cached is not None and cached.exists():
             return json.loads(cached.read_text(encoding="utf-8"))
 
-        query = "&".join(f"{k}={v}" for k, v in params.items())
-        url = f"{BASE}{path}?{query}&apiKey={self.api_key}"
+        query = "".join(f"{k}={v}&" for k, v in params.items())
+        url = f"{BASE}{path}?{query}apiKey={self.api_key}"
 
         if self.min_interval > 0.0:
             elapsed = time.monotonic() - self._last_call
@@ -166,6 +190,11 @@ class PolygonClient:
         self._last_call = time.monotonic()
 
         status = str(payload.get("status", "")).upper()
+        if status == "NOT_FOUND":
+            raise PolygonNotFoundError(
+                f"status 'NOT_FOUND' for {_redact(url)}: "
+                f"{payload.get('error') or payload.get('message') or 'no detail given'}"
+            )
         if status == "NOT_AUTHORIZED":
             raise PolygonError(
                 f"NOT_AUTHORIZED for {_redact(url)} -- {AUTHORISED_HISTORY_NOTE}"
@@ -231,6 +260,37 @@ class PolygonClient:
             {"date": on.isoformat()},
             cache_key=f"ref-{ticker}-{on}",
         )
+        return payload.get("results") or {}
+
+    def ticker_events(self, identifier: str) -> Mapping | None:
+        """Every ticker a listed security has traded under, with the date each began:
+        `/vX/reference/tickers/{id}/events`, by ticker, CUSIP or composite FIGI.
+
+        The result carries the security's `name`, `composite_figi` and `cik`, and `events`,
+        each `{"type": "ticker_change", "date": ..., "ticker_change": {"ticker": ...}}`. A
+        ticker resolves to whoever holds it now, not to whoever held it on some earlier date.
+
+        None where Polygon has no events for the id, which is its answer for a delisted
+        security -- the endpoint covers listed ones only. That answer is cached as well as a
+        found one, so a rebuild asks each id once and every later run is offline.
+        """
+        cache_key = f"events-{identifier}"
+        cached = self._cache_path(cache_key)
+        if cached is not None and cached.exists():
+            payload = json.loads(cached.read_text(encoding="utf-8"))
+            if str(payload.get("status", "")).upper() == "NOT_FOUND":
+                return None
+            return payload.get("results") or {}
+        try:
+            payload = self._get(
+                f"/vX/reference/tickers/{identifier}/events", {}, cache_key=cache_key
+            )
+        except PolygonNotFoundError as error:
+            if cached is not None:
+                cached.write_text(
+                    json.dumps({"status": "NOT_FOUND", "message": str(error)}), encoding="utf-8"
+                )
+            return None
         return payload.get("results") or {}
 
     def cached_reference_dates(self, ticker: str) -> tuple[dt.date, ...]:

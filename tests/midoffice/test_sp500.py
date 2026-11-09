@@ -251,6 +251,96 @@ def test_overrides_and_footnotes_are_applied():
 # ---------------------------------------------------------------------------
 
 
+def test_a_constituent_list_behind_its_changes_table_is_read_brought_up_to_it():
+    """The 2026-11-04 snapshot's table has OKTA replacing KVUE on 2026-10-30; its list still
+    carries KVUE and not OKTA. Walked back from the list as it stands, KVUE was a member after
+    its removal and OKTA never one. A change the list contradicts in every ticker has not
+    reached it, so the walk starts from the list with it applied -- recorded, not silent --
+    and the change then reverses cleanly."""
+    s = snap(
+        current=["AAA", "KVUE"],
+        changes=[
+            Change(dt.date(2026, 10, 30), added=("OKTA",), removed=("KVUE",)),
+            Change(dt.date(2023, 8, 25), added=("KVUE",), removed=("AAP",)),
+        ],
+        fetched="2026-11-04T03:37:41+00:00",
+    )
+    assert membership(s, dt.date(2026, 10, 30)) == ("AAA", "OKTA")
+    assert membership(s, dt.date(2026, 11, 4)) == ("AAA", "OKTA")
+    assert membership(s, dt.date(2026, 10, 29)) == ("AAA", "KVUE")
+    assert membership(s, dt.date(2023, 8, 25)) == ("AAA", "KVUE")
+    _, issues = intervals(s)
+    assert [i.code for i in issues] == ["current_stale"]
+    assert "2026-10-30" in issues[0].detail and "OKTA" in issues[0].detail
+
+
+def test_a_change_the_list_contradicts_in_only_some_tickers_is_left_to_warn():
+    """One ticker out of place is not lag: here SATS was added and became ECHO, and the list
+    reflects the rest of the change. The list cannot say who SATS became, so nothing is
+    applied, and the walk warns as before. So with a change that only adds."""
+    s = snap(
+        current=["AAA", "ECHO", "COHR"],
+        changes=[
+            Change(dt.date(2026, 3, 23), added=("COHR", "SATS"), removed=("LW", "MOH")),
+            Change(dt.date(2020, 1, 2), added=("AAA",), removed=("OLD",)),
+        ],
+    )
+    _, issues = intervals(s)
+    assert [i.code for i in issues] == ["added_absent"]
+    assert "SATS" not in membership(s, dt.date(2026, 3, 23))
+    one_sided = snap(current=["AAA"], changes=[Change(dt.date(2026, 3, 23), added=("NEW",))])
+    assert [i.code for i in intervals(one_sided)[1]] == ["added_absent"]
+
+
+def test_renames_read_the_changes_table_in_todays_tickers():
+    """EchoStar was added on 2026-03-23 as SATS and has traded as ECHO since 2026-06-24.
+    Without the rename ECHO is a member back to the start of coverage and SATS never one; with
+    it, ECHO is a member from its addition, and the table agrees with itself."""
+    s = snap(
+        current=["AAA", "ECHO"],
+        changes=[
+            Change(dt.date(2026, 3, 23), added=("SATS",), removed=("LW",)),
+            Change(dt.date(2020, 1, 2), added=("AAA",), removed=("OLD",)),
+        ],
+    )
+    assert "ECHO" in membership(s, dt.date(2022, 1, 3))
+    assert "SATS" not in sp500.all_constituents(s)
+    renames = (sp500.Rename(dt.date(2026, 6, 24), "SATS", "ECHO"),)
+    assert membership(s, dt.date(2022, 1, 3), renames=renames) == ("AAA", "LW")
+    assert membership(s, dt.date(2026, 3, 23), renames=renames) == ("AAA", "ECHO")
+    assert not intervals(s, renames)[1]
+    assert not [i for i in validate(s, renames) if i.code == "added_absent"]
+
+
+def test_a_rename_reaches_only_the_rows_inside_the_old_tickers_tenure_and_chains():
+    """A rename takes `old` to `new` in rows dated after the security began trading as `old`
+    -- a row before then names whoever held the ticker earlier -- and before the rename. They
+    chain: FISV became FI and FI became FISV again, so a row naming FISV still names FISV."""
+    s = snap(
+        current=["AAA", "META", "FISV"],
+        changes=[
+            Change(dt.date(2013, 12, 23), added=("FB",), removed=("X1",)),
+            Change(dt.date(2005, 1, 3), added=("FISV",), removed=("FB",)),
+            Change(dt.date(2001, 1, 2), added=("AAA",), removed=("X3",)),
+        ],
+    )
+    renames = (
+        sp500.Rename(dt.date(2022, 6, 9), "FB", "META", since=dt.date(2012, 5, 18)),
+        sp500.Rename(dt.date(2023, 6, 7), "FISV", "FI"),
+        sp500.Rename(dt.date(2025, 11, 11), "FI", "FISV", since=dt.date(2023, 6, 7)),
+    )
+    # The 2005 removal of FB is another FB's, before Meta's began, so it stays FB.
+    assert membership(s, dt.date(2004, 6, 1), renames=renames) == ("AAA", "FB", "X1")
+    assert membership(s, dt.date(2010, 6, 1), renames=renames) == ("AAA", "FISV", "X1")
+    assert membership(s, dt.date(2014, 1, 2), renames=renames) == ("AAA", "FISV", "META")
+    assert not intervals(s, renames)[1]
+    # Without `since` it would be read as Meta's, and Meta a member nine years early.
+    unbounded = (sp500.Rename(dt.date(2022, 6, 9), "FB", "META"),) + renames[1:]
+    assert "META" in membership(s, dt.date(2004, 6, 1), renames=unbounded)
+    with pytest.raises(ValueError, match="change the ticker"):
+        membership(s, dt.date(2014, 1, 2), renames=(sp500.Rename(dt.date(2020, 1, 1), "A", "A"),))
+
+
 def test_inconsistent_source_table_is_reported_not_silently_absorbed():
     s = snap(
         current=["AAA"],

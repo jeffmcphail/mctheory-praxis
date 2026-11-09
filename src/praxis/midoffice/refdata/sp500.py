@@ -112,6 +112,29 @@ class Issue:
 
 
 @dataclass(frozen=True)
+class Rename:
+    """A security that traded as `old` until the day before `date`, and as `new` from it.
+
+    The changes table records each change under the ticker of its day, and the current list
+    is today's tickers, so a member renamed since a change it took part in is two names in the
+    walk back from today: today's ticker, which no change ever adds, and the old one, added
+    without ever being held. EchoStar is the case on the 2026-11-04 snapshot: added on
+    2026-03-23 as SATS, ECHO since 2026-06-24, and so a member back to 1976 as ECHO while SATS
+    is never one. Given the rename, the walk reads the table in today's tickers.
+
+    The table cannot supply renames -- it says nothing about who SATS became -- so they come
+    from outside it, from an identity source such as Polygon's ticker events. `since`, when
+    known, is when the security began trading as `old`: a row naming `old` before then names
+    whoever held the ticker earlier, and is left as it is.
+    """
+
+    date: dt.date
+    old: str
+    new: str
+    since: dt.date | None = None
+
+
+@dataclass(frozen=True)
 class Interval:
     """Membership over the half-open date range [start, end)."""
 
@@ -496,19 +519,114 @@ def load_latest(directory: Path | str) -> Snapshot:
 # ---------------------------------------------------------------------------
 
 
-def intervals(snapshot: Snapshot) -> tuple[tuple[Interval, ...], tuple[Issue, ...]]:
+def _by_old(renames: Sequence[Rename]) -> dict[str, list[Rename]]:
+    by_old: dict[str, list[Rename]] = {}
+    for rename in renames:
+        if rename.old == rename.new:
+            raise ValueError(f"a rename must change the ticker: {rename}")
+        by_old.setdefault(rename.old, []).append(rename)
+    return by_old
+
+
+def _todays(ticker: str, on: dt.date, by_old: Mapping[str, Sequence[Rename]]) -> str:
+    for _ in range(sum(len(v) for v in by_old.values()) + 1):
+        later = [
+            r for r in by_old.get(ticker, ())
+            if on < r.date and (r.since is None or r.since <= on)
+        ]
+        if not later:
+            return ticker
+        step = min(later, key=lambda r: r.date)
+        ticker, on = step.new, step.date
+    raise ValueError(f"the renames chain without end from {ticker!r}")
+
+
+def todays_ticker(ticker: str, on: dt.date, renames: Sequence[Rename]) -> str:
+    """The name that the security trading as `ticker` on `on` trades under today.
+
+    A rename takes `old` to `new` from its date: it applies to a day before that date and, if
+    it says when the security began trading as `old`, on or after then. Renames chain: FISV
+    became FI and FI became FISV again, so FISV in 2020 is still FISV.
+    """
+    return _todays(ticker, on, _by_old(renames))
+
+
+def _read_through(changes: Sequence[Change], renames: Sequence[Rename]) -> tuple[Change, ...]:
+    """The changes, each ticker read as the name its security trades under today
+    (`todays_ticker`, as of the change's date)."""
+    if not renames:
+        return tuple(changes)
+    by_old = _by_old(renames)
+
+    def today(ticker: str, on: dt.date) -> str:
+        return _todays(ticker, on, by_old)
+
+    return tuple(
+        dataclasses.replace(
+            ch,
+            added=tuple(sorted({today(t, ch.date) for t in ch.added})),
+            removed=tuple(sorted({today(t, ch.date) for t in ch.removed})),
+        )
+        for ch in changes
+    )
+
+
+def _caught_up(
+    current: Iterable[str], changes: Sequence[Change], today: dt.date
+) -> tuple[set[str], list[Issue]]:
+    """The current list brought up to the changes table, where the table is ahead of it.
+
+    The list and the table are edited separately, and the list can lag. On the 2026-11-04
+    snapshot the table has OKTA replacing KVUE on 2026-10-30 while the list still carries KVUE
+    and not OKTA, so walked back from the list KVUE is a member after its removal and OKTA
+    never one. A change the list contradicts in every ticker -- each addition absent, each
+    removal present -- has not reached it, and is applied to it here: the newest such changes,
+    stopping at the first the list reflects at all. A change it contradicts in only some
+    tickers is not lag but a rename or a mis-recording, which the list cannot settle; it is
+    left to the walk, which warns. So is a change that only adds or only removes, where an
+    absent addition could as well be a renamed one.
+    """
+    members = set(current)
+    issues: list[Issue] = []
+    for ch in changes:  # descending
+        if ch.date > today:
+            continue  # the walk skips it, and says so
+        if not (ch.added and ch.removed):
+            break
+        if any(t in members for t in ch.added) or any(t not in members for t in ch.removed):
+            break
+        members.difference_update(ch.removed)
+        members.update(ch.added)
+        issues.append(
+            Issue("warning", "current_stale",
+                  f"the constituent list predates the change of {ch.date} -- "
+                  f"{', '.join(ch.added)} added, {', '.join(ch.removed)} removed -- and is "
+                  f"read with it applied")
+        )
+    return members, issues
+
+
+def intervals(
+    snapshot: Snapshot, renames: Sequence[Rename] = ()
+) -> tuple[tuple[Interval, ...], tuple[Issue, ...]]:
     """Reconstruct the full membership history as contiguous half-open intervals.
 
     Returns the intervals ascending by date, plus any anomalies found while walking.  An
     anomaly means the source table disagrees with itself -- reversing a change produced a
     state the change could not have come from.  These are recorded, never swallowed.
+
+    The walk starts from the current list brought up to the table where the table is ahead of
+    it (`_caught_up`), each such change recorded as a `current_stale` warning. `renames`, from
+    outside the snapshot, read the table in today's tickers first (`Rename`); without them a
+    member renamed since it joined is a member back to the start of coverage under its new
+    name, and never one under its old.
     """
-    members = set(snapshot.current)
+    changes = _read_through(snapshot.changes, renames)
+    members, issues = _caught_up(snapshot.current, changes, snapshot.fetched_at.date())
     end = snapshot.fetched_at.date() + dt.timedelta(days=1)  # half-open, so today is included
     out: list[Interval] = []
-    issues: list[Issue] = []
 
-    for ch in snapshot.changes:  # descending
+    for ch in changes:  # descending
         if ch.date >= end:
             issues.append(
                 Issue("warning", "future_change",
@@ -546,8 +664,14 @@ def intervals(snapshot: Snapshot) -> tuple[tuple[Interval, ...], tuple[Issue, ..
     return tuple(out), tuple(issues)
 
 
-def membership(snapshot: Snapshot, as_of: dt.date) -> tuple[str, ...]:
-    """Constituents as at `as_of`. Raises CoverageError outside the snapshot's range."""
+def membership(
+    snapshot: Snapshot, as_of: dt.date, *, renames: Sequence[Rename] = ()
+) -> tuple[str, ...]:
+    """Constituents as at `as_of`. Raises CoverageError outside the snapshot's range.
+
+    `renames` are `intervals`': without them a member renamed since it joined -- EchoStar, as
+    ECHO -- is returned back to the start of coverage.
+    """
     if isinstance(as_of, dt.datetime):
         as_of = as_of.date()
     if not snapshot.covers(as_of):
@@ -556,16 +680,16 @@ def membership(snapshot: Snapshot, as_of: dt.date) -> tuple[str, ...]:
             f"[{snapshot.coverage_start}, {snapshot.coverage_end}]. "
             f"Earlier dates need a source with deeper history; later dates need a newer fetch."
         )
-    for iv in intervals(snapshot)[0]:
+    for iv in intervals(snapshot, renames)[0]:
         if as_of in iv:
             return iv.members
     raise CoverageError(f"{as_of} fell between intervals -- this is a bug, please report")
 
 
-def all_constituents(snapshot: Snapshot) -> tuple[str, ...]:
+def all_constituents(snapshot: Snapshot, renames: Sequence[Rename] = ()) -> tuple[str, ...]:
     """Every ticker that was a member at any point within coverage."""
     seen: set[str] = set()
-    for iv in intervals(snapshot)[0]:
+    for iv in intervals(snapshot, renames)[0]:
         seen.update(iv.members)
     return tuple(sorted(seen))
 
@@ -575,8 +699,10 @@ def all_constituents(snapshot: Snapshot) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
-def validate(snapshot: Snapshot) -> tuple[Issue, ...]:
-    """Structural and plausibility checks. Errors block ingestion; warnings are recorded."""
+def validate(snapshot: Snapshot, renames: Sequence[Rename] = ()) -> tuple[Issue, ...]:
+    """Structural and plausibility checks. Errors block ingestion; warnings are recorded.
+
+    The walk's checks are of the table read through `renames`, if any are given."""
     issues: list[Issue] = []
 
     n = len(snapshot.current)
@@ -632,7 +758,7 @@ def validate(snapshot: Snapshot) -> tuple[Issue, ...]:
                         "character rather than treated as one value.")
             )
 
-    ivs, walk_issues = intervals(snapshot)
+    ivs, walk_issues = intervals(snapshot, renames)
     issues.extend(walk_issues)
 
     # Interval sizes must stay near 500 walking back.  Drift upward is the contamination tell.

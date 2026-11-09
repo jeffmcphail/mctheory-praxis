@@ -24,6 +24,7 @@ from praxis.midoffice.refdata.polygon import (
     HttpTransport,
     PolygonClient,
     PolygonError,
+    PolygonNotFoundError,
     _redact,
     read_api_key,
 )
@@ -568,3 +569,85 @@ def test_the_sample_grid_always_includes_the_final_day():
     assert _sample_slots(10, 4) == [0, 4, 8, 9]   # stride misses the end; it is appended
     assert _sample_slots(1214, 252) == [0, 252, 504, 756, 1008, 1213]
     assert len(_sample_slots(1214, 252)) == 6     # not the 5 that ceil(1214/252) gives
+
+
+# ------------------------------------------------- ticker events: who traded under what, when
+
+
+class EventsTransport:
+    """The ticker events endpoint: a payload for a listed id, a 404 for any other, as the
+    real HttpTransport raises it."""
+
+    def __init__(self, known):
+        self.known = known
+        self.calls: list[str] = []
+
+    def get_json(self, url: str):
+        self.calls.append(url)
+        identifier = url.split("/vX/reference/tickers/")[1].split("/events")[0]
+        if identifier not in self.known:
+            raise PolygonNotFoundError(f"HTTP 404 for {_redact(url)}: No events found for given ID")
+        return {"status": "OK", "results": self.known[identifier]}
+
+
+BNY_EVENTS = {
+    "name": "Bank of New York Mellon Corporation",
+    "composite_figi": "BBG000BD8PN9",
+    "cik": "0001390777",
+    "events": [
+        {"ticker_change": {"ticker": "BNY"}, "type": "ticker_change", "date": "2026-05-21"},
+        {"ticker_change": {"ticker": "BK"}, "type": "ticker_change", "date": "2007-07-02"},
+    ],
+}
+
+
+def test_ticker_events_come_back_parsed_and_are_asked_for_once(tmp_path):
+    transport = EventsTransport({"BNY": BNY_EVENTS})
+    client = PolygonClient(api_key=KEY, transport=transport, cache_dir=tmp_path)
+    found = client.ticker_events("BNY")
+    assert found["composite_figi"] == "BBG000BD8PN9"
+    assert [e["ticker_change"]["ticker"] for e in found["events"]] == ["BNY", "BK"]
+    assert transport.calls[0].split("?")[0].endswith("/vX/reference/tickers/BNY/events")
+    assert client.ticker_events("BNY") == found
+    assert len(transport.calls) == 1
+
+
+def test_no_events_for_a_delisted_security_is_an_answer_and_is_kept(tmp_path):
+    """The endpoint covers listed securities only and answers 404 for any other. That is
+    the answer for a delisted name, not a failure, so it comes back as None -- and is cached,
+    so a rebuild asks once and every later run is offline -- without the key in the file."""
+    transport = EventsTransport({})
+    client = PolygonClient(api_key=KEY, transport=transport, cache_dir=tmp_path)
+    assert client.ticker_events("CDAY") is None
+    assert client.ticker_events("CDAY") is None
+    assert len(transport.calls) == 1
+    kept = (tmp_path / "events-CDAY.json").read_text(encoding="utf-8")
+    assert json.loads(kept)["status"] == "NOT_FOUND"
+    assert KEY not in kept
+
+
+def test_a_404_is_not_found_with_the_servers_reason_and_is_not_retried():
+    """A 404 is PolygonNotFoundError, still a PolygonError for every caller that catches those,
+    and carries the server's message -- "No events found for given ID" says what "HTTP 404"
+    does not -- with the key redacted. It will not improve, so it is asked once."""
+    import io
+    import urllib.request
+
+    attempts = {"n": 0}
+    body = b'{"status": "NOT_FOUND", "message": "No events found for given ID"}'
+
+    def not_found(url, timeout=None):
+        attempts["n"] += 1
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(body))
+
+    original = urllib.request.urlopen
+    try:
+        urllib.request.urlopen = not_found
+        with pytest.raises(PolygonNotFoundError) as caught:
+            HttpTransport(retries=3, backoff=0.0).get_json(f"https://x/y?apiKey={KEY}")
+    finally:
+        urllib.request.urlopen = original
+    assert attempts["n"] == 1
+    assert isinstance(caught.value, PolygonError)
+    assert "No events found for given ID" in str(caught.value)
+    assert KEY not in str(caught.value)
