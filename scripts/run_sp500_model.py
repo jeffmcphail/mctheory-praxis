@@ -348,6 +348,37 @@ def size_pair_moments(
     return out
 
 
+def size_pair_portfolios(
+    model, securities: tuple[str, ...], held: np.ndarray, caps: np.ndarray, names: list[str]
+) -> list[tuple[str, np.ndarray, float]]:
+    """Where the size pair's risk sits, on the forecast date: the smallest 85 of `held` by
+    capitalisation and the largest 50, each equally weighted, and all of `held` cap-weighted,
+    the index. Per portfolio, its mean forecast exposure to each factor in `names` -- Size and
+    Size Nonlinearity, or Size alone -- and their risk together, sqrt(x' S x) over that block
+    of the model's annualised covariance.
+
+    `held` is a boolean per security, `caps` the forecast date's capitalisations.
+    """
+    codes = [code for code, keep in zip(securities, held) if keep]
+    cap_of = dict(zip(securities, caps))
+    by_cap = sorted(codes, key=cap_of.__getitem__)
+    ids = [next(fid for fid in model.factor_ids if model.factor_names[fid] == name)
+           for name in names]
+    rows = [list(model.factor_ids).index(fid) for fid in ids]
+    block = np.asarray(model.covariance.matrix)[np.ix_(rows, rows)]
+    out = []
+    for label, chosen, weights in (
+        ("smallest 85, equally weighted", by_cap[:85], None),
+        ("largest 50, equally weighted", by_cap[-50:], None),
+        ("the index, cap-weighted", codes, np.array([cap_of[code] for code in codes])),
+    ):
+        x = np.array([[model.exposures[code].exposures.get(fid, 0.0) for fid in ids]
+                      for code in chosen])
+        mean = np.average(x, axis=0, weights=weights)
+        out.append((label, mean, float(np.sqrt(mean @ block @ mean))))
+    return out
+
+
 def index_membership(
     snapshot: sp500.Snapshot, dates: tuple[dt.date, ...], securities: tuple[str, ...]
 ) -> tuple[np.ndarray, list[int]]:
@@ -430,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--size-nonlinearity", choices=SIZE_NONLINEARITY, default="use4",
                         help="build Size Nonlinearity USE4's way, from the Size exposure, cubed "
                              "and orthogonalised against Size (the default), or USE3's, the "
-                             "blend of LCAPCB")
+                             "blend of LCAPCB; none leaves it out of the model")
     parser.add_argument("--residual-spread", choices=RESIDUAL_SPREADS, default="mad",
                         help="how the specific risk model's residual spread, which sets every "
                              "blend weight, is measured: 1.4826 x the MAD (the default) or the "
@@ -612,6 +643,9 @@ def main(argv: list[str] | None = None) -> int:
     if use4_size:
         unblended["LCAPCB"] = ("USE3's raw cube; Size Nonlinearity is built from the Size "
                                "exposure instead, USE4's way")
+    if args.size_nonlinearity == "none":
+        unblended["LCAPCB"] = ("USE3's raw cube; Size Nonlinearity is not in the model "
+                               "(--size-nonlinearity none)")
     blendable = without(standardised, unblended)
     available = [
         name
@@ -933,6 +967,29 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  Size Nonlinearity, USE3's raw cube, on the same dates: correlated with "
                   f"Size over the {universe_label} {float(np.nanmedian(pair['correlation'])):+.3f} "
                   f"at the median, {pair['correlation'][-1]:+.3f} on {last_day}")
+
+    # Where the pair's risk sits: in the smallest members, which both exposures reach, and in
+    # the largest, where USE3's raw cube put most of it. The index is at zero in each.
+    if "Size" in style_names:
+        pair_names = [name for name in ("Size", "Size Nonlinearity") if name in style_names]
+        sized = np.array([code in model.exposures for code in panel.securities])
+        sized &= np.isfinite(caps[forecast_row]) & (caps[forecast_row] > 0.0)
+        if membership is not None:
+            sized &= membership[forecast_row]
+        portfolios = size_pair_portfolios(
+            model, panel.securities, sized, caps[forecast_row], pair_names
+        )
+        print(f"\n  The size pair on {panel.dates[forecast_row]}, over the {int(sized.sum())} "
+              f"{universe_label} with a forecast: "
+              + ("each portfolio's mean exposures, and the pair's risk, sqrt(x' S x) over "
+                 "their block of the annualised covariance" if len(pair_names) == 2 else
+                 "Size alone, there being no Size Nonlinearity (--size-nonlinearity none) -- "
+                 "each portfolio's mean exposure, and its risk, sqrt(x' S x) on Size's "
+                 "annualised variance"))
+        print(f"  {'':<32}" + "".join(f" {name:>18}" for name in pair_names) + f" {'risk':>8}")
+        for label, mean, risk in portfolios:
+            print(f"  {label:<32}" + "".join(f" {value:>+18.3f}" for value in mean)
+                  + f" {risk:>8.2%}")
 
     # A restriction to members only removes, so the cross-sections shrink and sampling error
     # rises with them; the sizes are where that shows. The index is counted on the date each

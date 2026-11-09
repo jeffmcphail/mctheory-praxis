@@ -740,9 +740,9 @@ def risk_index_members(index: str) -> tuple[str, ...]:
     return _RISK_INDEX[index]
 
 
-SIZE_NONLINEARITY = ("use4", "use3")
+SIZE_NONLINEARITY = ("use4", "use3", "none")
 """How Size Nonlinearity is built: USE4's way, from the Size exposure, or USE3's, the blend of
-LCAPCB. See `nonlinear_size`."""
+LCAPCB -- see `nonlinear_size` -- or not at all, the model carrying Size alone."""
 
 
 def _checked_size_nonlinearity(size_nonlinearity: str) -> str:
@@ -756,9 +756,12 @@ def _checked_size_nonlinearity(size_nonlinearity: str) -> str:
 def index_descriptors(index: str, size_nonlinearity: str = "use4") -> tuple[str, ...]:
     """The descriptors a risk index's exposure is built from: Table 8-1's, as
     `risk_index_members` gives them, except Size Nonlinearity built USE4's way -- a function of
-    the Size exposure, and so of Size's descriptors."""
-    if _checked_size_nonlinearity(size_nonlinearity) == "use4" and index == "Size Nonlinearity":
+    the Size exposure, and so of Size's descriptors -- or not built, under "none", from none."""
+    how = _checked_size_nonlinearity(size_nonlinearity)
+    if index == "Size Nonlinearity" and how == "use4":
         return risk_index_members("Size")
+    if index == "Size Nonlinearity" and how == "none":
+        return ()
     return risk_index_members(index)
 
 
@@ -956,7 +959,8 @@ def build_risk_indices(
     from the Size exposure, cubed and orthogonalised against Size -- see `nonlinear_size` --
     and needs only Size's descriptors; pass the `regression_weights` the model will be
     estimated with, which the orthogonalisation is weighted by. "use3" blends LCAPCB, USE3's
-    raw cube, which is 0.93 correlated with Size on the S&P 500 run.
+    raw cube, which is 0.93 correlated with Size on the S&P 500 run. "none" builds no Size
+    Nonlinearity: asked for, it is left out like any index with no descriptor in the panel.
     """
     if not panel.standardised:
         raise ValueError(

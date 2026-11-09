@@ -951,6 +951,42 @@ def test_size_nonlinearity_built_use3s_way_is_the_lcapcb_blend_as_before():
             build_risk_indices(descriptors, size_nonlinearity=bad)
 
 
+def test_size_nonlinearity_none_leaves_it_out_and_every_other_index_as_it_was():
+    """size_nonlinearity="none" is the model with Size alone: no Size Nonlinearity built from
+    any descriptor, asked for or not, and every other index bit for bit what "use4" and "use3"
+    build -- so its factor returns are the other two models' less the one factor, and nothing
+    else."""
+    panel, market, members = _leavers()
+    caps = panel.market_capitalisation()
+    weights = np.sqrt(caps)
+    descriptors = compute_descriptors(panel, market_returns=market, membership=members)[
+        0
+    ].standardise(caps, membership=members)
+    kwargs = dict(cap_weights=caps, membership=members, regression_weights=weights)
+    none = build_risk_indices(descriptors, size_nonlinearity="none", **kwargs)
+    asked = build_risk_indices(
+        descriptors,
+        indices=("Size", "Size Nonlinearity", "Momentum"),
+        size_nonlinearity="none",
+        **kwargs,
+    )
+    assert "Size Nonlinearity" not in none.names
+    assert asked.names == ("Size", "Momentum")
+    for how in ("use4", "use3"):
+        built = build_risk_indices(descriptors, size_nonlinearity=how, **kwargs)
+        assert [name for name in built.names if name != "Size Nonlinearity"] == list(none.names)
+        rest = [built.names.index(name) for name in none.names]
+        assert built.values[:, :, rest].tobytes() == none.values.tobytes()
+    assert index_descriptors("Size Nonlinearity", "none") == ()
+    assert index_descriptors("Size", "none") == ("LNCAP",)
+    rows = np.arange(panel.n_periods)
+    assert blend_composition(descriptors, "Size Nonlinearity", rows, size_nonlinearity="none") == {}
+    with pytest.raises(ValueError, match="no member of any requested risk index"):
+        build_risk_indices(
+            descriptors, indices=("Size Nonlinearity",), size_nonlinearity="none", **kwargs
+        )
+
+
 def test_fitted_weights_learn_from_the_members_alone():
     """Membership read on the descriptor's date: holding the fit to members is blanking the
     return of every security that was not a member the period before."""

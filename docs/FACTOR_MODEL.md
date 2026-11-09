@@ -350,10 +350,11 @@ The scale used for the clip is the median absolute deviation, rescaled by 1.4826
 estimates the same quantity as the standard deviation on normal data. MAD is used precisely
 because one extreme value cannot inflate it, which is what lets the clip bite. A second clip
 after standardising is a guard that makes the parameter mean what it says. For the securities
-that set the scale it is nearly always a no-op -- 3,043 of the S&P 500 panel's member values
-over its 1,214 days, nearly half of them in LNCAP's lower tail, where a cap-weighted mean far
-above the median puts the bound inside the raw one. For the securities put on that scale it
-is not; see below.
+that set the scale it is nearly always a no-op -- 4,021 of the S&P 500 panel's member values
+over its 1,214 days, all but nine in a lower tail where a cap-weighted mean above the median
+puts the bound inside the raw one: three quarters of them LNCAP's and VLVR's, whose means sit
+about 1.7 standard deviations above their medians, and most of the rest RSTR's and HALPHA's. For the
+securities put on that scale it is not; see below.
 
 `CharacteristicPanel.winsorised` counts how many raw values moved. A handful means the clip
 did its job; a large fraction means the characteristic itself is wrong -- wrong units, a sign
@@ -376,7 +377,7 @@ members carried a cap-weighted Size exposure of +0.013 on its last day, at a dis
 members, the cap-weighted mean of every style exposure is zero to rounding on every date an
 estimated period or the forecast reads -- at most 2e-16 -- and the run checks it each time.
 
-The outsiders sit in the tails, so many hit a bound: 100,011 of their values over the panel.
+The outsiders sit in the tails, so many hit a bound: 102,179 of their values over the panel.
 `CharacteristicPanel.clipped_outside` counts them, by either bound, since for LNCAP the second
 one binds: 19 of the 45 ex-members with a price on the last day hit it, one of them the raw
 bound too.
@@ -629,7 +630,9 @@ median history of 938 periods the characteristics' weight in a blended forecast 
 23.77%; the largest move is SBNY's, 69.5% to 59.5%. Between the two samples the delivered
 forecasts move by 0.46 points rms under the MAD and 0.81 under the standard deviation.
 `residual_spread="sd"` -- `--residual-spread sd` -- keeps the standard deviation, and the notes
-carry both.
+carry both. The scale is settled (the ruling of 2026-11-09: the standard deviation was FRC's);
+how much weight a security's history should get against the model is a different question, for
+out-of-sample bias statistics to settle.
 
 ## Descriptors: building the exposures instead of assuming them
 
@@ -718,7 +721,8 @@ weighted by the regression weights over the members; and standardised again, exa
 checks that on every date an estimated period or the forecast reads, the regression-weighted
 covariance of the two over the members is zero to rounding -- at most 1.0e-15 -- and stops if
 it is not. LCAPCB is still computed and screened, and is in no blend; "use3" builds the raw cube
-as before, bit for bit. On the 938 periods:
+as before, bit for bit, and "none" leaves Size Nonlinearity out, the model with Size alone --
+the table's third column, bit for bit. On the 938 periods:
 
 | | USE3's raw cube | USE4's | no Size Nonlinearity |
 |---|---|---|---|
@@ -739,7 +743,15 @@ and the largest 50 members, which hold no size bet to speak of, carry 0.38% of s
 where the raw cube gave them 3.45%. What is left of Size Nonlinearity is small and noisy: a
 volatility of 2.54%, 42% of its variance the sampling error of its own estimation. Equally
 weighted the two exposures are still +0.55 correlated; the orthogonality is in the regression's
-weights, which are the ones its fit uses.
+weights, which are the ones its fit uses, and that is the sense intended: it is the inner
+product the regression uses. The run prints the three portfolios' exposures and the pair's risk
+each time.
+
+It stays in the model (the ruling of 2026-11-09). Its 0.0043 of mean R-squared is more than a
+regressor of pure noise adds -- (1 - R-squared) / (n - k - 1), roughly 0.0016 to 0.0026 on about
+450 names, as the weights cut the effective count -- so it carries some signal, if not much.
+Its noise share is Construction's and Wholesale's problem too, and gets one model-wide answer
+after the rebuild rather than a deletion per factor.
 
 ### Two price bases, and the trap between them
 
