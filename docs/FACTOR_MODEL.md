@@ -408,15 +408,22 @@ lagged. But Momentum's exposure moves nearly four times as far with the day's re
 +0.38 correlated with Size, so in the joint regression it takes the look-ahead and over-corrects
 Size: +0.05% a year same-day, +4.9% lagged.
 
-SERDP exists at the last date alone, so under the lag it enters no regression, only the
-forecast Volatility exposure, where it moves the members' exposures by 0.27 rms; the run flags
-it. BTSG, HALPHA and VLVR reach the estimated periods only from 2025-04-23, 386 of 938, so the
-blends change composition inside the window too.
+SERDP exists at the last date alone, so under the lag it could enter no regression, only the
+forecast Volatility exposure -- where it moved the members' exposures by 0.27 rms, the factor
+read on a blend it was never estimated on. It is in no blend now, so every forecast exposure is
+built from the descriptors the last estimated period's were, and the run stops if a descriptor
+contributes to a forecast exposure and to no estimated period's. Computing SERDP historically
+waits for a reason to; it has never had a usable period in the screen. The run also prints each
+index's blend over the estimated periods, with the date each descriptor enters: BTSG, HALPHA and
+VLVR only on 2025-04-23, 386 of 938, because the market model's window is 828 trading days -- so
+for the first 552 periods Volatility has no beta.
 
-`fit_index_weights` pools every period's returns into one regression, each descriptor paired
-with the same day's return: in-sample weight selection, and same-day look-ahead besides. The run
-script does not call it -- its blends are equal-weighted -- and the look-ahead test holds fitted
-weights fixed for that reason.
+`fit_index_weights` now pairs each descriptor with the next period's return, as the regressions
+read their exposures. Same-day, its Momentum fit on the S&P 500 panel gave RSTR +2.41 and HALPHA
+-1.41; lagged, -0.63 and +1.63. It still pools every period's returns into one regression:
+whole-sample weight selection, look-ahead for every period but the last, which its docstring
+says and the look-ahead test's third case records. The run script does not call it -- its blends
+are equal-weighted -- and the look-ahead test holds fitted weights fixed for that reason.
 
 ### Weights: two different arrays, easily confused
 
@@ -619,12 +626,45 @@ RSTR, CMRA and the turnovers sum over their windows, and a sum over an empty win
 Every day before a security's first price -- a current ticker carried back to before it traded
 -- read as no momentum and no trading: 94,882 values on the S&P 500 panel, 10,965 of them on
 index members. The window descriptors are now missing wherever their window holds no valid
-observation, and `min_coverage` extends that to windows holding less than a given fraction of
-valid data. Its default, 0, changes the empty case alone -- on the S&P 500 panel those 94,882
-zeros, checked value by value, and nothing else -- and the run reports what a 50% rule would
-remove (29,506 values, 7,086 on members) without applying it. It also checks, against each
-descriptor's own inputs counted independently, that no value was computed from an empty window.
-The model barely moves: mean R-squared by -0.0001, the Volatility factor's volatility by 1.6%.
+observation, which on the S&P 500 panel changed those 94,882 zeros, checked value by value, and
+nothing else; the model barely moved, mean R-squared by -0.0001.
+
+`min_coverage` extends that to windows holding less than a given fraction of valid data, and
+its default is 0.5: a twelve-month descriptor computed from under six months of its window is
+not that descriptor. On the S&P 500 panel the rule removes 29,506 values, 7,086 of them on
+members, for mean R-squared +0.000014 and Trading Activity's volatility -5.9%; ECHO and VMRK,
+two phantom identities, lose their only complete row. 0 is still available. The run checks,
+against each descriptor's own inputs counted independently, that no value was computed from an
+empty window or from under the rule's fraction of one.
+
+### Two definitions, measured before anyone chooses them
+
+**RSTR's skip.** `rstr_skip` excludes that many trading days from the end of RSTR's
+twelve-month window; the window keeps its start, so RSTR has a value from the same date. The
+default, 0, is the definition used everywhere here. USE4 skips 21, so that a month's
+short-term reversal does not cancel the momentum being measured. On the S&P 500 run, skipping
+21 raises Momentum's mean return from +2.44% to +3.23% a year (t 0.81 to 1.09) and moves its
+volatility from 7.16% to 7.11%; mean R-squared falls by 0.0006. Read the other way -- a full
+twelve months ending 21 days back, compared on the same cells -- Momentum's mean goes from
++1.85% to +1.75%.
+
+**The market model's window.** BTSG, HALPHA, SERDP and VLVR's residual sd come from one
+regression on the market: in the run, over 828 trading days (36 months), every day weighted
+equally. `compute_descriptors`' own default, 60 months, is 1,380 days, more than this panel's
+1,214, so it would fit once, on the last date. At 828 days the three blended ones first have
+values on 2025-04-22, so they reach only 386 of the 938 estimated periods: for 552, Volatility
+has no beta, the descriptor the screen ranks first. USE4 estimates beta over 252 trading days
+with a half-life of 63, and `--beta-days 252 --beta-half-life 63` runs that. BTSG and HALPHA then
+have values from 2023-01-03, and VLVR -- held back by its twelve-month dollar volume -- from
+2023-02-07, so all three are in every estimated period. On the default's 938 periods mean
+R-squared rises from 0.2942 to 0.2994 and the Volatility factor's volatility from 7.63% to
+8.63%, while Momentum's falls from 7.16% to 6.57% and Size's from 7.57% to 6.90%. The 252-day
+window does most of it, R-squared +0.0046; the half-life adds +0.0007. BTSG still leads the
+screen. Run as it stands, the shorter window also starts the estimation 24 days earlier,
+because HALPHA alone gives Momentum a value before RSTR's window fills -- so in those 24
+periods Momentum is HALPHA alone, which the run's blend line shows.
+
+Neither default is changed.
 
 ### Two price bases, and the trap between them
 
@@ -646,6 +686,16 @@ This is not hypothetical. Polygon's own `market_cap` field makes exactly this mi
 split boundary: for AAPL at 2020-06-30 it reports $5.99tn, which is the unadjusted pre-split
 price of $364.80 multiplied by the *post-split* share count of 16.4bn. Four times the true
 figure, from mixing two bases in one product.
+
+The panel's own share counts make the same mistake for a while after every split. They are
+sampled every 63 trading days and carried forward, so until the next sample the capitalisation
+pairs a post-split price with a pre-split count: 896 security-days on the S&P 500 panel, 621 of
+them member-days an estimated period reads (AVGO, NVDA, CMG and 23 more splits). For the
+rebuild, not yet done: a share count must change on its split's execution date, taken from the
+split events rather than the price adjustment factor -- DD's steps of 2.39 and 0.33 are not
+split ratios, so that factor carries other actions too; each split applied must be checked
+against the next share sample, with any that disagree flagged; and a guard must find no
+member-day pairing a post-split price with a pre-split count.
 
 ### A frequency mismatch worth naming
 

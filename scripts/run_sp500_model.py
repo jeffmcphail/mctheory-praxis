@@ -20,6 +20,7 @@ The t-statistic is reported third, as information about returns rather than risk
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import sys
 from pathlib import Path
@@ -41,6 +42,7 @@ from praxis.midoffice.model.crosssectional import (  # noqa: E402
 from praxis.midoffice.model.descriptors import (  # noqa: E402
     TRADING_DAYS_PER_MONTH,
     SecurityPanel,
+    blend_composition,
     build_risk_indices,
     compute_descriptors,
     risk_index_members,
@@ -57,6 +59,23 @@ from praxis.midoffice.refdata.polygon import (  # noqa: E402
     PolygonError,
     read_api_key,
 )
+
+UNBLENDED = {
+    "SERDP": "its residual series is kept for the last window alone, so it has a value on the "
+             "last date and no other; no estimated period reads it, and blended it would enter "
+             "the forecast exposures alone",
+}
+"""Descriptors computed, screened and reported, and kept out of every blend, with why. A
+forecast exposure must be built from the descriptors the factor was estimated on. Computing
+SERDP historically waits for a reason to; it has never had a usable period in the screen."""
+
+
+def without(panel: CharacteristicPanel, names) -> CharacteristicPanel:
+    """`panel` less the named characteristics."""
+    keep = [k for k, name in enumerate(panel.names) if name not in names]
+    return dataclasses.replace(
+        panel, names=tuple(panel.names[k] for k in keep), values=panel.values[:, :, keep]
+    )
 
 
 def load_panel(path: Path) -> tuple[SecurityPanel, np.ndarray]:
@@ -187,16 +206,20 @@ def window_coverage(
     market: np.ndarray,
     beta_window_months: float,
     membership: np.ndarray | None,
-) -> list[tuple[str, int, int, int, int]]:
+    min_coverage: float,
+    rstr_skip: int = 0,
+) -> list[tuple[str, int, int, int, int, int]]:
     """Per window descriptor: its values, how many were computed from a window holding no
-    valid observation -- which must be none -- and how many from under half their window, all
-    of them and on index members that day.
+    valid observation and how many from under `min_coverage` of it -- both of which must be
+    none -- and how many from under half their window, all of them and on index members that
+    day.
 
     Worked out from the panel's own prices, volumes and market series, not taken from the
     code that computed the descriptors, so a descriptor still summing an empty window shows.
     Each descriptor's inputs are restated here: a return for DASTD, RSTR and CMRA, a return on
     a day the market has one for the market model, a volume for the turnovers, and for VLVR
-    both a dollar volume and the market model's window.
+    both a dollar volume and the market model's window. RSTR's are the periods it sums: its
+    window less the last `rstr_skip`.
     """
     returns = panel.returns()
     has_return = np.isfinite(returns)
@@ -205,17 +228,18 @@ def window_coverage(
     dollars = np.isfinite(panel.volumes * panel.traded_prices)
     year = panel.periods_for(12.0)
     beta = min(panel.periods_for(beta_window_months), len(panel.dates))
+    # Each source: what counts as valid, over how many periods, ending how many periods back.
     inputs = {
-        "DASTD": [(has_return, panel.periods_for(65.0 / TRADING_DAYS_PER_MONTH))],
-        "RSTR": [(has_return, year)],
-        "CMRA": [(has_return, year)],
-        "BTSG": [(paired, beta)],
-        "HALPHA": [(paired, beta)],
-        "SERDP": [(paired, beta)],
-        "STOM": [(traded, panel.periods_for(1.0))],
-        "STOQ": [(traded, panel.periods_for(3.0))],
-        "STOA": [(traded, year)],
-        "VLVR": [(dollars, year), (paired, beta)],
+        "DASTD": [(has_return, panel.periods_for(65.0 / TRADING_DAYS_PER_MONTH), 0)],
+        "RSTR": [(has_return, year - rstr_skip, rstr_skip)],
+        "CMRA": [(has_return, year, 0)],
+        "BTSG": [(paired, beta, 0)],
+        "HALPHA": [(paired, beta, 0)],
+        "SERDP": [(paired, beta, 0)],
+        "STOM": [(traded, panel.periods_for(1.0), 0)],
+        "STOQ": [(traded, panel.periods_for(3.0), 0)],
+        "STOA": [(traded, year, 0)],
+        "VLVR": [(dollars, year, 0), (paired, beta, 0)],
     }
     out = []
     for name, sources in inputs.items():
@@ -224,14 +248,18 @@ def window_coverage(
         values = np.isfinite(descriptors.values[:, :, descriptors.names.index(name)])
         empty = np.zeros(values.shape, dtype=bool)
         coverage = np.ones(values.shape)
-        for valid, window in sources:
+        for valid, window, back in sources:
             counts = trailing_counts(valid, window)
+            if back:
+                counts = np.concatenate([np.full((back, counts.shape[1]), -1), counts[:-back]])
             empty |= counts == 0
             coverage = np.minimum(coverage, np.where(counts > 0, counts / window, 1.0))
+        below = int((values & ~empty & (coverage < min_coverage)).sum())
         thin = values & ~empty & (coverage < 0.5)
         on_members = int((thin & membership).sum()) if membership is not None else 0
         out.append(
-            (name, int(values.sum()), int((values & empty).sum()), int(thin.sum()), on_members)
+            (name, int(values.sum()), int((values & empty).sum()), below, int(thin.sum()),
+             on_members)
         )
     return out
 
@@ -335,11 +363,24 @@ def main(argv: list[str] | None = None) -> int:
                              "the newest snapshot in --snapshots; without it every panel "
                              "security with data is regressed")
     parser.add_argument("--snapshots", default="data/external/sp500")
-    parser.add_argument("--min-coverage", type=float, default=0.0,
+    parser.add_argument("--min-coverage", type=float, default=0.5,
                         help="the fraction of a window descriptor's window that must hold "
-                             "valid data for it to have a value (default 0: any data at all; "
-                             "an empty window never gives one)")
+                             "valid data for it to have a value (default 0.5; 0 takes any "
+                             "data at all, and an empty window never gives one)")
+    parser.add_argument("--rstr-skip", type=int, default=0,
+                        help="trading days excluded from the end of RSTR's twelve-month window "
+                             "(default 0, every day summed; USE4 skips 21)")
+    parser.add_argument("--beta-days", type=int, default=None,
+                        help="the market model's window in trading days, in place of "
+                             "--beta-window (USE4 uses 252)")
+    parser.add_argument("--beta-half-life", type=float, default=None,
+                        help="the market model's half-life in trading days (default none: "
+                             "every day of the window weighted equally; USE4 uses 63)")
     args = parser.parse_args(argv)
+    beta_months = (
+        args.beta_window if args.beta_days is None
+        else args.beta_days / TRADING_DAYS_PER_MONTH
+    )
 
     path = Path(args.panel)
     if not path.exists():
@@ -403,33 +444,59 @@ def main(argv: list[str] | None = None) -> int:
     descriptors, skipped = compute_descriptors(
         panel,
         market_returns=market,
-        beta_window_months=args.beta_window,
+        beta_window_months=beta_months,
         membership=membership,
         min_coverage=args.min_coverage,
+        rstr_skip=args.rstr_skip,
+        beta_half_life=args.beta_half_life,
     )
     print(f"  computed {len(descriptors.names)}: {', '.join(descriptors.names)}")
     for name, reason in sorted(skipped.items()):
         print(f"  - {name}: {reason}")
+    if args.rstr_skip:
+        print(f"  RSTR sums its twelve-month window less the last {args.rstr_skip} trading "
+              f"day(s)")
+    # The window sets the date the market model's descriptors first have a value, and so
+    # when the blends change composition; the half-life how far back a beta remembers.
+    window = min(panel.periods_for(beta_months), len(panel.dates))
+    print(f"  the market model -- BTSG, HALPHA, SERDP, and VLVR's residual sd -- is a regression "
+          f"on the market over {window} trading days"
+          + ("" if args.beta_days is not None else f" ({args.beta_window:g} months)")
+          + (", every day weighted equally" if args.beta_half_life is None
+             else f", half-life {args.beta_half_life:g} trading days"))
 
     # An empty window sums to zero, and RSTR, CMRA and the turnovers once recorded that zero as
     # a value: 18,645 of RSTR's, 4,679 of them on index members and 4,334 of those before the
-    # security's first price. Checked against each descriptor's own inputs, so the check does
-    # not share the code it checks.
-    coverage = window_coverage(panel, descriptors, market, args.beta_window, membership)
+    # security's first price. A window under half full is not the descriptor it is named: a
+    # twelve-month RSTR summed over five months is a five-month momentum. Both checked against
+    # each descriptor's own inputs, so the check does not share the code it checks.
+    coverage = window_coverage(
+        panel, descriptors, market, beta_months, membership, args.min_coverage,
+        args.rstr_skip,
+    )
     rule = ("any valid observation" if args.min_coverage == 0.0
             else f"at least {args.min_coverage:.0%} of the window valid")
-    empty = [(name, bad) for name, _, bad, _, _ in coverage if bad]
-    print(f"  window descriptors need {rule}; from a window with none, over "
-          f"{sum(n for _, n, _, _, _ in coverage):,} values: "
-          f"{'none' if not empty else sum(bad for _, bad in empty)}")
+    empty = [(row[0], row[2]) for row in coverage if row[2]]
+    below = [(row[0], row[3]) for row in coverage if row[3]]
+    report = (f"  window descriptors need {rule}; from a window with none, over "
+              f"{sum(row[1] for row in coverage):,} values: "
+              f"{'none' if not empty else sum(bad for _, bad in empty)}")
+    if args.min_coverage > 0.0:
+        report += (f"; from one under {args.min_coverage:.0%} valid: "
+                   f"{'none' if not below else sum(bad for _, bad in below)}")
+    print(report)
     for name, bad in empty:
         print(f"  ! {name}: {bad:,} values computed from a window holding no valid observation")
-    print(f"  from under half their window, which a 50% rule would remove "
-          f"({'all/on members' if membership is not None else 'all'}):")
-    cells = [f"{name} {thin:,}" + (f"/{members:,}" if membership is not None else "")
-             for name, _, _, thin, members in coverage]
-    for i in range(0, len(cells), 5):
-        print(f"    {'  '.join(cells[i:i + 5])}")
+    for name, bad in below:
+        print(f"  ! {name}: {bad:,} values computed from under {args.min_coverage:.0%} of "
+              f"their window")
+    if args.min_coverage < 0.5:
+        print(f"  from under half their window, which a 50% rule would remove "
+              f"({'all/on members' if membership is not None else 'all'}):")
+        cells = [f"{row[0]} {row[4]:,}" + (f"/{row[5]:,}" if membership is not None else "")
+                 for row in coverage]
+        for i in range(0, len(cells), 5):
+            print(f"    {'  '.join(cells[i:i + 5])}")
 
     caps = panel.market_capitalisation()
     # Over the estimation universe: the members set each day's clip bounds, cap-weighted mean
@@ -463,19 +530,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {row['name']:<10} {'-':>6} {row['periods']:>8,}   too few usable periods")
 
     print("\nRisk indices")
+    blendable = without(standardised, UNBLENDED)
     available = [
         name
         for name in ("Volatility", "Momentum", "Size", "Size Nonlinearity",
                      "Trading Activity")
-        if any(m in standardised.names for m in risk_index_members(name))
+        if any(m in blendable.names for m in risk_index_members(name))
     ]
     indices = build_risk_indices(
-        standardised, cap_weights=caps, indices=available, membership=membership
+        blendable, cap_weights=caps, indices=available, membership=membership
     )
     style_names = indices.names
     for name in indices.names:
-        members = [m for m in risk_index_members(name) if m in standardised.names]
+        members = [m for m in risk_index_members(name) if m in blendable.names]
         print(f"  {name:<20} {', '.join(members)}")
+    for name, reason in UNBLENDED.items():
+        if name in standardised.names:
+            print(f"  - {name} is in no blend: {reason}")
 
     # "Regression Weighting Scheme: Square root of capitalisation" appears on every model
     # sheet in the Equity Risk Model Reference Guide. Equal weighting lets the smallest,
@@ -564,15 +635,16 @@ def main(argv: list[str] | None = None) -> int:
     estimated_rows = [at[d] for d in notes.estimated_dates]
     # The dates the estimated periods read their exposures, weights and membership from.
     read_rows = [row - notes.lag for row in estimated_rows]
+    # Who each estimated period's regression held, by the estimator's own test of entry.
+    held_in = regression_design(
+        return_panel, indices, regression_weights=weights, membership=membership,
+        lag=notes.lag,
+    ).in_regression[estimated_rows]
     if membership is not None:
         # Read with the exposures, so a name is in the regression on the day it leaves the
         # index and out of it on the day it joins.
         unheld = regression_design(
             return_panel, indices, regression_weights=weights, lag=notes.lag
-        ).in_regression[estimated_rows]
-        held_in = regression_design(
-            return_panel, indices, regression_weights=weights, membership=membership,
-            lag=notes.lag,
         ).in_regression[estimated_rows]
         same_day = unheld & membership[estimated_rows]
         mask_moves = int((membership[read_rows] != membership[estimated_rows]).sum())
@@ -592,23 +664,62 @@ def main(argv: list[str] | None = None) -> int:
                   f"regression's by {len(differs)} security(ies): "
                   f"{', '.join(sorted(differs)[:5])}")
 
-    # A blend is read the way its factor was estimated only if the forecast date carries the
-    # descriptors the estimated periods did. SERDP exists at the last date alone, so under the
-    # lag it is in no regression and only in the forecast exposures.
+    # Each risk index's blend, period by period. blend_to_index averages whichever descriptors a
+    # security has, so a blend changes composition when a descriptor starts having values --
+    # BTSG, HALPHA and VLVR a market-model window after the rest. A forecast exposure is read
+    # on the blend its factor was estimated on only if it is built from the same descriptors:
+    # one in the forecast exposures and in no estimated period's -- SERDP, were it blended --
+    # stops the run, and any other difference from the last estimated period's is flagged.
+    forecast_row = len(panel.dates) - 1
+    forecast_held = np.array([code in model.exposures for code in panel.securities])[None, :]
+    print(f"  each risk index's blend over the {notes.n_periods} estimated periods: every "
+          f"descriptor from the first period whose regression reads it, and in how many")
+    stops: list[str] = []
+    mismatched: list[str] = []
     for name in style_names:
-        for descriptor in risk_index_members(name):
-            if descriptor not in standardised.names:
-                continue
-            k = standardised.names.index(descriptor)
-            carried = int(np.isfinite(standardised.values[read_rows, :, k]).any(axis=1).sum())
-            forecast = int(np.isfinite(standardised.values[-1, :, k]).sum())
-            if forecast and not carried:
-                print(f"  ! {name}: {descriptor} is in {forecast} securities' forecast "
-                      f"exposures and in none of the {notes.n_periods} estimated periods', so "
-                      f"the factor was estimated on a blend without it")
-            elif carried and not forecast:
-                print(f"  ! {name}: {descriptor} is in {carried} estimated periods' exposures "
-                      f"and in no forecast exposure")
+        estimated = blend_composition(blendable, name, read_rows, held_in)
+        forecast = blend_composition(blendable, name, [forecast_row], forecast_held)
+        grouped: dict[str, list[str]] = {}
+        starts: dict[str, int] = {}
+        for descriptor, present in estimated.items():
+            periods = np.flatnonzero(present)
+            if periods.size:
+                label = f"from {notes.estimated_dates[periods[0]]}"
+                if periods[-1] != present.size - 1:
+                    label += f" to {notes.estimated_dates[periods[-1]]}"
+                label += f" ({periods.size})"
+            else:
+                label = "in none"
+            grouped.setdefault(label, []).append(descriptor)
+            starts.setdefault(label, int(periods[0]) if periods.size else present.size)
+        print(f"    {name:<20} " + "; ".join(
+            f"{', '.join(grouped[label])} {label}" for label in sorted(grouped, key=starts.get)
+        ))
+        in_forecast = [d for d, present in forecast.items() if present[0]]
+        in_last = [d for d, present in estimated.items() if present[-1]]
+        for descriptor in in_forecast:
+            if not estimated[descriptor].any():
+                carried = np.isfinite(
+                    blendable.values[forecast_row, :, blendable.names.index(descriptor)]
+                ) & forecast_held[0]
+                stops.append(f"{name}'s {descriptor}, in {int(carried.sum())} securities' "
+                             f"forecast exposures and none of the {notes.n_periods} estimated "
+                             f"periods'")
+        if in_forecast != in_last:
+            mismatched.append(f"{name}: the forecast exposures are blended from "
+                           f"{', '.join(in_forecast) or 'nothing'} and the last estimated "
+                           f"period's from {', '.join(in_last) or 'nothing'}")
+    for note in mismatched:
+        print(f"  ! {note}")
+    if stops:
+        raise SystemExit(
+            "  the run stops: a descriptor contributes to a forecast exposure and to no "
+            "estimated period's, so its factor would be read on a blend it was never estimated "
+            "on -- " + "; ".join(stops)
+        )
+    if not mismatched:
+        print(f"  the forecast exposures, {panel.dates[forecast_row]}'s, are blended from the "
+              f"descriptors the last estimated period's were, in every index")
 
     # The index at zero style exposure, exactly: on every date an estimated period or the
     # forecast reads, the cap-weighted mean of each style exposure over that date's estimation

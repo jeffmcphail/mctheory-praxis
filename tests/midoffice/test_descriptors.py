@@ -24,6 +24,7 @@ from praxis.midoffice.model.descriptors import (
     PRICE_DESCRIPTORS,
     WINDOW_DESCRIPTORS,
     SecurityPanel,
+    blend_composition,
     blend_to_index,
     build_risk_indices,
     compute_descriptors,
@@ -130,6 +131,43 @@ def test_rstr_is_the_cumulative_twelve_period_excess_log_return():
     assert np.allclose(_column(out, "RSTR"), expected)
 
 
+def test_rstr_can_skip_the_end_of_its_window_and_by_default_skips_nothing():
+    """USE4 excludes the last 21 trading days from RSTR, so that a month's short-term reversal
+    does not cancel the momentum being measured. A skip of k sums the window less its last k
+    periods; 0, the default, sums them all -- the definition before the parameter, bit for bit.
+    The window keeps its start, so the first value falls on the same date, and the coverage
+    rule is applied to the periods summed: S00, with returns in the window's last seven
+    periods alone, covers seven of twelve unskipped and four of the nine summed at a skip of
+    three."""
+    panel, market, _, _ = _panel()
+    risk_free = np.full(panel.n_periods, 0.003)
+
+    def rstr(source, **kw):
+        out, _ = compute_descriptors(
+            source, market_returns=market, risk_free=risk_free, names=("RSTR",), **kw
+        )
+        return out.values[:, :, 0]
+
+    base = rstr(panel)
+    assert base.tobytes() == rstr(panel, rstr_skip=0).tobytes()
+    skipped = rstr(panel, rstr_skip=3)
+    log_excess = np.log1p(panel.returns() - 0.003)
+    t = panel.n_periods - 1
+    assert np.array_equal(skipped[t], np.nansum(log_excess[t - 11 : t - 2], axis=0))
+    assert not np.allclose(skipped[t], base[t])
+    first = [int(np.flatnonzero(np.isfinite(v[:, 1]))[0]) for v in (base, skipped)]
+    assert first == [11, 11]
+    late = _blanked(panel, slice(0, t - 7), 0)
+    assert np.isfinite(rstr(late)[t, 0])
+    assert np.isnan(rstr(late, rstr_skip=3)[t, 0])
+    anything = rstr(late, rstr_skip=3, min_coverage=0.0)[t, 0]
+    excess = np.log1p(late.returns()[:, 0] - 0.003)
+    assert anything == np.nansum(excess[t - 11 : t - 2])
+    for bad in (-1, 12, 1.5, True):
+        with pytest.raises(ValueError, match="rstr_skip"):
+            rstr(panel, rstr_skip=bad)
+
+
 def test_btsg_recovers_beta_times_residual_volatility():
     panel, market, beta, residual = _panel()
     out, _ = compute_descriptors(panel, market_returns=market, names=("BTSG",))
@@ -137,6 +175,51 @@ def test_btsg_recovers_beta_times_residual_volatility():
     truth = beta * residual
     assert np.corrcoef(measured, truth)[0, 1] > 0.9
     assert float(np.mean(measured / truth)) == pytest.approx(1.0, abs=0.1)
+
+
+def test_the_market_model_can_be_weighted_by_a_half_life_and_by_default_is_not():
+    """USE4 estimates beta over 252 trading days with a half-life of 63. Given a half-life, the
+    market model is weighted least squares, each period's weight halving every half-life back
+    from the window's end, and the residual sd the weighted one, its degrees of freedom taken
+    on Kish's effective count -- here against that fit computed independently, on a window
+    with gaps. The default weights every period equally, as before."""
+    panel, market, _, _ = _panel()
+    rng = np.random.default_rng(4)
+    gaps = rng.random(panel.prices.shape) < 0.1
+    gapped = panel
+    for j in range(panel.n_securities):
+        gapped = _blanked(gapped, np.flatnonzero(gaps[:, j]), j)
+    names = ("BTSG", "HALPHA", "SERDP", "VLVR")
+    default, _ = compute_descriptors(gapped, market_returns=market, names=names)
+    unweighted, _ = compute_descriptors(
+        gapped, market_returns=market, names=names, beta_half_life=None
+    )
+    assert default.values.tobytes() == unweighted.values.tobytes()
+    weighted, _ = compute_descriptors(
+        gapped, market_returns=market, names=names, beta_half_life=6.0
+    )
+    returns = gapped.returns()
+    t, window = panel.n_periods - 1, 60
+    x_all = market[t - window + 1 : t + 1]
+    decay = 0.5 ** (np.arange(window - 1, -1, -1) / 6.0)
+    for j in range(panel.n_securities):
+        y_all = returns[t - window + 1 : t + 1, j]
+        ok = np.isfinite(y_all) & np.isfinite(x_all)
+        x, y, w = x_all[ok], y_all[ok], decay[ok]
+        design = np.column_stack([np.ones(x.size), x])
+        alpha, beta = np.linalg.solve(design.T @ (design * w[:, None]), design.T @ (w * y))
+        error = y - alpha - beta * x
+        effective = w.sum() ** 2 / (w @ w)
+        sd = np.sqrt((w @ error**2) / w.sum() * effective / (effective - 2.0))
+        got = weighted.values[t, j]
+        assert got[names.index("HALPHA")] == pytest.approx(alpha, rel=1e-9, abs=1e-12), j
+        assert got[names.index("BTSG")] == pytest.approx(max(beta, 0.0) * sd, rel=1e-9), j
+    assert not np.allclose(
+        weighted.values[t, :, 0], default.values[t, :, 0], equal_nan=True
+    )
+    for bad in (0.0, -6.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="beta_half_life"):
+            compute_descriptors(panel, market_returns=market, beta_half_life=bad)
 
 
 def test_a_negative_beta_sets_btsg_to_zero_as_the_definition_requires():
@@ -363,12 +446,43 @@ def test_a_partly_available_index_renormalises_over_what_is_there():
     assert np.isnan(blended[neither]).all()
 
 
+def test_a_blends_composition_is_read_row_by_row_over_the_securities_counted():
+    """Which descriptors an index was built from, date by date. Momentum is RSTR alone until
+    HALPHA's sixty-period window fills, and Volatility carries SERDP on the last date only --
+    the case that must not reach a forecast exposure unseen. Counting only a security whose
+    HALPHA is missing sees no HALPHA at all."""
+    panel, market, _, _ = _panel()
+    standardised = compute_descriptors(panel, market_returns=market)[0].standardise()
+    rows = np.arange(panel.n_periods)
+    momentum = blend_composition(standardised, "Momentum", rows)
+    assert list(momentum) == ["RSTR", "HALPHA"]
+    assert np.array_equal(momentum["RSTR"], rows >= 11)
+    assert np.array_equal(momentum["HALPHA"], rows >= 59)
+    volatility = blend_composition(standardised, "Volatility", rows)
+    assert list(volatility) == ["BTSG", "DASTD", "HILO", "LPRI", "CMRA", "SERDP"]
+    assert np.array_equal(volatility["SERDP"], rows == rows[-1])
+    k = standardised.names.index("HALPHA")
+    values = standardised.values.copy()
+    values[:, 0, k] = np.nan
+    blanked = dataclasses.replace(standardised, values=values)
+    alone = np.zeros((rows.size, panel.n_securities), dtype=bool)
+    alone[:, 0] = True
+    counted = blend_composition(blanked, "Momentum", rows, alone)
+    assert np.array_equal(counted["RSTR"], rows >= 11)
+    assert not counted["HALPHA"].any()
+    assert blend_composition(blanked, "Momentum", rows)["HALPHA"].any()
+    with pytest.raises(ValueError, match="rows x securities"):
+        blend_composition(standardised, "Momentum", rows, alone[:5])
+    with pytest.raises(ValueError, match="rows x securities"):
+        blend_composition(standardised, "Momentum", rows, alone.astype(int))
+
+
 def test_fitted_weights_recover_a_known_blend():
     """The honest version of Barra's proprietary step: estimate the weights from returns.
 
-    Returns are built to depend on a known mix of two descriptors, and the fit should find
-    that mix -- which is what makes this a reimplementation of the method rather than a guess
-    at their table.
+    Returns are built to depend on a known mix of two descriptors as of the period before,
+    and the fit should find that mix -- which is what makes this a reimplementation of the
+    method rather than a guess at their table.
     """
     panel, market, _, _ = _panel(n_periods=120, n_secs=60, seed=9)
     standardised = compute_descriptors(panel, market_returns=market)[0].standardise()
@@ -376,9 +490,10 @@ def test_fitted_weights_recover_a_known_blend():
     exposures = standardised.values[:, :, columns]
     rng = np.random.default_rng(9)
     truth = np.array([0.7, 0.3])
-    driven = (
-        np.nansum(exposures * truth[None, None, :], axis=2) * 0.02
-        + rng.normal(scale=0.004, size=exposures.shape[:2])
+    driven = np.full(exposures.shape[:2], np.nan)
+    driven[1:] = (
+        np.nansum(exposures[:-1] * truth[None, None, :], axis=2) * 0.02
+        + rng.normal(scale=0.004, size=(exposures.shape[0] - 1, exposures.shape[1]))
     )
     fitted = fit_index_weights(standardised, "Momentum", driven)
     assert fitted["RSTR"] == pytest.approx(0.7, abs=0.08)
@@ -391,6 +506,38 @@ def test_fitting_refuses_returns_of_the_wrong_shape():
     standardised = compute_descriptors(panel, market_returns=market)[0].standardise()
     with pytest.raises(ValueError, match="returns have shape"):
         fit_index_weights(standardised, "Momentum", np.zeros((5, 5)))
+
+
+def test_fitted_weights_pair_each_descriptor_with_the_next_periods_return():
+    """Descriptor on t, return on t+1, as the model's regressions read their exposures. So the
+    first period's return and the last period's descriptors are never read: change either and
+    the weights come back bit for bit. The fit is the pooled regression of the one on the
+    other, computed here independently; a lag of 0 is the same-day pairing."""
+    panel, market, _, _ = _panel(n_periods=120, n_secs=60, seed=9)
+    standardised = compute_descriptors(panel, market_returns=market)[0].standardise()
+    returns = panel.returns()
+    returns[0] = np.random.default_rng(2).normal(scale=0.05, size=panel.n_securities)
+    fitted = fit_index_weights(standardised, "Momentum", returns)
+    moved = returns.copy()
+    moved[0] *= 3.0
+    values = standardised.values.copy()
+    values[-1] *= -2.0
+    later = dataclasses.replace(standardised, values=values)
+    assert fit_index_weights(standardised, "Momentum", moved) == fitted
+    assert fit_index_weights(later, "Momentum", returns) == fitted
+    columns = [standardised.names.index(n) for n in ("RSTR", "HALPHA")]
+    for lag in (0, 1):
+        x = standardised.values[: panel.n_periods - lag][:, :, columns].reshape(-1, 2)
+        y = returns[lag:].reshape(-1)
+        ok = np.isfinite(y) & np.isfinite(x).all(axis=1)
+        coefficients = np.linalg.lstsq(x[ok], y[ok], rcond=None)[0]
+        expected = coefficients / coefficients.sum()
+        got = fit_index_weights(standardised, "Momentum", returns, lag=lag)
+        assert [got["RSTR"], got["HALPHA"]] == pytest.approx(list(expected), rel=1e-12), lag
+    assert fit_index_weights(standardised, "Momentum", returns, lag=0) != fitted
+    for bad in (-1, 1.0, True, panel.n_periods):
+        with pytest.raises(ValueError, match="lag"):
+            fit_index_weights(standardised, "Momentum", returns, lag=bad)
 
 
 def test_every_published_descriptor_is_computable_from_a_complete_panel():
@@ -663,12 +810,19 @@ def test_lcapcb_is_the_cube_of_log_cap_normalised_over_the_members():
 
 
 def test_fitted_weights_learn_from_the_members_alone():
+    """Membership read on the descriptor's date: holding the fit to members is blanking the
+    return of every security that was not a member the period before."""
     panel, market, members = _leavers(seed=9)
     standardised = compute_descriptors(panel, market_returns=market)[0].standardise()
     returns = panel.returns()
     fitted = fit_index_weights(standardised, "Momentum", returns, membership=members)
-    blanked = fit_index_weights(standardised, "Momentum", np.where(members, returns, np.nan))
+    before = np.zeros_like(members)
+    before[1:] = members[:-1]
+    blanked = fit_index_weights(standardised, "Momentum", np.where(before, returns, np.nan))
     assert fitted == blanked
+    assert fitted != fit_index_weights(
+        standardised, "Momentum", np.where(members, returns, np.nan)
+    )
     assert fitted != fit_index_weights(standardised, "Momentum", returns)
 
 
@@ -716,23 +870,28 @@ def test_a_security_whose_prices_start_after_the_window_gets_missing_for_every_o
     every day before a security's first price read as no momentum and no trading. S00's
     prices start at period 100, so every window ending before then is empty; S01's stop after
     period 50, so at the end of the panel every window is, SERDP's included. The share count
-    is there throughout, which is what let the turnovers read zero rather than missing."""
+    is there throughout, which is what let the turnovers read zero rather than missing. At any
+    coverage rule: 0, and the default."""
     panel, market, _, _ = _panel(n_periods=120)
     late = _blanked(panel, slice(0, 100), 0)
     gone = _blanked(late, slice(51, 120), 1)
-    out, _ = compute_descriptors(gone, market_returns=market)
-    assert set(WINDOW_DESCRIPTORS) <= set(out.names)
-    for name in WINDOW_DESCRIPTORS:
-        values = out.values[:, :, out.names.index(name)]
-        if name != "SERDP":
-            # Every window is complete from period 59, the longest being 60 periods.
-            assert np.isnan(values[59:100, 0]).all(), name
-            assert np.isfinite(values[99, 2:]).all(), name
-        assert np.isnan(values[-1, 1]), name
-        assert np.isfinite(values[-1, 2:]).all(), name
-    # A window holding a single observation still gives its value: only the empty ones went.
+    out, _ = compute_descriptors(gone, market_returns=market, min_coverage=0.0)
+    default, _ = compute_descriptors(gone, market_returns=market)
+    for result in (out, default):
+        assert set(WINDOW_DESCRIPTORS) <= set(result.names)
+        for name in WINDOW_DESCRIPTORS:
+            values = result.values[:, :, result.names.index(name)]
+            if name != "SERDP":
+                # Every window is complete from period 59, the longest being 60 periods.
+                assert np.isnan(values[59:100, 0]).all(), name
+                assert np.isfinite(values[99, 2:]).all(), name
+            assert np.isnan(values[-1, 1]), name
+            assert np.isfinite(values[-1, 2:]).all(), name
+    # At 0 a window holding a single observation still gives its value: only the empty ones
+    # went. The default asks for half the window.
     rstr = out.values[101, 0, out.names.index("RSTR")]
     assert rstr == np.log1p(gone.returns()[101, 0])
+    assert np.isnan(default.values[101, 0, default.names.index("RSTR")])
 
 
 def test_no_window_descriptor_is_computed_from_an_empty_window_anywhere():
@@ -779,11 +938,12 @@ def test_no_window_descriptor_is_computed_from_an_empty_window_anywhere():
 def test_min_coverage_removes_thinly_covered_windows_and_alters_no_value():
     """S00 trades in the last seven periods alone: six returns of a twelve-period window, so
     RSTR, CMRA and DASTD sit at a coverage of exactly one half; seven volumes of twelve for
-    STOA; full windows for STOQ and STOM; six of sixty for the market model. The default keeps
-    them all. A rule only ever removes, and what it keeps is the default's value bit for bit."""
+    STOA; full windows for STOQ and STOM; six of sixty for the market model. A rule of 0 keeps
+    them all. A rule only ever removes, and what it keeps is 0's value bit for bit. The
+    default is the half-window rule."""
     panel, market, _, _ = _panel(n_periods=120)
     thin = _blanked(panel, slice(0, 113), 0)
-    default, _ = compute_descriptors(thin, market_returns=market)
+    anything, _ = compute_descriptors(thin, market_returns=market, min_coverage=0.0)
 
     def kept(out) -> set[str]:
         return {
@@ -791,7 +951,7 @@ def test_min_coverage_removes_thinly_covered_windows_and_alters_no_value():
             if np.isfinite(out.values[-1, 0, out.names.index(name)])
         }
 
-    assert kept(default) == set(WINDOW_DESCRIPTORS)
+    assert kept(anything) == set(WINDOW_DESCRIPTORS)
     expected = {
         0.5: {"RSTR", "CMRA", "DASTD", "STOA", "STOQ", "STOM"},
         0.55: {"STOA", "STOQ", "STOM"},
@@ -801,8 +961,11 @@ def test_min_coverage_removes_thinly_covered_windows_and_alters_no_value():
         out, _ = compute_descriptors(thin, market_returns=market, min_coverage=rule)
         assert kept(out) == survivors, rule
         present = np.isfinite(out.values)
-        assert (np.isfinite(default.values) | ~present).all(), rule
-        assert np.array_equal(out.values[present], default.values[present]), rule
+        assert (np.isfinite(anything.values) | ~present).all(), rule
+        assert np.array_equal(out.values[present], anything.values[present]), rule
+    default, _ = compute_descriptors(thin, market_returns=market)
+    half, _ = compute_descriptors(thin, market_returns=market, min_coverage=0.5)
+    assert default.values.tobytes() == half.values.tobytes()
 
 
 def test_min_coverage_is_a_fraction_of_the_window():

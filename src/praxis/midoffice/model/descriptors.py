@@ -258,19 +258,31 @@ def _nan_std(block: np.ndarray, *, ddof: int = 1) -> np.ndarray:
 
 
 def _market_model(
-    returns: np.ndarray, market: np.ndarray, window: int, min_coverage: float = 0.0
+    returns: np.ndarray,
+    market: np.ndarray,
+    window: int,
+    min_coverage: float = 0.0,
+    half_life: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Rolling OLS of each security on the market: alpha, beta, residual sd, residuals.
+    """Rolling regression of each security on the market: alpha, beta, residual sd, residuals.
 
     Residuals come back full-length with nan outside the last window, because SERDP needs the
     series rather than its summary. A window needs three observations to fit, and at least
     `min_coverage` of it.
+
+    Ordinary least squares by default. Given a `half_life` in periods, weighted least squares
+    with each observation's weight halving every `half_life` periods back from the window's
+    end; the residual sd is then the weighted one, its degrees of freedom taken on Kish's
+    effective number of observations -- which is n - 2 again when the weights are equal.
     """
     n_periods, n_securities = returns.shape
     alpha = np.full((n_periods, n_securities), np.nan)
     beta = np.full((n_periods, n_securities), np.nan)
     residual_sd = np.full((n_periods, n_securities), np.nan)
     residuals = np.full((n_periods, n_securities), np.nan)
+    decay = None
+    if half_life is not None:
+        decay = 0.5 ** (np.arange(window - 1, -1, -1, dtype=float) / half_life)
     for t in range(window - 1, n_periods):
         lo = t - window + 1
         x = market[lo : t + 1]
@@ -280,15 +292,31 @@ def _market_model(
             if int(ok.sum()) < 3 or int(ok.sum()) / window < min_coverage:
                 continue
             design = np.column_stack([np.ones(int(ok.sum())), x[ok]])
-            coefficients, *_ = np.linalg.lstsq(design, y[ok], rcond=None)
+            if decay is None:
+                coefficients, *_ = np.linalg.lstsq(design, y[ok], rcond=None)
+            else:
+                root = np.sqrt(decay[ok])
+                coefficients, *_ = np.linalg.lstsq(
+                    design * root[:, None], y[ok] * root, rcond=None
+                )
             fitted = design @ coefficients
             error = y[ok] - fitted
             alpha[t, j] = coefficients[0]
             beta[t, j] = coefficients[1]
-            if int(ok.sum()) > 2:
-                residual_sd[t, j] = float(
-                    np.sqrt(error @ error / (int(ok.sum()) - 2))
-                )
+            if decay is None:
+                if int(ok.sum()) > 2:
+                    residual_sd[t, j] = float(
+                        np.sqrt(error @ error / (int(ok.sum()) - 2))
+                    )
+            else:
+                w = decay[ok]
+                effective = float(w.sum() ** 2 / (w @ w))
+                if effective > 2.0:
+                    residual_sd[t, j] = float(
+                        np.sqrt(
+                            (w @ error**2) / w.sum() * effective / (effective - 2.0)
+                        )
+                    )
             if t == n_periods - 1:
                 slot = np.full(window, np.nan)
                 slot[np.flatnonzero(ok)] = error
@@ -305,7 +333,9 @@ def compute_descriptors(
     beta_window_months: float = 60.0,
     volatility_window_months: float | None = None,
     membership: np.ndarray | None = None,
-    min_coverage: float = 0.0,
+    min_coverage: float = 0.5,
+    rstr_skip: int = 0,
+    beta_half_life: float | None = None,
 ) -> tuple[CharacteristicPanel, dict[str, str]]:
     """Compute USE3's price-and-volume descriptors over the panel.
 
@@ -329,15 +359,30 @@ def compute_descriptors(
     normalisation is taken over -- the one descriptor here whose definition is cross-sectional.
     Everything else is a security's own history.
 
-    **A window with no valid observation gives no value.**  The window descriptors --
-    `WINDOW_DESCRIPTORS` -- are missing wherever their window holds no data, and wherever it
-    holds less than `min_coverage` of the window: the fraction of its periods with a valid
-    observation of what the descriptor is computed from -- a return for DASTD, RSTR and CMRA,
-    a return with the market's for the market-model ones, a volume for the turnovers. A sum
-    over an empty window is zero, and before this RSTR, CMRA and the turnovers recorded that
-    zero as a value: every day before a security's first price read as no momentum and no
-    trading. The default, 0, removes the empty windows alone; the market model's own floor of
-    three observations, and DASTD's of two, still apply above it.
+    **A window mostly empty gives no value, and an empty one never does.**  The window
+    descriptors -- `WINDOW_DESCRIPTORS` -- are missing wherever their window holds less than
+    `min_coverage` of valid data: the fraction of its periods with a valid observation of what
+    the descriptor is computed from -- a return for DASTD, RSTR and CMRA, a return with the
+    market's for the market-model ones, a volume for the turnovers. The default, 0.5, is the
+    line below which a descriptor is not the one it is named: a twelve-month RSTR summed over
+    five months of returns is a five-month momentum. 0 keeps any window holding at least one
+    observation. An empty window gives no value at any setting -- a sum over one is zero, and
+    RSTR, CMRA and the turnovers once recorded that zero as a value: every day before a
+    security's first price read as no momentum and no trading. The market model's own floor of
+    three observations, and DASTD's of two, still apply.
+
+    `rstr_skip` is how many of the panel's periods -- trading days on a daily panel -- are
+    excluded from the end of RSTR's twelve-month window. The default, 0, is the definition
+    here: the window's log excess returns summed, the latest included. USE4 skips 21 trading
+    days, so that a month's short-term reversal does not cancel the momentum being measured.
+    The window keeps its length and its start, so RSTR has a value from the same date; the
+    sum covers its earlier periods, and the coverage rule is applied to those.
+
+    `beta_half_life`, in the panel's own periods -- trading days on a daily panel -- weights
+    the market model behind BTSG, HALPHA, SERDP and VLVR's residual sd: each period's weight
+    halves every `beta_half_life` periods back from the window's end. None, the default,
+    weights every period of the window equally. USE4 estimates beta over 252 trading days
+    with a half-life of 63.
     """
     wanted = tuple(names) if names is not None else PRICE_DESCRIPTORS
     unknown = set(wanted) - set(PRICE_DESCRIPTORS)
@@ -350,6 +395,24 @@ def compute_descriptors(
         raise ValueError(
             f"min_coverage is the fraction of a window with valid data, so it lies in "
             f"[0, 1]; got {min_coverage}"
+        )
+    year = panel.periods_for(12.0)
+    if (
+        isinstance(rstr_skip, bool)
+        or not isinstance(rstr_skip, (int, np.integer))
+        or not 0 <= rstr_skip < year
+    ):
+        raise ValueError(
+            f"rstr_skip is a whole number of periods excluded from the end of RSTR's "
+            f"{year}-period window, so at least 0 and fewer than {year}; got {rstr_skip!r}"
+        )
+    rstr_skip = int(rstr_skip)
+    if beta_half_life is not None and not (
+        np.isfinite(beta_half_life) and beta_half_life > 0.0
+    ):
+        raise ValueError(
+            f"beta_half_life is a number of periods, so positive and finite, or None for "
+            f"equal weights; got {beta_half_life!r}"
         )
 
     n_periods, n_securities = panel.prices.shape
@@ -468,14 +531,21 @@ def compute_descriptors(
                     )
         with np.errstate(invalid="ignore"):
             log_excess = np.log1p(np.where(excess > -1.0, excess, np.nan))
-        window = panel.periods_for(12.0)
+        window = year
         if "RSTR" in wanted:
-            computed["RSTR"] = _rolling(
+            # Summed over the window less its last `rstr_skip` periods: the sum over the
+            # shorter span, read `rstr_skip` periods later.
+            summed = _rolling(
                 log_excess,
-                window,
+                window - rstr_skip,
                 lambda b: np.nansum(b, axis=0),
                 min_coverage=min_coverage,
             )
+            if rstr_skip:
+                later = np.full_like(summed, np.nan)
+                later[rstr_skip:] = summed[:-rstr_skip]
+                summed = later
+            computed["RSTR"] = summed
         if "CMRA" in wanted:
 
             def _range(block: np.ndarray) -> np.ndarray:
@@ -502,7 +572,7 @@ def compute_descriptors(
         else:
             window = min(panel.periods_for(beta_window_months), n_periods)
             alpha, beta, residual_sd, residuals = _market_model(
-                returns, market, window, min_coverage
+                returns, market, window, min_coverage, beta_half_life
             )
             if "HALPHA" in wanted:
                 computed["HALPHA"] = alpha
@@ -582,7 +652,9 @@ def compute_descriptors(
             skipped["VLVR"] = "needs market_returns for the residual standard deviation"
         else:
             window = min(panel.periods_for(beta_window_months), n_periods)
-            _, _, residual_sd, _ = _market_model(returns, market, window, min_coverage)
+            _, _, residual_sd, _ = _market_model(
+                returns, market, window, min_coverage, beta_half_life
+            )
             months = panel.periods_for(12.0)
             dollar = _rolling(
                 panel.volumes * panel.traded_prices,
@@ -788,12 +860,47 @@ def build_risk_indices(
     )
 
 
+def blend_composition(
+    panel: CharacteristicPanel,
+    index: str,
+    rows: Sequence[int],
+    counted: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    """Which of a risk index's descriptors its blend drew on, on each of `rows`.
+
+    `blend_to_index` averages whichever of the index's descriptors a security has, so the
+    blend changes composition whenever one starts or stops having values -- on the S&P 500 run,
+    the market model's three, a long window after the rest. Per descriptor of `index` the panel
+    carries, in Table 8-1 order: a boolean per row, True where it holds a value for at least
+    one security `counted` there. `counted`, rows by securities, is whose exposures the
+    question is about -- a period's regression, say -- and everyone by default.
+    """
+    rows = [int(row) for row in rows]
+    members = [name for name in risk_index_members(index) if name in panel.names]
+    shape = (len(rows), len(panel.securities))
+    if counted is None:
+        counted = np.ones(shape, dtype=bool)
+    counted = np.asarray(counted)
+    if counted.dtype != bool or counted.shape != shape:
+        raise ValueError(
+            f"counted must be a boolean array of shape {shape} (rows x securities); got "
+            f"{counted.dtype} {counted.shape}"
+        )
+    return {
+        name: (np.isfinite(panel.values[rows, :, panel.names.index(name)]) & counted).any(
+            axis=1
+        )
+        for name in members
+    }
+
+
 def fit_index_weights(
     panel: CharacteristicPanel,
     index: str,
     returns: np.ndarray,
     *,
     membership: np.ndarray | None = None,
+    lag: int = 1,
 ) -> dict[str, float]:
     """Fit a risk index's descriptor weights by explanatory power, pooled over periods.
 
@@ -802,12 +909,25 @@ def fit_index_weights(
     pooled cross-sectional regression of returns on the index's standardised descriptors,
     with the coefficients normalised to sum to one.
 
+    **Each descriptor is paired with the return `lag` periods after it** -- descriptor on t,
+    return on t+1 by default, as the model's own regressions read their exposures. At a lag of
+    0 a descriptor built from day t's prices explains day t's return, which it holds: RSTR
+    sums it, so the fit would hand RSTR the blend for knowing the answer. 0 is there for a
+    synthetic world whose descriptors are known before their returns.
+
+    **It is fitted on the whole sample, and that is look-ahead too.**  Every period's returns
+    go into one regression, so the weights -- and every exposure blended with them, the
+    earliest period's included -- are chosen knowing returns that come after. Out of sample
+    would mean refitting on each date from the returns before it alone. Nothing here does
+    that, and `test_lookahead.py` records what the whole-sample fit costs: repricing one day
+    moves the exposures of every period. The run script does not call this.
+
     It recovers Barra's *method*, not their numbers. A model built this way is a
     reimplementation of a published methodology and should be described as one.
 
     `membership` holds the fit to the estimation universe, as the model's regressions are
-    held: otherwise the names outside the index help choose the blend that measures the ones
-    inside it.
+    held -- read on the descriptor's date, as theirs is: otherwise the names outside the index
+    help choose the blend that measures the ones inside it.
     """
     if not panel.standardised:
         raise ValueError("fit_index_weights needs a standardised panel")
@@ -819,13 +939,21 @@ def fit_index_weights(
         raise ValueError(
             f"returns have shape {returns.shape}, expected {panel.values.shape[:2]}"
         )
+    if isinstance(lag, bool) or not isinstance(lag, (int, np.integer)) or lag < 0:
+        raise ValueError(f"lag must be a whole number of periods, zero or more; got {lag!r}")
+    n_periods = returns.shape[0]
+    if lag >= n_periods:
+        raise ValueError(
+            f"a lag of {lag} leaves none of the {n_periods} period(s) with an earlier one to "
+            f"read its descriptors from"
+        )
     held = _checked_membership(membership, returns.shape, "(dates x securities)")
     columns = [panel.names.index(name) for name in members]
-    design = panel.values[:, :, columns].reshape(-1, len(members))
-    target = returns.reshape(-1)
+    design = panel.values[: n_periods - lag, :, columns].reshape(-1, len(members))
+    target = returns[lag:].reshape(-1)
     keep = np.isfinite(target) & np.isfinite(design).all(axis=1)
     if held is not None:
-        keep &= held.reshape(-1)
+        keep &= held[: n_periods - lag].reshape(-1)
     if int(keep.sum()) <= len(members):
         raise ValueError(
             f"only {int(keep.sum())} usable observation(s) to fit {len(members)} weight(s)"

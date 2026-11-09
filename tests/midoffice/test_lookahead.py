@@ -172,9 +172,11 @@ def test_regressing_same_day_fails_the_same_check_which_is_what_the_check_is_for
 
 
 def test_refitting_the_blend_after_repricing_moves_every_period_the_earliest_included():
-    """Why the blend is held fixed above. fit_index_weights pools every period's returns into
-    one regression -- in-sample weight selection, look-ahead in the strict sense -- so a price
-    on day t moves the weights, and with them the exposures of every period before t."""
+    """Why the blend is held fixed above, and the record of what fit_index_weights still does.
+    It pairs each descriptor with the next period's return, as the regressions do, but pools
+    every period's into one regression -- whole-sample weight selection, look-ahead in the
+    strict sense -- so a price on day t moves the weights, and with them the exposures of
+    every period before t."""
     panel, market, members = _index()
     repriced = _repriced(panel, REPRICED)
     blend = _blend(panel, market, members)
