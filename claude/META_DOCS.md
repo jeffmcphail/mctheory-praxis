@@ -1,6 +1,6 @@
 # Meta-Docs Convention (Praxis side)
 
-**Version:** 1.0
+**Version:** 1.1
 **Created:** 2026-04-30 (Chat: praxis_main_current -- Cycle 16)
 **Applies to:** Praxis repo. Companion convention exists in `ai-agent-factory` and (when set up) `core`.
 
@@ -50,6 +50,7 @@ Order is roughly "read at session start" then "read on demand."
 | `claude/chat/NEW_CHAT_README.md` | Onboarding procedure -- the literal reading list for a new chat in the series, plus quick-start checklist. | Reading list, archived-chats table, mandatory critical overrides. |
 | `claude/chat/CHAT_WORKAROUNDS.md` | Known platform limitations and the workarounds Chat applies before claiming a limitation. | Workarounds for Claude.ai chat platform quirks. |
 | `claude/CLAUDE_CODE_RULES.md` | The dual-Claude protocol -- Chat=Strategist, Code=Implementer, Briefs/Retros conventions, 41 numbered rules. | Roles, brief format, retro format, do-not-do list for each role. |
+| `claude/MIDOFFICE_STATE.md` | The mid-office work's state: where a fresh session resumes it. Read after `CLAUDE_CODE_RULES.md` and before the latest mid-office retro. Code brings it up to date at the end of each piece, in the same commit as the retro (Rule 43). | How the work runs; the S&P 500 model's commits; every settled decision, with the retro that holds it; the data and the commands that regenerate it; the standing run and its guards; the queue and the decisions waiting on Jeff. |
 | `claude/WORKFLOW_MODES_PRAXIS.md` | Mode arbitration: when Chat edits directly (delta zip) vs. when Code implements. | Mode A vs. Mode B selection criteria, instructions per mode. |
 | `claude/TODO.md` | Praxis-specific outstanding work, deferred items, multi-cycle context. | Anything that would otherwise have been a Praxis-tagged memory entry but isn't a cross-project principle. |
 | `docs/praxis_main_series.md` | Project genesis, architecture vision, implementation history, chat series index. | Long-form project narrative + chat-series-index table. |
@@ -185,3 +186,4 @@ The 18 entries that were Praxis-specific have been moved to `claude/TODO.md`, `d
 | Date | Cycle | Change |
 |---|---|---|
 | 2026-04-30 | Cycle 16 | Initial Praxis-side META_DOCS.md. Established meta-doc convention, classified 18 Praxis-specific memory entries into appropriate destinations (`claude/TODO.md` for Claude's work queue; `docs/TRADING_CONVENTIONS.md` for pure-Praxis operating rules; `docs/TRADING_FINDINGS.md` for empirical findings; `docs/MEV_BUILD_PLAN.md` for the multi-phase MEV roadmap). Memory pruned from 25 entries to 7 cross-project keepers. AI Factory side authored a parallel `META_DOCS.md` in its repo earlier same day. |
+| 2026-11-10 | midoffice07 | Added `claude/MIDOFFICE_STATE.md` to the read-at-session-start set: the mid-office work's state, kept current with each piece's retro (CLAUDE_CODE_RULES v1.7, Rule 43). |

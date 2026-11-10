@@ -2,9 +2,9 @@
 
 ## McTheory Development -- Praxis (Prediction Markets & Systematic Trading)
 
-**Version:** 1.6
+**Version:** 1.7
 **Author:** Jeff McPhail / Claude Chat
-**Date:** November 5, 2026
+**Date:** November 10, 2026
 **Adapted from:** AI Agent Factory protocol (validated, first retro: 30 min vs 2+ hours)
 
 **Changelog:**
@@ -15,6 +15,7 @@
 - v1.4 (2026-04-30): One new rule from Cycle 17: new Rule 35 (temporal data storage standard). Establishes the canonical schema for any table holding temporally indexed data: INTEGER `timestamp` column in ms-since-epoch UTC, part of the primary key, optionally with a derived `datetime`/`date` TEXT cache in ISO 8601 with `+00:00` offset. Codifies the dual-write migration pattern for high-frequency tables. Lands in a new "Data Storage Rules" subsection between "Testing and Diagnostics Rules" and "Retro Rules". Renumbered Retro Rules from 35-41 to 36-42. Total rule count: 42 (was 41).
 - v1.5 (2026-11-05): One new standing rule from Jeff, set during the mid-office S&P 500 model work: new Rule 43 (every piece of work ends with a retro written in full, whose last item is the exact `git add` for the change). Terminal output gets truncated when it is passed on, so the retro is the record. The Retro Log Format template gains the closing `git add` section, and `.claude/commands/retro.md` lists the full contents. Total rule count: 43 (was 42).
 - v1.6 (2026-11-05): Rule 43 corrected. The mid-office briefs are written in Chat and pasted in, and a `BRIEF_` file says so; v1.5 had them arriving as messages rather than Chat-written briefs, and the first one's Source line said it was given in the Code session. `.claude/commands/retro.md` says the same. Total rule count unchanged: 43.
+- v1.7 (2026-11-10): Rule 43 extended, at Jeff's request after midoffice07. The mid-office work keeps `claude/MIDOFFICE_STATE.md`, the state a fresh session resumes it from, and each piece brings it up to date in the same commit as its retro. `claude/META_DOCS.md` indexes the file as read at session start, and `.claude/commands/retro.md` says the same. Total rule count unchanged: 43.
 
 ---
 
@@ -414,6 +415,7 @@ These rules operationalize the "ETA and Progress Reporting" section of `WORKFLOW
     - **Where:** `claude/retros/RETRO_<slug>.md`, named and indexed like the existing ones, with its brief at `claude/handoffs/BRIEF_<slug>.md`. Work that has no slot yet gets one beside the existing handoffs: the mid-office work is the `midofficeNN` series (`BRIEF_midoffice01_*` / `RETRO_midoffice01_*` onward), numbered on its own, apart from the cycle sequence. Its briefs are written in Chat and pasted into the Code session: the `BRIEF_` file is the pasted text transcribed verbatim, never a reconstruction, and its Source line says it was written in Chat and pasted in -- not "given in the Code session" (Jeff, 2026-11-05).
     - **Contents, in full:** what was asked (the brief, verbatim when available); what changed and why; every table and number that would otherwise be printed; decisions taken; decisions left for Jeff; tests (counts, and what each new one guards); problems found but not fixed; and the key content of every scratch output, copied in -- the session scratch directory is under Temp and can vanish.
     - **It ends with the exact `git add` command for the change:** every file, tracked and new, the retro included, and nothing else. Commit messages come from Chat; the file list comes from Code. A separate change made in the same session gets its own `git add`, stated before that last block, never merged into it.
+    - **For the mid-office work, the state file too:** at the end of each piece, bring `claude/MIDOFFICE_STATE.md` up to date -- where the work stands, what is settled, the data, the run, what is next -- and include it in the piece's `git add`, so it goes in the same commit as the retro (Jeff, 2026-11-10). A fresh session reads it after this file and before the latest retro.
     - **In the terminal, finish with a short summary and the retro's path.**
 
 ---
@@ -528,4 +530,4 @@ The MCP server (`servers/praxis_mcp/`) provides `get_collector_health()` for liv
 - Diagnostics in `claude/scratch/` as `.py` files; avoid quote-heavy inline `python -c` (Rule 33)
 - Reads against actively-written SQLite DBs need explicit transaction management: fresh connections per pass, `isolation_level=None`, or `conn.commit()` between SELECTs (Rule 34)
 - Temporal data: store as INTEGER ms-since-epoch UTC `timestamp` column, primary key. Optional `datetime`/`date` TEXT cache renders ISO 8601 with `+00:00` (Rule 35).
-- Every piece of work ends with a full retro whose last item is the exact `git add` for the change; the terminal gets a short summary and the retro's path (Rule 43).
+- Every piece of work ends with a full retro whose last item is the exact `git add` for the change; the terminal gets a short summary and the retro's path. A mid-office piece also brings `claude/MIDOFFICE_STATE.md` up to date, in the same commit (Rule 43).

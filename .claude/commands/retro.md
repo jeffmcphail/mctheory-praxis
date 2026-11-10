@@ -16,7 +16,10 @@ The retro must include:
    under Temp and can vanish
 10. Git commits made, if any
 11. Open Items for Chat (anything needing strategy discussion)
-12. LAST: the exact `git add` command for the change -- every file, tracked and new, the retro
+12. For mid-office work: claude/MIDOFFICE_STATE.md brought up to date -- where the work stands,
+    what is settled, the data, the run, what is next -- and in the git add, so it goes in the
+    same commit as the retro (Rule 43)
+13. LAST: the exact `git add` command for the change -- every file, tracked and new, the retro
     included, and nothing else. Commit messages come from Chat; the file list comes from Code.
 
 Name and index it like the existing retros, with its brief at claude/handoffs/BRIEF_<slug>.md.
