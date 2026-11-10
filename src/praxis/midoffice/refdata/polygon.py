@@ -146,6 +146,37 @@ class Bar:
     transactions: int | None = None
 
 
+@dataclass(frozen=True)
+class Split:
+    """One split event: on `execution_date`, `split_from` shares become `split_to`."""
+
+    execution_date: dt.date
+    split_from: float
+    split_to: float
+    ticker: str
+
+    @property
+    def ratio(self) -> float:
+        """What a share count multiplies by on the execution date: 10 for a ten-for-one."""
+        return self.split_to / self.split_from
+
+
+@dataclass(frozen=True)
+class Dividend:
+    """One cash distribution under a ticker: `cash_amount` per share, in `currency`, to the
+    holders of a share before `ex_date`, the first day it trades without it. `kind` is
+    Polygon's `dividend_type`: "CD" a regular dividend, "SC" a special one, "LT" and "ST"
+    capital gains; `frequency` a year's count of them, 0 for a one-off."""
+
+    ex_date: dt.date
+    cash_amount: float
+    currency: str | None
+    kind: str | None
+    frequency: int | None
+    pay_date: dt.date | None
+    ticker: str
+
+
 @dataclass
 class PolygonClient:
     """Rate-limited, optionally disk-cached access to the endpoints this build needs."""
@@ -175,9 +206,17 @@ class PolygonClient:
         return self.cache_dir / f"{safe}.json"
 
     def _get(self, path: str, params: Mapping[str, object], cache_key: str) -> Mapping:
+        """One request, or its cached answer. A not-found answer is cached too and raised
+        again on reading: a ticker absent on a date stays absent, and a resumed fetch must not
+        ask for it twice."""
         cached = self._cache_path(cache_key)
         if cached is not None and cached.exists():
-            return json.loads(cached.read_text(encoding="utf-8"))
+            payload = json.loads(cached.read_text(encoding="utf-8"))
+            if str(payload.get("status", "")).upper() == "NOT_FOUND":
+                raise PolygonNotFoundError(
+                    f"{cache_key}: {payload.get('message') or 'not found'} (cached)"
+                )
+            return payload
 
         query = "".join(f"{k}={v}&" for k, v in params.items())
         url = f"{BASE}{path}?{query}apiKey={self.api_key}"
@@ -186,15 +225,22 @@ class PolygonClient:
             elapsed = time.monotonic() - self._last_call
             if elapsed < self.min_interval:
                 time.sleep(self.min_interval - elapsed)
-        payload = self.transport.get_json(url)
+        try:
+            payload = self.transport.get_json(url)
+        except PolygonNotFoundError as error:
+            self._last_call = time.monotonic()
+            self._remember_not_found(cached, str(error))
+            raise
         self._last_call = time.monotonic()
 
         status = str(payload.get("status", "")).upper()
         if status == "NOT_FOUND":
-            raise PolygonNotFoundError(
+            error = PolygonNotFoundError(
                 f"status 'NOT_FOUND' for {_redact(url)}: "
                 f"{payload.get('error') or payload.get('message') or 'no detail given'}"
             )
+            self._remember_not_found(cached, str(error))
+            raise error
         if status == "NOT_AUTHORIZED":
             raise PolygonError(
                 f"NOT_AUTHORIZED for {_redact(url)} -- {AUTHORISED_HISTORY_NOTE}"
@@ -207,6 +253,19 @@ class PolygonClient:
         if cached is not None:
             cached.write_text(json.dumps(payload), encoding="utf-8")
         return payload
+
+    def has_cached(self, cache_key: str) -> bool:
+        """Whether an answer under this cache key is on disk, found or not found."""
+        path = self._cache_path(cache_key)
+        return path is not None and path.exists()
+
+    @staticmethod
+    def _remember_not_found(cached: Path | None, message: str) -> None:
+        # The message has been through _redact already; nothing else of the URL is kept.
+        if cached is not None:
+            cached.write_text(
+                json.dumps({"status": "NOT_FOUND", "message": message}), encoding="utf-8"
+            )
 
     # ------------------------------------------------------------------ endpoints
 
@@ -274,24 +333,78 @@ class PolygonClient:
         security -- the endpoint covers listed ones only. That answer is cached as well as a
         found one, so a rebuild asks each id once and every later run is offline.
         """
-        cache_key = f"events-{identifier}"
-        cached = self._cache_path(cache_key)
-        if cached is not None and cached.exists():
-            payload = json.loads(cached.read_text(encoding="utf-8"))
-            if str(payload.get("status", "")).upper() == "NOT_FOUND":
-                return None
-            return payload.get("results") or {}
         try:
             payload = self._get(
-                f"/vX/reference/tickers/{identifier}/events", {}, cache_key=cache_key
+                f"/vX/reference/tickers/{identifier}/events", {},
+                cache_key=f"events-{identifier}",
             )
-        except PolygonNotFoundError as error:
-            if cached is not None:
-                cached.write_text(
-                    json.dumps({"status": "NOT_FOUND", "message": str(error)}), encoding="utf-8"
-                )
+        except PolygonNotFoundError:
             return None
         return payload.get("results") or {}
+
+    def splits(self, ticker: str) -> tuple["Split", ...]:
+        """Every split event Polygon records under a ticker, by execution date:
+        `/v3/reference/splits?ticker=...`. For a split, a share count multiplies by
+        `Split.ratio` on the execution date, and the traded price divides by it.
+
+        Not every event is a split. Polygon records a spin-off here too, as a fractional ratio
+        that adjusts the parent's price history -- DuPont's 2.39 for Qnity, GE's 1.281 for GE
+        HealthCare -- and the parent's share count does not move across it.
+        `rebuild.check_splits` tells the two apart.
+        """
+        payload = self._get(
+            "/v3/reference/splits", {"ticker": ticker, "limit": 1000},
+            cache_key=f"splits-{ticker}",
+        )
+        if payload.get("next_url"):
+            raise PolygonError(f"more than 1000 splits under {ticker}: paging is not built")
+        return tuple(sorted(
+            (
+                Split(
+                    execution_date=dt.date.fromisoformat(str(row["execution_date"])[:10]),
+                    split_from=float(row["split_from"]),
+                    split_to=float(row["split_to"]),
+                    ticker=str(row.get("ticker") or ticker),
+                )
+                for row in payload.get("results") or []
+            ),
+            key=lambda s: s.execution_date,
+        ))
+
+    def dividends(self, ticker: str) -> tuple["Dividend", ...]:
+        """Every cash distribution Polygon records under a ticker, by ex-dividend date --
+        regular, special and capital gains alike: `/v3/reference/dividends?ticker=...`.
+
+        The adjusted bars carry none of them. They are adjusted for split events alone, so
+        their returns are price returns, and a total return is built from these. A ticker is
+        not a security: the events under one ticker can be several securities'.
+        """
+        payload = self._get(
+            "/v3/reference/dividends", {"ticker": ticker, "limit": 1000},
+            cache_key=f"dividends-{ticker}",
+        )
+        if payload.get("next_url"):
+            raise PolygonError(f"more than 1000 dividends under {ticker}: paging is not built")
+
+        def day(value) -> dt.date | None:
+            return dt.date.fromisoformat(str(value)[:10]) if value else None
+
+        return tuple(sorted(
+            (
+                Dividend(
+                    ex_date=dt.date.fromisoformat(str(row["ex_dividend_date"])[:10]),
+                    cash_amount=float(row["cash_amount"]),
+                    currency=row.get("currency") or None,
+                    kind=row.get("dividend_type") or None,
+                    frequency=(int(row["frequency"]) if row.get("frequency") is not None
+                               else None),
+                    pay_date=day(row.get("pay_date")),
+                    ticker=str(row.get("ticker") or ticker),
+                )
+                for row in payload.get("results") or []
+            ),
+            key=lambda d: d.ex_date,
+        ))
 
     def cached_reference_dates(self, ticker: str) -> tuple[dt.date, ...]:
         """Dates with a reference record already on disk, newest first.
@@ -353,9 +466,9 @@ class PolygonClient:
         """Daily bars for whatever stands in for the market: an ETF or a true index.
 
         A stocks subscription answers 403 for an index symbol like `I:SPX`, so an ETF such
-        as SPY is usually what this gets -- and for a risk model it is the better series
-        anyway, since its adjusted bars are a total return and a price index is not. Indices
-        carry no volume; ETFs do, and it is ignored either way.
+        as SPY is usually what this gets. Its adjusted bars are a price return, split-adjusted
+        only, as every ticker's are; its total return needs its distributions (`dividends`).
+        Indices carry no volume; ETFs do, and it is ignored either way.
         """
         return self.daily_bars(symbol, start, end, adjusted=True)
 

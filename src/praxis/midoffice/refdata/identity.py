@@ -52,7 +52,7 @@ import datetime as dt
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -829,6 +829,7 @@ def map_members(
     histories_by_ticker: Mapping[str, History | None],
     tenures_of: Mapping[str, Sequence[Tenure]],
     panel_tickers: set[str],
+    links: Sequence["Link"] = (),
 ) -> MemberMap:
     """Per member ticker and run of membership, the security it names -- whoever traded under
     it on the run's last date -- and then, per date of the run, that security's ticker that day.
@@ -842,7 +843,9 @@ def map_members(
     Where the security has no row on a date of its run, a reorganisation's predecessor under the
     same ticker -- trading under it to within a halt of the successor's first day -- is the
     member; so is the security itself after its last price, or in a gap between two spans of
-    it. Otherwise the date is named. 'unverified': the run's security is known but not on the
+    it; so is a predecessor `links` name -- a merger's, which traded under another ticker, as
+    WestRock did before Smurfit Westrock. Otherwise the date is named. 'unverified': the run's
+    security is known but not on the
     date -- before the first of its events, the start of Polygon's record of it, or before the
     panel's prices under the ticker begin -- so the member may be it under another ticker, or
     another security. 'missing': neither source has the member at all.
@@ -855,6 +858,9 @@ def map_members(
     for group in (*by_ticker.values(), *by_key.values()):
         group.sort(key=lambda r: r.first)
     at = {day: i for i, day in enumerate(dates)}
+    linked: dict[str, list[Link]] = {}
+    for link in links:
+        linked.setdefault(link.successor, []).append(link)
     mapped: dict[tuple[str, dt.date], tuple[str, str, str]] = {}
     named: dict[tuple[str, dt.date], str] = {}
     anchors: dict[tuple[str, dt.date, dt.date], str | None] = {}
@@ -926,6 +932,11 @@ def map_members(
                     if prior:
                         mapped[(ticker, day)] = (prior[0].key, ticker, "predecessor")
                         continue
+                before = [r for link in linked.get(key, ()) if day <= link.until
+                          for r in by_key.get(link.predecessor, ()) if r.first <= day <= r.last]
+                if before:
+                    mapped[(ticker, day)] = (before[0].key, before[0].ticker, "predecessor")
+                    continue
                 label = mine[0].name if mine else key
                 if (ticker in panel_tickers and successor and day < successor[0].first
                         and (first is None or first.ticker == ticker)):
@@ -971,8 +982,9 @@ def renames_from(
     """The dated ticker changes of the securities in `keys`, for `sp500.membership(...,
     renames=...)`: each change from one ticker to another in their credible events, and each
     one the panel's own prices and records show -- Fiserv's return to FISV, which its events
-    omit. `since` is the date the security is first known under the old ticker, so a row of
-    the changes table naming that ticker earlier -- another company's -- is left alone."""
+    omit -- or the reference endpoint's records do. `since` is the date the security is first
+    known under the old ticker, so a row of the changes table naming that ticker earlier --
+    another company's -- is left alone."""
     out: dict[tuple[dt.date, str, str], Rename] = {}
     by_key: dict[str, list[Row]] = {}
     for row in rows:
@@ -986,7 +998,7 @@ def renames_from(
                 )
         mine = sorted(by_key.get(key, ()), key=lambda r: r.first)
         for before, after in zip(mine, mine[1:]):
-            if before.ticker == after.ticker or after.source != "panel":
+            if before.ticker == after.ticker or after.source not in ("panel", "reference"):
                 continue
             if any((r.old, r.new) == (before.ticker, after.ticker) for r in out.values()):
                 continue
@@ -1233,3 +1245,272 @@ def _final_name(rename: Rename, renames: Sequence[Rename]) -> str:
     from .sp500 import todays_ticker
 
     return todays_ticker(rename.old, rename.date - dt.timedelta(days=1), renames)
+
+
+# --------------------------------------------------------- the reference endpoint's word
+
+
+@dataclass(frozen=True)
+class Hypothesis:
+    """A candidate for member-days neither source could name, from the public record, put to
+    the reference endpoint: nothing enters the table on its say-so, only on the endpoint's."""
+
+    member: str
+    """The member ticker whose named member-days it is for."""
+    ask: tuple[str, ...]
+    """The tickers to ask the endpoint under, on those dates: the member's own, or the one
+    the hypothesis says the member traded under."""
+    statement: str
+    """As it was put: "CDAY for DAY", "Bunge Limited for BG"."""
+    same_as: str | None = None
+    """For "the same security under another name": the ticker whose security in the table
+    the endpoint's must be -- CDAY's, for DAY."""
+    called: str | None = None
+    """For a predecessor named by company, a name the endpoint's security must carry."""
+
+
+@dataclass(frozen=True)
+class Link:
+    """The member before its successor, under another identity: a merger's predecessor that
+    traded under another ticker (WestRock, before Smurfit Westrock), or a reorganisation's."""
+
+    successor: str
+    predecessor: str
+    until: dt.date
+    evidence: str
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """What the reference endpoint said to one hypothesis."""
+
+    hypothesis: Hypothesis
+    named: tuple[dt.date, dt.date, int] | None
+    """The named member-days it was for -- first, last, how many -- or None if none were."""
+    rows: tuple[Row, ...]
+    """What the endpoint confirms and the table takes: who traded under each ticker asked,
+    and over which trading days."""
+    link: Link | None
+    confirmed: bool
+    """Whether the hypothesis, as stated, is what the endpoint says."""
+    covered: int
+    """Of the named member-days, those the rows and link taken account for."""
+    verdict: str
+    asked: int
+    """Reference lookups it took, cached or not."""
+
+
+def _settled(found: Sequence[Row], dates: Sequence[dt.date]) -> list[Row]:
+    """One security's confirmed rows under two tickers, where they overlap: the later
+    ticker's row takes the overlap, the earlier ending the day before it begins."""
+    at = {day: i for i, day in enumerate(dates)}
+    out: list[Row] = []
+    for key in dict.fromkeys(r.key for r in found):
+        group = sorted((r for r in found if r.key == key), key=lambda r: (r.first, r.last))
+        for k, row in enumerate(group):
+            later = [r for r in group[k + 1:] if r.ticker != row.ticker and r.first <= row.last]
+            if later and at[later[0].first] > at[row.first]:
+                stop = dates[at[later[0].first] - 1]
+                row = Row(row.key, row.figi, row.cik, row.name, row.kind, row.ticker, row.first,
+                          stop, 0, row.source, row.starts,
+                          f"{row.ends}; to the day before it is {later[0].ticker}, "
+                          f"{later[0].first}")
+            out.append(row)
+    return out
+
+
+def _trimmed(
+    taken: Sequence[Row], by_key: Mapping[str, Sequence[Row]], dates: Sequence[dt.date]
+) -> list[Row]:
+    """Confirmed rows less the trading days their security already has a row on: Super
+    Micro's SMCI from the window's start, against the events' SMCI from its 2024 split."""
+    out: list[Row] = []
+    for row in taken:
+        held = {
+            i for other in by_key.get(row.key, ())
+            for i, day in enumerate(dates) if other.first <= day <= other.last
+        }
+        span = [i for i, day in enumerate(dates) if row.first <= day <= row.last and i not in held]
+        runs: list[list[int]] = []
+        for i in span:
+            if runs and i == runs[-1][1] + 1:
+                runs[-1][1] = i
+            else:
+                runs.append([i, i])
+        for lo, hi in runs:
+            out.append(Row(
+                row.key, row.figi, row.cik, row.name, row.kind, row.ticker, dates[lo], dates[hi],
+                0, row.source,
+                row.starts if dates[lo] == row.first else
+                f"{row.starts}; from the day after its other row ends",
+                row.ends if dates[hi] == row.last else
+                f"{row.ends}; to the day before its other row begins",
+            ))
+    return out
+
+
+def resolve_named(
+    dates: Sequence[dt.date],
+    mapping: MemberMap,
+    rows: Sequence[Row],
+    hypotheses: Sequence[Hypothesis],
+    lookup: Callable[[str, dt.date], Record | None],
+) -> list[Resolution]:
+    """Put each hypothesis to the reference endpoint, through `lookup` -- the record under a
+    ticker on a date, or None where it has none -- and keep only what it confirms.
+
+    Each ticker asked is looked up on the first and last of the member's named dates. For each
+    security it names there, the trading days it traded under that ticker are found by a
+    binary search on the endpoint's own answers, out to the window's ends -- the whole window,
+    so a joiner keeps its history before joining and a leaver its record after. What the
+    security is to the member decides what is taken:
+
+    - the member's run names no security at all (DAY, KVUE, WBD): the endpoint's, asked under
+      the member's own ticker, is the member;
+    - it is the run's security (Corpay's FIGI under FLT; Super Micro's under SMCI before its
+      split): the same security, under another ticker or on earlier dates;
+    - it is another: a predecessor (WestRock for Smurfit Westrock, Paramount for Skydance,
+      Bunge Limited for Bunge Global), taken only if it traded to within a halt of the
+      successor's first day.
+
+    The hypothesis is judged apart: "CDAY for DAY" holds only if DAY's security is CDAY's in
+    the table. Rows the endpoint confirms enter even when the hypothesis does not -- WBD's own
+    security, if not DISCA's -- and named member-days nothing accounts for stay named.
+    """
+    at = {day: i for i, day in enumerate(dates)}
+    n = len(dates) - 1
+    by_key: dict[str, list[Row]] = {}
+    by_ticker: dict[str, list[Row]] = {}
+    for row in rows:
+        by_key.setdefault(row.key, []).append(row)
+        by_ticker.setdefault(row.ticker, []).append(row)
+    out: list[Resolution] = []
+    for hypothesis in hypotheses:
+        days = sorted(day for (ticker, day) in mapping.named if ticker == hypothesis.member)
+        if not days:
+            out.append(Resolution(hypothesis, None, (), None, False, 0,
+                                  "nothing under the ticker is named", 0))
+            continue
+        first, last = days[0], days[-1]
+        anchor = next((key for (ticker, a, b), key in mapping.anchors.items()
+                       if ticker == hypothesis.member and a <= first <= b), None)
+        answers: dict[tuple[str, int], Record | None] = {}
+
+        def ask(ticker: str, i: int) -> Record | None:
+            if (ticker, i) not in answers:
+                answers[(ticker, i)] = lookup(ticker, dates[i])
+            return answers[(ticker, i)]
+
+        def names(ticker: str, i: int, key: str) -> bool:
+            record = ask(ticker, i)
+            return record is not None and record.key == key
+
+        def edge(ticker: str, key: str, inside: int, outside: int) -> int:
+            """The position nearest `outside` at which `ticker` still names `key`, between a
+            position where it does and one where it does not."""
+            while abs(outside - inside) > 1:
+                middle = (inside + outside) // 2
+                if names(ticker, middle, key):
+                    inside = middle
+                else:
+                    outside = middle
+            return inside
+
+        found: list[Row] = []
+        for ticker in hypothesis.ask:
+            probes = (at[first], at[last])
+            seen = {}
+            for i in probes:
+                record = ask(ticker, i)
+                if record is not None:
+                    seen.setdefault(record.key, (record, []))[1].append(i)
+            for key, (record, hits) in seen.items():
+                low, high = min(hits), max(hits)
+                if low == 0 or names(ticker, 0, key):
+                    start = 0
+                else:
+                    outside = max([i for i in probes if i < low] or [0])
+                    start = edge(ticker, key, low, outside)
+                if high == n or names(ticker, n, key):
+                    stop = n
+                else:
+                    outside = min([i for i in probes if i > high] or [n])
+                    stop = edge(ticker, key, high, outside)
+                note = (f"reference: {ticker} names {record.name} ({key}) from {dates[start]} "
+                        f"to {dates[stop]}")
+                found.append(Row(
+                    key, record.figi, record.cik, record.name, record.kind, ticker,
+                    dates[start], dates[stop], 0, "reference",
+                    note + ("" if start == 0 else f"; not on {dates[start - 1]}"),
+                    note + ("" if stop == n else f"; not on {dates[stop + 1]}"),
+                ))
+        # On the day a ticker changes the endpoint can answer under both, old and new: the new
+        # one takes that day, as it does in the events (VIAC to PARA on 2022-02-17).
+        found = _settled(found, dates)
+        taken: list[Row] = []
+        link = None
+        mine = sorted(by_key.get(anchor, ()), key=lambda r: r.first) if anchor else []
+        for key in dict.fromkeys(r.key for r in found):
+            group = [r for r in found if r.key == key]
+            if anchor is None or key == anchor:
+                taken.extend(group)
+                continue
+            if not mine:
+                continue
+            # A predecessor ends the day before its successor's first, where the endpoint's
+            # records run on to it or a halt past it -- Paramount under PARA on 2025-08-07,
+            # Skydance's first day -- and not otherwise.
+            start = at[mine[0].first]
+            if at[max(r.last for r in group)] - start > HALT_DAYS:
+                continue
+            cut = [r for r in group if at[r.first] < start]
+            cut = [r if at[r.last] < start else Row(
+                r.key, r.figi, r.cik, r.name, r.kind, r.ticker, r.first, dates[start - 1], 0,
+                r.source, r.starts, f"{r.ends}; to the day before {mine[0].name}'s first, "
+                f"{mine[0].first}") for r in cut]
+            if not cut:
+                continue
+            latest = max(cut, key=lambda r: r.last)
+            last_of = latest.last
+            if 0 < start - at[last_of] <= HALT_DAYS:
+                taken.extend(cut)
+                link = Link(anchor, key, last_of,
+                            f"{latest.name} traded as {latest.ticker} to {last_of}, within a "
+                            f"halt of {mine[0].name}'s first day under {mine[0].ticker}, "
+                            f"{mine[0].first}")
+        taken = _trimmed(taken, by_key, dates)
+        covered = sum(
+            1 for day in days
+            if any(r.first <= day <= r.last for r in taken)
+            or (anchor is None and any(r.last < day for r in taken))
+        )
+        securities = sorted({r.key for r in found})
+        listed = ", ".join(securities) or "nothing"
+        if hypothesis.same_as is not None:
+            expected = sorted({r.key for r in by_ticker.get(hypothesis.same_as, ())})
+            confirmed = bool(securities) and set(securities) <= set(expected)
+            verdict = (
+                f"confirmed: the endpoint names {listed}, {hypothesis.same_as}'s security in "
+                f"the table" if confirmed else
+                f"not confirmed: the endpoint names {listed}, and {hypothesis.same_as}'s "
+                f"security in the table is {', '.join(expected) or 'not there'}"
+            )
+        elif hypothesis.called is not None:
+            confirmed = bool(found) and all(
+                hypothesis.called.lower() in (r.name or "").lower() for r in found
+            )
+            called = ", ".join(sorted({r.name or r.key for r in found})) or "nothing"
+            verdict = ("confirmed" if confirmed else "not confirmed") + (
+                f": the endpoint names {called}"
+            )
+        else:
+            confirmed = bool(taken) and covered == len(days)
+            verdict = ("confirmed: " if confirmed else "not confirmed: ") + (
+                "; ".join(f"{r.ticker} names {r.name} from {r.first} to {r.last}"
+                          for r in found) or "the endpoint names nothing"
+            )
+        out.append(Resolution(
+            hypothesis, (first, last, len(days)), tuple(taken), link, confirmed, covered,
+            verdict, len(answers),
+        ))
+    return out

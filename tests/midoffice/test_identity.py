@@ -302,3 +302,123 @@ def test_the_cache_readers_tell_none_found_from_never_asked(tmp_path):
     histories = idn.read_histories(tmp_path, ["AAA", "GONE", "NEVER"])
     assert histories["GONE"] is None and "NEVER" not in histories
     assert histories["AAA"].tenures == (Tenure("AAA", dt.date(1999, 1, 1), None, False),)
+
+
+# ------------------------------------------------- the reference endpoint, on named member-days
+
+
+def panel_row(key, ticker, lo, hi):
+    return idn.Row(key, key, f"C{key}", key, "CS", ticker, day(lo), day(hi), hi - lo + 1, "panel",
+                   "", "")
+
+
+def answers(spans):
+    """A lookup: (ticker, first, last, key) spans the endpoint names a security over."""
+    asked = []
+
+    def lookup(ticker, on):
+        asked.append((ticker, on))
+        i = DATES.index(on)
+        for t, lo, hi, key in spans:
+            if t == ticker and lo <= i <= hi:
+                return Record(ticker, on, key, f"C{key}", f"name {key}", "CS")
+        return None
+
+    return lookup, asked
+
+
+def resolve(rows, members, panel_tickers, hypotheses, lookup, tenures=None, histories=None):
+    tenures = tenures or {}
+    histories = histories if histories is not None else {}
+    before = idn.map_members(DATES, members, rows, histories, tenures, panel_tickers)
+    out = idn.resolve_named(DATES, before, rows, hypotheses, lookup)
+    rows = sorted([*rows, *(r for res in out for r in res.rows)], key=lambda r: (r.key, r.first))
+    links = [res.link for res in out if res.link is not None]
+    after = idn.map_members(DATES, members, rows, histories, tenures, panel_tickers, links)
+    return before, out, after
+
+
+def test_a_missing_member_is_named_by_its_own_ticker_and_its_span_found_by_bisection():
+    """DAY: no events, not in the panel -- missing. The endpoint names CDAY's security under
+    DAY from day 20 to day 40: the span's ends come from its own answers, the hypothesis that
+    DAY is CDAY's security holds, and every named day is accounted for -- after day 40 as the
+    same security after its last price."""
+    rows = [panel_row("C", "CDAY", 0, 19)]
+    members = [frozenset({"DAY"}) if 20 <= i <= 45 else frozenset() for i in range(N)]
+    lookup, asked = answers([("DAY", 20, 40, "C")])
+    hypothesis = idn.Hypothesis("DAY", ("DAY",), "CDAY for DAY", same_as="CDAY")
+    before, (found,), after = resolve(rows, members, {"CDAY"}, [hypothesis], lookup,
+                                      histories={"DAY": None})
+    assert len(before.named) == 26
+    assert [(r.ticker, r.first, r.last, r.source) for r in found.rows] == [
+        ("DAY", day(20), day(40), "reference")
+    ]
+    assert found.confirmed and found.covered == 26 and found.link is None
+    assert not after.named
+    assert after.mapped[("DAY", day(30))] == ("C", "DAY", "reference")
+    assert after.mapped[("DAY", day(44))] == ("C", "DAY", "after its last price")
+    assert len(asked) < 20
+
+
+def test_an_identity_the_endpoint_confirms_enters_though_the_hypothesis_does_not():
+    """WBD: the endpoint names a security of its own under WBD on its member dates, not
+    DISCA's. The hypothesis fails; what the endpoint does confirm -- who WBD was -- enters."""
+    rows = [panel_row("D", "DISCA", 0, 9)]
+    members = [frozenset({"WBD"}) if i >= 10 else frozenset() for i in range(N)]
+    lookup, _ = answers([("WBD", 10, N - 1, "W")])
+    hypothesis = idn.Hypothesis("WBD", ("WBD",), "DISCA for WBD", same_as="DISCA")
+    _, (found,), after = resolve(rows, members, {"DISCA"}, [hypothesis], lookup,
+                                 histories={"WBD": None})
+    assert not found.confirmed and "DISCA's security in the table is D" in found.verdict
+    assert [r.key for r in found.rows] == ["W"] and found.covered == N - 10
+    assert not after.named
+
+
+def test_a_predecessor_counts_only_if_it_traded_to_within_a_halt_of_its_successor():
+    """SW before Smurfit Westrock's first price: WestRock under WRK, to the day before, is the
+    member, linked; a WestRock whose records stopped ten trading days short is not, and the
+    days stay named."""
+    rows = [panel_row("S", "SW", 30, N - 1)]
+    members = [frozenset({"SW"})] * N
+    hypothesis = idn.Hypothesis("SW", ("WRK",), "WRK for SW")
+    lookup, _ = answers([("WRK", 0, 29, "P")])
+    before, (found,), after = resolve(rows, members, {"SW"}, [hypothesis], lookup)
+    assert len(before.named) == 30
+    assert found.confirmed and found.link == idn.Link("S", "P", day(29), found.link.evidence)
+    assert after.mapped[("SW", day(5))] == ("P", "WRK", "predecessor") and not after.named
+    lookup, _ = answers([("WRK", 0, 19, "P")])
+    _, (short,), after = resolve(rows, members, {"SW"}, [hypothesis], lookup)
+    assert not short.confirmed and not short.rows and short.link is None
+    assert len(after.named) == 30
+
+
+def test_on_a_change_of_ticker_the_new_one_takes_the_day_and_a_predecessor_ends_before():
+    """Paramount: VIAC to day 10 and PARA from day 10 -- the endpoint answers under both on
+    the day of the change, which goes to PARA -- and PARA on to day 40, Skydance's first: the
+    predecessor ends the day before it."""
+    rows = [panel_row("S", "SKYD", 40, N - 1)]
+    members = [frozenset({"SKYD"})] * N
+    lookup, _ = answers([("VIAC", 0, 10, "P"), ("PARA", 10, 40, "P")])
+    hypothesis = idn.Hypothesis("SKYD", ("VIAC", "PARA"), "PARA for SKYD")
+    _, (found,), after = resolve(rows, members, {"SKYD"}, [hypothesis], lookup)
+    assert [(r.ticker, r.first, r.last) for r in found.rows] == [
+        ("VIAC", day(0), day(9)), ("PARA", day(10), day(39))
+    ]
+    assert found.link.until == day(39) and found.covered == 40 and not after.named
+    assert idn.guard_one_ticker([*rows, *found.rows]).passed
+
+
+def test_a_confirmed_span_is_cut_where_the_security_already_has_a_row():
+    """Super Micro: SMCI names it from the window's start, and its events have it from its
+    split on day 40. The confirmed row is cut to the days before, and no row overlaps."""
+    rows = [idn.Row("X", "X", "CX", "X", "CS", "SMCI", day(40), day(N - 1), 0, "events", "", "")]
+    members = [frozenset({"SMCI"}) if i >= 20 else frozenset() for i in range(N)]
+    tenures = {"X": [Tenure("SMCI", day(40), None, False)]}
+    lookup, _ = answers([("SMCI", 0, N - 1, "X")])
+    hypothesis = idn.Hypothesis("SMCI", ("SMCI",), "SMCI itself", same_as="SMCI")
+    before, (found,), after = resolve(rows, members, set(), [hypothesis], lookup,
+                                      tenures=tenures, histories={"SMCI": None})
+    assert all(v.startswith("unverified") for v in before.named.values())
+    assert [(r.first, r.last) for r in found.rows] == [(day(0), day(39))]
+    assert found.confirmed and not after.named
+    assert idn.guard_one_ticker([*rows, *found.rows]).passed

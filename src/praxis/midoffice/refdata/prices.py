@@ -42,12 +42,16 @@ MARKET_PROXY = "SPY"
 
 Partly necessity: `I:SPX` needs an indices subscription, and a stocks plan returns 403 for it.
 
-But it is also the better choice, which is worth saying so nobody "fixes" it later.  The
-securities' returns here come from split- *and dividend-* adjusted prices, so they are total
-returns.  `I:SPX` is a price index: it excludes dividends entirely.  Using it as the market
-series would pair total-return securities with a price-return market, leaving roughly one and
-a half to two percent a year of market return unexplained and biasing every beta estimated
-against it.  SPY's adjusted series is a total return, so the two sides match.
+But it is also the better choice, which is worth saying so nobody "fixes" it later: SPY pays
+its holdings' dividends out, and Polygon records the distributions, where a price index such as
+`I:SPX` has none to record.  Polygon's adjusted prices are adjusted for split events only -- a
+spin-off among them, recorded as a fractional split -- and carry no dividends: over 2022-2026
+the adjusted close equals the traded one on every day for Altria, Verizon, AT&T and Exxon,
+which paid every quarter.  So the returns built from them here are price returns, the
+securities' and SPY's alike, and the two sides match as price returns.  A total return needs
+each one's distributions, from `PolygonClient.dividends`, and SPY's for the market.  Pairing
+total-return securities with a price-return market would leave roughly one and a half to two
+percent a year of market return unexplained and bias every beta estimated against it.
 
 `SP500_INDEX` is kept for anyone with an indices subscription who wants the index proper.
 """

@@ -21,10 +21,12 @@ import pytest
 
 from praxis.midoffice.refdata.polygon import (
     Bar,
+    Dividend,
     HttpTransport,
     PolygonClient,
     PolygonError,
     PolygonNotFoundError,
+    Split,
     _redact,
     read_api_key,
 )
@@ -651,3 +653,92 @@ def test_a_404_is_not_found_with_the_servers_reason_and_is_not_retried():
     assert isinstance(caught.value, PolygonError)
     assert "No events found for given ID" in str(caught.value)
     assert KEY not in str(caught.value)
+
+
+def test_a_not_found_answer_is_cached_and_raised_again_without_asking(tmp_path):
+    """A ticker absent on a date stays absent, so a resumed fetch must not ask again: the
+    reference endpoint's "Ticker not found", like the events endpoint's, is kept and raised
+    from the cache -- without the key in the file."""
+    class Absent:
+        calls = 0
+
+        def get_json(self, url):
+            Absent.calls += 1
+            raise PolygonNotFoundError(f"HTTP 404 for {_redact(url)}: Ticker not found.")
+
+    client = PolygonClient(api_key=KEY, transport=Absent(), cache_dir=tmp_path)
+    for _ in range(2):
+        with pytest.raises(PolygonNotFoundError, match="not found"):
+            client.ticker_details("GONE", dt.date(2026, 2, 6))
+    assert Absent.calls == 1
+    kept = (tmp_path / "ref-GONE-2026-02-06.json").read_text(encoding="utf-8")
+    assert json.loads(kept)["status"] == "NOT_FOUND" and KEY not in kept
+
+
+def test_split_events_come_back_as_dated_ratios_and_are_asked_for_once(tmp_path):
+    """A share count multiplies by the ratio on the execution date: ten for a ten-for-one,
+    a fifth for a one-for-five. A ticker with more splits than one page holds is refused
+    rather than quietly cut short."""
+    class Splits:
+        calls: list = []
+
+        def __init__(self, more=False):
+            self.more = more
+
+        def get_json(self, url):
+            Splits.calls.append(url)
+            payload = {"status": "OK", "results": [
+                {"execution_date": "2026-01-15", "split_from": 5, "split_to": 1, "ticker": "AMCR"},
+                {"execution_date": "2024-06-10", "split_from": 1, "split_to": 10, "ticker": "NVDA"},
+            ]}
+            if self.more:
+                payload["next_url"] = "https://api.polygon.io/v3/reference/splits?cursor=x"
+            return payload
+
+    client = PolygonClient(api_key=KEY, transport=Splits(), cache_dir=tmp_path)
+    found = client.splits("ANY")
+    assert [(s.execution_date, s.ratio) for s in found] == [
+        (dt.date(2024, 6, 10), 10.0), (dt.date(2026, 1, 15), 0.2)
+    ]
+    assert isinstance(found[0], Split) and found[0].ticker == "NVDA"
+    assert "ticker=ANY" in Splits.calls[0] and "limit=1000" in Splits.calls[0]
+    client.splits("ANY")
+    assert len(Splits.calls) == 1
+    with pytest.raises(PolygonError, match="paging"):
+        PolygonClient(api_key=KEY, transport=Splits(more=True)).splits("MANY")
+
+
+def test_cash_distributions_come_back_dated_and_typed_and_are_asked_for_once(tmp_path):
+    """Every kind of distribution is kept -- a regular dividend and a special one alike -- in
+    ex-date order, each with its amount, currency, type and frequency. A ticker with more than
+    one page of them is refused rather than quietly cut short."""
+    class Dividends:
+        calls: list = []
+
+        def __init__(self, more=False):
+            self.more = more
+
+        def get_json(self, url):
+            Dividends.calls.append(url)
+            payload = {"status": "OK", "results": [
+                {"ex_dividend_date": "2025-01-29", "cash_amount": 0.5, "currency": "USD",
+                 "dividend_type": "CD", "frequency": 4, "pay_date": "2025-02-12",
+                 "ticker": "LEN"},
+                {"ex_dividend_date": "2024-12-02", "cash_amount": 2.0, "currency": "USD",
+                 "dividend_type": "SC", "frequency": 0, "ticker": "LEN"},
+            ]}
+            if self.more:
+                payload["next_url"] = "https://api.polygon.io/v3/reference/dividends?cursor=x"
+            return payload
+
+    client = PolygonClient(api_key=KEY, transport=Dividends(), cache_dir=tmp_path)
+    assert client.dividends("LEN") == (
+        Dividend(dt.date(2024, 12, 2), 2.0, "USD", "SC", 0, None, "LEN"),
+        Dividend(dt.date(2025, 1, 29), 0.5, "USD", "CD", 4, dt.date(2025, 2, 12), "LEN"),
+    )
+    asked = Dividends.calls[0]
+    assert "/v3/reference/dividends" in asked and "ticker=LEN" in asked and "limit=1000" in asked
+    client.dividends("LEN")
+    assert len(Dividends.calls) == 1
+    with pytest.raises(PolygonError, match="paging"):
+        PolygonClient(api_key=KEY, transport=Dividends(more=True)).dividends("MANY")

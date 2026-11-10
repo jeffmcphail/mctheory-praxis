@@ -12,6 +12,11 @@ ticker over the window and once per cached FIGI no answer carries -- and every a
 or not, is cached beside the panel's, so a second run is offline. `--offline` refuses to ask
 at all, and stops if an answer is missing.
 
+`--resolve` puts the member-days neither source names to the reference endpoint as well,
+`/v3/reference/tickers/{t}?date=`, on the hypotheses in `HYPOTHESES`, and takes only what it
+confirms (`identity.resolve_named`); its outputs carry `_resolved` in their names, so the
+table without it is never overwritten.
+
 Writes, beside the panel (gitignored, like it):
 
     sp500_identity_<first>_<last>.csv          the table: one row per security per ticker
@@ -47,8 +52,24 @@ from praxis.midoffice.refdata import sp500  # noqa: E402
 from praxis.midoffice.refdata.polygon import (  # noqa: E402
     PolygonClient,
     PolygonError,
+    PolygonNotFoundError,
     read_api_key,
 )
+
+HYPOTHESES = (
+    idn.Hypothesis("DAY", ("DAY",), "CDAY for DAY", same_as="CDAY"),
+    idn.Hypothesis("WBD", ("WBD",), "DISCA for WBD", same_as="DISCA"),
+    idn.Hypothesis("SW", ("WRK",), "WRK for SW"),
+    idn.Hypothesis("CPAY", ("FLT",), "FLT for CPAY", same_as="CPAY"),
+    idn.Hypothesis("SKYD", ("VIAC", "PARA"), "PARA for SKYD (and VIAC, PARA's ticker before)"),
+    idn.Hypothesis("BG", ("BG",), "Bunge Limited for BG", called="Bunge Limited"),
+    idn.Hypothesis("SMCI", ("SMCI",), "SMCI itself", same_as="SMCI"),
+    idn.Hypothesis("KVUE", ("KVUE",), "KVUE itself (not among the brief's candidates)"),
+)
+"""The public-record candidates for the member-days neither the records nor the events name,
+from the brief of midoffice06: hypotheses for the reference endpoint to confirm, never entries
+in the table themselves. VIAC is asked beside PARA because PARA has no record before
+2022-02-17; KVUE, which the brief does not list, under its own ticker."""
 
 
 class Offline:
@@ -91,6 +112,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shares-every", type=int, default=63,
                         help="trading days between the fetch plan's share-count samples inside "
                              "each security's span (default 63, a quarter)")
+    parser.add_argument("--resolve", action="store_true",
+                        help="put the member-days neither source names to the reference "
+                             "endpoint, on HYPOTHESES; writes the *_resolved files")
     args = parser.parse_args(argv)
 
     path = Path(args.panel)
@@ -103,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     held = {t: np.isfinite(prices[:, j]) for j, t in enumerate(securities)}
     panel_tickers = set(securities)
     first, last = dates[0], dates[-1]
-    stem = f"sp500_identity_{first}_{last}"
+    stem = f"sp500_identity_{first}_{last}" + ("_resolved" if args.resolve else "")
     out_dir = Path(args.out) if args.out else path.parent
 
     print(f"Panel\n  {path}: {len(securities)} tickers over {len(dates)} trading days, "
@@ -183,6 +207,46 @@ def main(argv: list[str] | None = None) -> int:
         dates, identities, records, histories, extra, found_as
     )
     mapping = idn.map_members(dates, members, rows, by_ticker, tenures_of, panel_tickers)
+    resolutions: list = []
+    links: list = []
+    if args.resolve:
+        looked = {"asked": 0}
+
+        def lookup(ticker, on):
+            looked["asked"] += not (cache / f"ref-{ticker}-{on}.json").exists()
+            try:
+                results = client.ticker_details(ticker, on)
+            except PolygonNotFoundError:
+                return None
+            except PolygonError as error:
+                raise SystemExit(f"  reference record of {ticker} on {on}: {error}") from None
+            if not results:
+                return None
+            return idn.Record(ticker, on, results.get("composite_figi") or None,
+                              results.get("cik") or None, results.get("name") or None,
+                              results.get("type") or None,
+                              idn._date(results.get("list_date")))
+
+        named_before = len(mapping.named)
+        resolutions = idn.resolve_named(dates, mapping, rows, HYPOTHESES, lookup)
+        links = [r.link for r in resolutions if r.link is not None]
+        rows = sorted([*rows, *(row for r in resolutions for row in r.rows)],
+                      key=lambda r: (r.key, r.first, r.ticker))
+        mapping = idn.map_members(dates, members, rows, by_ticker, tenures_of, panel_tickers,
+                                  links)
+        print(f"\nThe member-days neither source names, put to the reference endpoint: "
+              f"{named_before:,} named before, {len(mapping.named):,} after; "
+              f"{sum(r.asked for r in resolutions)} lookups, {looked['asked']} over the network "
+              f"this run")
+        for r in resolutions:
+            span = (f"{r.named[0]}..{r.named[1]} ({r.named[2]})" if r.named else "none named")
+            print(f"  {r.hypothesis.statement}: {span}; {r.covered} now accounted for, in "
+                  f"{r.asked} lookups\n      {r.verdict}")
+            for row in r.rows:
+                print(f"      takes {row.ticker} {row.first}..{row.last}: {row.name} [{row.key}]")
+            if r.link is not None:
+                print(f"      link: {r.link.predecessor} before {r.link.successor}, to "
+                      f"{r.link.until} -- {r.link.evidence}")
     guards = [
         idn.guard_cells(dates, held, rows),
         idn.guard_one_ticker(rows),
@@ -192,13 +256,16 @@ def main(argv: list[str] | None = None) -> int:
     keys = sorted({r.key for r in rows})
     with_records = {r.key for rs in records.values() for r in rs}
     with_events = set(histories)
+    with_reference = {r.key for r in rows if r.source == "reference"}
     print(f"\nThe table\n  {len(rows)} rows: {len(keys)} securities, each under one ticker "
           f"over one span of the window; {sum(r.source == 'panel' for r in rows)} rows priced "
           f"by the panel, {sum(r.source == 'events' for r in rows)} from events alone, "
           f"{sum(r.source == 'presumed' for r in rows)} presumed")
     print(f"  identified by the records and the events {len(with_records & with_events)}, by "
           f"the records alone {len(with_records - with_events)}, by the events alone "
-          f"{len(set(keys) - with_records)}")
+          f"{len(set(keys) - with_records - with_reference)}"
+          + (f", by the reference endpoint alone "
+             f"{len(with_reference - with_records - with_events)}" if args.resolve else ""))
     print("\nGuards")
     for guard in guards:
         print(f"  {'ok' if guard.passed else 'FAILED'}  {guard.name}: {guard.checked:,} "
@@ -338,6 +405,8 @@ def main(argv: list[str] | None = None) -> int:
             sources.append("records")
         if key in with_events:
             sources.append("events")
+        if key in with_reference:
+            sources.append("reference")
         member_rows.append({
             "ticker": ticker,
             "member_from": run_first,
@@ -386,7 +455,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  in all {2 * len(new_tickers) + new_samples + len(tickers):,} requests")
     unresolved = sorted({t for (t, _) in mapping.named})
     print(f"  not in it: the member-days named above, under {', '.join(unresolved)}, which "
-          f"need a source this one is not")
+          f"need a source this one is not" if unresolved else
+          "  every member-day is in it: none is named")
 
     # ------------------------------------------------------------------- write
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -434,6 +504,17 @@ def main(argv: list[str] | None = None) -> int:
         "candidates": {t: [[c[0], c[1], c[2], str(c[3])] for c in found]
                        for t, found in candidates_of.items()},
         "mapped": dict(collections.Counter(v[2] for v in mapping.mapped.values())),
+        "resolutions": [
+            {"statement": r.hypothesis.statement, "member": r.hypothesis.member,
+             "named": [str(r.named[0]), str(r.named[1]), r.named[2]] if r.named else None,
+             "confirmed": r.confirmed, "covered": r.covered, "verdict": r.verdict,
+             "asked": r.asked,
+             "rows": [[row.key, row.ticker, str(row.first), str(row.last), row.name]
+                      for row in r.rows],
+             "link": None if r.link is None else [r.link.successor, r.link.predecessor,
+                                                   str(r.link.until), r.link.evidence]}
+            for r in resolutions
+        ],
     }, indent=1), encoding="utf-8")
     print(f"\nWrote\n  {table}\n  {listing}\n  {fetch}\n  {summary}")
     return 0 if all(g.passed for g in guards) else 1
