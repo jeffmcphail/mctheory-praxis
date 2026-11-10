@@ -1,15 +1,16 @@
 # Mid-office state
 
-**Updated:** 2026-11-10, at the end of midoffice08 (the build). Brought up to date at the end of
-every piece, in the same commit as its retro (Rule 43). Not a history: the state a new session
-needs to carry on. The detail is in the retros named below.
+**Updated:** 2026-11-10, at the end of midoffice09 (the count rulings, the defaults, residuals for
+every covered name). Brought up to date at the end of every piece, in the same commit as its
+retro (Rule 43). Not a history: the state a new session needs to carry on. The detail is in the
+retros named below.
 
 ---
 
 ## Start here
 
 1. Read `claude/CLAUDE_CODE_RULES.md` (Rule 43 above all), then this file, then the latest retro:
-   `claude/retros/RETRO_midoffice08_build.md`.
+   `claude/retros/RETRO_midoffice09_counts_residuals.md`.
 2. **How the work runs.**
    - **The brief.** Each piece, `midofficeNN`, is a brief written in Chat and pasted into the Code
      session. Code transcribes it verbatim to `claude/handoffs/BRIEF_midofficeNN_<slug>.md`; its
@@ -21,21 +22,23 @@ needs to carry on. The detail is in the retros named below.
      brief opens with "committed" (check it in `git log`) and Jeff's rulings on the decisions the
      last retro left. This file travels in the retro's own commit (08 ruling 4).
 3. **The discipline every brief restates.**
-   - Changes go in the order given, each decomposed against the one before.
+   - Changes go in the order given, each measured against the one before.
    - A gate means stop and report before building anything.
    - Nothing in `data/` is overwritten or deleted without Jeff: each stage writes files of its
-     own (`_resolved`, `_corrected`, `_amended`).
+     own (`_resolved`, `_corrected`, `_amended`, `_repaired`), and the panel build refuses to
+     overwrite without `--overwrite`.
    - Scratch goes to `claude/scratch/midofficeNN/` (gitignored), its outputs copied into the retro.
    - Python is ASCII and keeps the file's line endings (most `.py` here are CRLF in the working
      copy; the `claude/` briefs and retros LF).
-   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,290 passed
-     and 1 skipped at midoffice08. That file looks for `../core_repo/src`, which isn't on this
+   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,295 passed
+     and 1 skipped at midoffice09. That file looks for `../core_repo/src`, which isn't on this
      machine.
 4. **Working notes, from the pieces so far.**
-   - A bash heredoc containing an apostrophe fails in this harness: write a patch script to a
-     file instead.
+   - A bash heredoc has failed in this harness on some apostrophes (06, 07, 08), though not
+     always (09): a patch script written to a file is the safe way.
    - An `.npz` member is decompressed afresh on every access: read each array once into a dict.
    - The Write tool writes LF; `Path.write_text` without `newline=""` writes CRLF on Windows.
+   - Git Bash's process substitution, `diff <(...) file`, fails silently here: diff two files.
 
 ---
 
@@ -79,28 +82,33 @@ layer (c92d343 to e859b4e, 2026-11-01).
 - 5ccbb70: **midoffice07** -- the identity corrections, the lag rule and the price-gap test;
   stopped at its gate.
 - 7228b01: this file, and Rule 43's step that keeps it.
-- Next: **midoffice08** -- the build. Jeff commits it after 7228b01 (`git log --oneline -3`).
+- cfe1245: **midoffice08** -- the build: the panel on securities, total returns, traded volumes,
+  the three-step comparison.
+- Next: **midoffice09**. Jeff commits it after cfe1245 (`git log --oneline -3`).
 
-**The current piece: midoffice08, COMPLETE (2026-11-10).**
+**The current piece: midoffice09, COMPLETE (2026-11-10).**
 
-- **The gate passes, offline, with no requests.**
-  - The share-class rule is a check in the gate (08 ruling 1).
-  - Coherent, Inc.'s row is in the `_amended` table.
-  - 628 of 628 spans pass, COHR by its share class; 47 splits, 8 price-only, no contradiction.
-- **The first-count search: 66 lookups over 12 spans.** Member-days without a count fall from
-  696 to 206.
-- **The panel on securities is built,** with all seven of its guards passing:
-  - 592 securities, 1,214 days;
-  - prices stitched, total returns, traded volumes;
-  - counts per span, with splits on their execution dates;
-  - membership through the renames.
-- **The comparison, three steps, each measured on its own**:
-  - mean R-squared: 0.298076 on the old panel; 0.290903 on securities; 0.292774 on traded
-    volumes; 0.293189 on total returns;
-  - members in each period's regression: median 451 before, 502 after.
-- **`docs/FACTOR_MODEL.md`:** the split paragraph rewritten, and a section on the panel on
-  securities.
-- **Waiting on Jeff:** the count decisions and the returns default (What is next).
+- **The count rulings, each measured against the one before.** The panel is rebuilt as
+  `_repaired`.
+  - **Confirmed first counts:** 117 member-days, GE Vernova's and Amentum's.
+  - **Isolated errors repaired:** 7 samples, 378 member-days.
+  - **The overrides:** HON and SKYD, 38 member-days.
+  - **The model against midoffice08's run D:** mean R-squared 0.293189 to 0.293204; every
+    factor's mean within 0.10%.
+- **The defaults: the panel on securities, total returns.** The run at its new defaults equals
+  item 1's run exactly, its report line for line and its model array for array.
+- **Residuals for every covered name.** Each security's own history is every specific return it
+  has, member or not; factor returns and the specific risk model's fit are unchanged to the bit.
+  - **Fallbacks:** 11 to none.
+  - **Joiners in their first year:** the characteristics' weight falls from a median 16.4% to
+    2.9%.
+  - **Forecasts:** 108 of 551 move, Signature Bank's most, 58% to 396%.
+- **Waiting on Jeff:**
+  - PCG's removed sample;
+  - leavers' histories after leaving;
+  - how a history is weighted.
+
+  Then the noise-share question.
 
 ---
 
@@ -115,9 +123,9 @@ in `docs/FACTOR_MODEL.md`.
 - The estimation universe on day t is that day's members passing the data test. It alone sets
   every scale: clip bounds, cap-weighted mean, equal-weighted sd. Outsiders get exposures on the
   members' scale. One membership array goes to every consumer. (01)
-- Each period's regression holds to that day's members. Industry counts and specific risk are
-  taken over the regression universe; a name in no regression gets a fallback forecast, labelled.
-  (f72310b, c1275ab, 17a588d)
+- Each period's regression holds to that day's members. Industry counts are taken over the
+  regression universe, and the specific risk model is fitted on the regression's residuals
+  alone. (f72310b, c1275ab, 17a588d; 09)
 - membership():
   - reads the constituent list brought up to the change table (current_stale);
   - with dated renames from the identity table, reads the change table in today's tickers --
@@ -159,9 +167,16 @@ in `docs/FACTOR_MODEL.md`.
   is cap-weighted. Industries come from SIC, groups under 15 merged into their division, with no
   market factor beside them. Newey-West takes 10 lags at half-life 90. (666599b; docs) On the
   panel on securities, each security's SIC code is its own latest record's. (08)
-- **Noise shares** get one model-wide answer after the rebuild, never a deletion per factor.
-  As of run D: Construction 38.1%, Wholesale 46.2%, Finance & Real Estate 30.9%, Size
-  Nonlinearity 47.0%. (04 ruling 1)
+- **Noise shares** get one model-wide answer after the rebuild, never a deletion per factor. At
+  the run's defaults: Construction 38.2%, Wholesale 46.2%, Finance & Real Estate 31.0%, Size
+  Nonlinearity 46.6%. (04 ruling 1)
+- **A security's own specific-risk history** is every specific return it has, member or not:
+  in each estimated period, the return of every security with a return and a complete
+  characteristic row less its exposures times the members' factor returns, with no
+  degrees-of-freedom inflation outside the regression. A security in no regression with a
+  history of its own is blended, not a fallback. `--specific-history regression` keeps the
+  regression's residuals alone. (09; `specific_history="covered"`, the library's default still
+  "regression")
 
 **The identity table (05, 06, 07, 08)**
 
@@ -194,14 +209,28 @@ in `docs/FACTOR_MODEL.md`.
 - **The fetch** covers the whole window for every member security. A span-plus-look-back cut is
   to be a parameter for future panels; it is not built. (05 ruling 4)
 
-**Share counts and splits (06, 07, 08)**
+**Share counts and splits (06, 07, 08, 09)**
 
 - **Sampling.** Counts are sampled inside each security's own spans: each span's first and last
   day, and a 63-day grid kept in its phase.
 - **The first count.** A span that starts without a count, none carried into it, has its first
-  quarter searched by bisection for its first record with one, and its count carries from that
-  record's own date, forward only; the days before it have none. Only the found record enters,
-  not the search's others. (08 ruling 2)
+  quarter searched by bisection for its first record with one. That count stands only if the
+  span's next sample confirms it within 10%; otherwise the search goes on to the first record
+  the next sample confirms, and the days before it have no count. Only the found record enters,
+  not the search's others. (08 ruling 2; 08 ruling 1 for midoffice09; `--first-counts`)
+- **Isolated errors.** A sample whose two samples before and two after agree with each other
+  within 10%, and which differs from each beyond it with no applied split between, is not
+  carried; the count before it carries through. One pass; alternating counts are left and stay
+  in the count-move report. Every removal is listed. (08 ruling 2 for midoffice09; `--repair`)
+- **The overrides file**, `config/sp500_share_count_overrides.json`, in the repo, not `data/`:
+  rulings on single securities, each a key, a range, "carry" a count or "none", and the
+  evidence; samples inside a range are not read. The build lists every entry it uses. A new
+  anomaly goes in the file with its evidence, not into a rule for one case. (08 ruling 3 for
+  midoffice09; `--overrides`)
+- **The hindsight.** Rulings 1 and 2 recognise an error by a later sample: hindsight in cleaning
+  the data, not in what the model knows, since the true counts were public at the time and a
+  wrong count carries no information about the day's return. Real changes are adopted when the
+  samples show them and never back-filled. (08 rulings, for midoffice09)
 - **Weighted counts are never data.** They are a standing check: wherever a record carries one,
   against the count the panel carries that day, flagged beyond 10%. (08 ruling 2)
 - **Reorganisations' counts.** A successor carries its predecessor's count until its own first
@@ -229,14 +258,16 @@ in `docs/FACTOR_MODEL.md`.
   - prices are stitched: within one ticker's run, its adjusted closes times one scale; across a
     change of ticker, the raw closes' return times any split between;
   - splices are separate columns, a reorganisation one.
-- **Total returns** (built in 08):
+
+  It is the run's panel by default; the old one, on tickers, stays runnable for comparison.
+  (08 ruling 5 for midoffice09)
+- **Total returns** are the run's default; price returns stay runnable (08 ruling 4 for
+  midoffice09). They are:
   - every cash distribution, specials included, put on the prices' split basis by the ex-date's
     adjusted over raw close;
   - an exact duplicate kept once, TEL's of 2024-11-22 the only one; SPY's distributions too;
   - in the comparison, identity first, then dividends. (06's second amendment; 06 ruling 5;
     07's brief)
-- **Price returns** on the old panel: Polygon's adjusted bars are split-adjusted only. The run's
-  default is still price returns (a decision waiting).
 - **Volumes.** The panel on securities stores traded volumes, the raw bars', with the adjusted
   bars' beside them for comparison; the old panel stored the adjusted ones. (07; 08 ruling 3)
 - **LEN's 2025-01-21 adjustment** is left as Polygon has it, flagged. (06 ruling 6)
@@ -258,10 +289,10 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
   - Validate: `python -m praxis.midoffice.refdata.sp500 check --dir data/external/sp500`.
   - `... fetch --out data/external/sp500` writes a new one, which every run would then use: only
     to roll membership forward, and the table and the panel rebuilt after.
-- **The Polygon cache:** `data/external/polygon/cache/`, about 15,350 answers, found or not:
+- **The Polygon cache:** `data/external/polygon/cache/`, about 15,360 answers, found or not:
   `bars-`, `ref-`, `events-`, `splits-`, `dividends-`.
-  - Every script reads it first, so reruns ask nothing; midoffice08 added the search's 66 and 35
-    not-found records the old run's `--industries` asked for.
+  - Every script reads it first, so reruns ask nothing; midoffice09 added the 9 records the
+    confirmed first-count search asked for.
   - It holds the evidence; it can only be rebuilt by asking again.
 - **The identity table and fetch plan, current: `_amended`** (midoffice08).
   - `data/external/polygon/sp500_identity_2022-01-03_2026-11-03_amended*`: the table `.csv`,
@@ -277,48 +308,60 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
   - Report: `data/external/polygon/sp500_rebuild_gate_2022-01-03_2026-11-03_amended.json`.
     midoffice07's is `_corrected`, midoffice06's unsuffixed. Run on another plan, it writes that
     plan's report: given the `_corrected` plan, it would overwrite midoffice07's.
-- **The panel on securities:** `data/external/polygon/sp500_securities_2022-01-03_2026-11-03.npz`,
-  and its report `.json`.
+- **The panel on securities, current: `_repaired`** (midoffice09):
+  `data/external/polygon/sp500_securities_2022-01-03_2026-11-03_repaired.npz`, and its report
+  `.json`.
   - 592 securities -- each a share class, its key in `securities`, its label its last ticker --
     over the same 1,214 days.
   - Arrays: prices, total_return_prices, unadjusted_prices, volumes (traded), adjusted_volumes,
     shares_outstanding, highs, lows, tickers (each cell's), membership, market_returns,
     market_total_returns, sic_codes and sic_dates, with the snapshot hash and the plan.
   - Regenerate: `python scripts/build_sp500_securities.py --offline`, about 40 s. It runs the gate
-    offline first and builds only if it passes; it reproduces every array exactly (checked
+    offline first and builds only if it passes, and it refuses to write over an existing panel
+    without `--overwrite`.
+  - midoffice08's panel, before the count rulings, is the unsuffixed one: `--first-counts found
+    --repair none --overrides none --suffix ""` rebuilds its arrays exactly (checked
     2026-11-10).
+- **The overrides file**, in the repo: `config/sp500_share_count_overrides.json` -- HON from
+  2026-10-12 carries 635,675,701; SKYD from 2026-10-06 has no count. Each entry's `last` is the
+  last day its evidence reaches.
 
 ---
 
 ## The run
 
 ```
-python scripts/run_sp500_model.py data/external/polygon/sp500_securities_2022-01-03_2026-11-03.npz --industries --membership
+python scripts/run_sp500_model.py --industries --membership
 ```
 
-The old panel's, for comparison:
+That is the panel on securities with its counts repaired (`DEFAULT_PANEL`), total returns,
+traded volumes, and covered histories. The old panel, for comparison, runs as below, and with
+`--specific-history regression` too it reproduces midoffice08's run A exactly:
 
 ```
-python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2026-11-04.npz --industries --membership
+python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2026-11-04.npz --industries --membership --returns price
 ```
 
-**On the panel on securities:**
+**The switches:**
 
-- `--returns price` (the default) or `total`, the market's to match.
-- `--volumes traded` (the default, the stored) or `adjusted`.
-- `--membership` is the panel's own, checked against the newest snapshot's hash.
-- `--industries` reads the panel's own SIC codes and needs no key.
-- The old panel takes price returns and adjusted volumes only; its `--industries` reads the
+- `--returns total` (the default) or `price`, the market's to match.
+- `--volumes traded` (on securities, the default, the stored) or `adjusted`.
+- `--specific-history covered` (the default) or `regression`.
+- On the panel on securities, `--membership` is its own, checked against the newest snapshot's
+  hash, and `--industries` reads its own SIC codes and needs no key.
+- The old panel carries price returns and adjusted volumes alone. Its `--industries` reads the
   cache and needs `.env`'s `POLYGON_API_KEY`.
 
-**At today's defaults:**
+**At the defaults:**
 
-| | old panel | on securities, price | on securities, total |
-|---|---|---|---|
-| time | about 50 s | about 50 s | about 50 s |
-| mean R-squared, 938 periods from 2023-02-08 | 0.298076 | 0.292774 | 0.293189 |
-| members in the regression a period, median (range) | 451 (422-476) | 502 (499-503) | 502 (499-503) |
-| size pair: smallest 85 / largest 50 / index | 11.94 / 0.38 / 0.01% | 11.77 / 0.62 / 0.01% | 11.82 / 0.62 / 0.01% |
+- **Time:** about 55 to 70 s.
+- **Mean R-squared:** 0.293204 over 938 periods from 2023-02-08.
+- **Members in the regression a period:** median 502, range 499 to 503.
+- **Specific risk:** p10 15.58%, median 24.79%, p90 40.56%.
+- **The size pair:** 11.87% for the smallest 85, 0.62% for the largest 50, 0.01% for the index.
+
+The old panel, `--returns price --specific-history regression`: 0.298076, 451 (422-476),
+11.94 / 0.38 / 0.01%.
 
 **Its standing lines, and what each is there to catch:**
 
@@ -346,18 +389,18 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   - no weight;
   - no return;
   - an exposure missing, by the first factor without one.
-
-  On securities: 197 without a weight, 23 without a return, and 1,058 without Momentum, new
-  listings short of RSTR's half-year.
 - **The factor table's noise share, and its exactly-1 and none columns:** thin and one-member
   factors.
 - **Specific risk:**
   - the percentiles;
   - the shares of V-squared;
   - the residual spread, both MAD and sd, and its shares;
+  - under covered histories, the specific returns measured outside the regressions and the
+    securities blended outside them;
   - the characteristics' weight in a blended forecast.
   Together: who drives the specific risk model.
-- **Qualifications:** dropped periods, excluded securities, fallback forecasts.
+- **Qualifications:** dropped periods, excluded securities, fallback forecasts, and the
+  securities in no regression blended with their own history.
 
 **The other guards and standing checks:**
 
@@ -376,31 +419,32 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   - the walk through the renames and the panel's membership are the same member-days;
   - the split guard, exact.
 
+  Its reports list:
+  - every first count it passes over;
+  - every sample it repairs;
+  - every override it uses.
+
   Its standing checks are:
   - the weighted check -- carried counts listed in full, own records by security;
-  - every count move beyond 10% that no split explains.
+  - every count move beyond 10% that no split explains, 86 now.
 
 ---
 
 ## What is next
 
-1. **Jeff's rulings on midoffice08** (its retro, "Decisions left for Jeff"):
-   - **Transitional first counts.** GEV 4.0x for 59 member-days, AMTM 0.63x for 58, WBD 0.92x
-     for 62.
-     - **(a)** as ruled, as built;
-     - **(b)** a first count stands only if the next sample confirms it within 10%;
-     - **(c)** every record the search fetched.
-   - **Single samples Polygon got wrong for a quarter:** 504 member-days -- DGX, SBUX, XYZ, NWS,
-     EG, CEG, PCG. Leave them, or rule a sample the next one reverses stale. And PCG's two
-     alternating counts.
-   - **HON and SKYD:**
-     - HON halves from 2026-10-12, to within 0.06% of HONA's count, with no split and no price
-       gap;
-     - SKYD's post-merger count, which its records do not carry.
-   - **The run's returns by default:** price or total.
-   - **The panel on securities as the run's from now on** (this file gives its command first).
-2. **After the rulings, per midoffice07's brief:** residuals for every covered name, not only
-   regression members; then the model-wide noise-share question.
+1. **Jeff's rulings on midoffice09** (its retro, "Decisions left for Jeff"):
+   - **PCG's sample of 2026-01-09.** The isolated-error rule as worded removes it: its two
+     samples either side agree at 2.675 to 2.680 billion. The ruling had expected PCG left
+     whole, and both of Polygon's counts that day agree with the removed 2,197,910,425. Keep the
+     removal, or spare PCG (an override, or a rule that a sample its own weighted count confirms
+     is no error).
+   - **Leavers' histories after leaving.** Signature Bank forecasts 396% from its life as a
+     stock at fractions of a cent after its failure. Keep, as ruled, or bound a history once a
+     security no longer trades normally.
+   - **How a history is weighted.** It is equally weighted over the window, a joiner's oldest
+     volatility counting as much as its newest. That is for the bias statistics.
+2. **Then, per the brief:** the model-wide noise-share question, then out-of-sample bias
+   statistics.
 
 **Open, not queued:**
 
@@ -408,5 +452,9 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
 - VLVR runs the market model a second time;
 - the span-plus-look-back cut;
 - `tests/test_market_data.py`'s missing `../core_repo/src`;
-- `run_sp500_model.py` imports `HorizonCovariance` unused (ruff F401);
-- FDXF and Vylor carry no share-class count in the window, so they enter no regression.
+- three ruff findings that predate the mid-office pieces' code, each checked at HEAD:
+  - `run_sp500_model.py` imports `HorizonCovariance` unused;
+  - `crosssectional.py` imports `Mapping` unused;
+  - `test_crosssectional.py`'s import order;
+- FDXF and Vylor carry no share-class count in the window, so they enter no regression;
+- PCG's alternating counts, which no rule repairs.

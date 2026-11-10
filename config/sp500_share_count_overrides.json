@@ -1,0 +1,26 @@
+{
+  "description": "Rulings on the S&P 500 panel on securities' share counts, where Polygon's records are wrong and no general rule can tell. Rulings, not vendor data, so in the repo rather than in data/. Each entry: a security's key (composite FIGI, else CIK), the date range, what the build does there -- 'carry' sets the carried count to 'count' on the range's first day, 'none' leaves the range without one, and either way the samples inside the range are not read -- and the evidence. Read by scripts/build_sp500_securities.py, which lists every entry it used. A new anomaly goes in this file with its evidence, not into a rule written for one case. 'last' is the last day the evidence reaches: a panel built over a longer window needs the entry reviewed.",
+  "entries": [
+    {
+      "key": "BBG000H556T9",
+      "label": "HON",
+      "name": "Honeywell International, Inc.",
+      "first": "2026-10-12",
+      "last": "2026-11-03",
+      "action": "carry",
+      "count": 635675701,
+      "evidence": "A contaminated record. Polygon's HON records halve from 2026-10-12 -- 316,940,010 that day and 317,358,518 on 2026-11-03, against 635,675,701 on 2026-04-13 -- to within 0.06% of Honeywell Aerospace's own count (HONA: 316,826,559 on 2026-06-29, weighted 316,952,725 and 317,031,836 after), and HON's weighted count of 2026-07-14 is HONA's first count exactly. No split event under HON but 2025-10-30's price-only one, no raw close moving more than 15% in a day, and on HONA's first day HON opened higher: nothing halved Honeywell's shares. The last sample before the contamination, 2026-04-13, is carried.",
+      "ruled": "midoffice08, decision 3 (Jeff, 2026-11-10)"
+    },
+    {
+      "key": "BBG01VS5NK99",
+      "label": "SKYD",
+      "name": "Skydance Corporation",
+      "first": "2026-10-06",
+      "last": "2026-11-03",
+      "action": "none",
+      "evidence": "After Skydance took Warner Bros. Discovery, trading as SKYD from 2026-10-06, its records carry no share-class count, and the pre-merger count that would carry, 1,090,445,692, is 4.6 times under the weighted count of 2026-11-03, 5,042,178,087. No count is better than a wrong one.",
+      "ruled": "midoffice08, decision 3 (Jeff, 2026-11-10)"
+    }
+  ]
+}

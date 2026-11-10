@@ -5,6 +5,7 @@ carried with splits applied and stale samples read past, and the guards on what 
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -90,7 +91,7 @@ def two_for_one(stale=()):
                       tuple(stale), (day(19), 201.0))
 
 
-def small_panel(splits=None, samples=None, member_days=None, dividends=None):
+def small_panel(splits=None, samples=None, member_days=None, dividends=None, overrides=()):
     spans = [span("F1", "OLD", 0, 9, 0, 9), span("F1", "NEW", 10, 24, 10, 16, 19, 24),
              span("P", "RE", 0, 19, 0, 19), span("S", "RE", 20, 39, 20, 30, 39),
              span("Y", "SPL", 20, 39, 20, 39)]
@@ -114,7 +115,7 @@ def small_panel(splits=None, samples=None, member_days=None, dividends=None):
         "Y": [(day(25), day(39))]}
     return securities.build_panel(
         DAYS, columns, bars, splits if splits is not None else [two_for_one([(day(16), 100.0)])],
-        samples, paid, members, market)
+        samples, paid, members, market, overrides)
 
 
 def test_the_columns_merge_a_reorganisation_under_its_successor_and_keep_a_splice_apart():
@@ -220,3 +221,111 @@ def test_the_weighted_check_and_the_count_moves_flag_what_the_samples_cannot_sho
     assert [(m.label, m.day) for m in moves] == []
     no_split = securities.count_moves(panel, [])
     assert [(m.label, m.day, m.ratio) for m in no_split] == [("NEW", day(15), 2.0)]
+
+
+def test_a_first_count_the_next_sample_does_not_confirm_is_passed_over():
+    """GE Vernova's case: its first records carry GE's count, four times its own, until Polygon
+    corrects them. The next sample does not confirm that first count, so the search goes on to
+    the first record it does confirm, and the days before that one have no count. A first count
+    the next sample confirms within 10% stands; confirm=False keeps the first, midoffice08's
+    rule."""
+    first = span("F", "SPUN", 0, 30, 0, 20, 30)
+
+    def records(early, later):
+        def lookup(ticker, on):
+            i = DAYS.index(on)
+            count = None if i < 3 else early if i < 9 else later
+            return Record(ticker, on, "F", "0001", "Spun", "CS"), count
+        return lookup
+
+    def search(lookup, **kw):
+        return securities.search_first_count(first, list(DAYS[:21]), (day(20), 1000.0), lookup,
+                                             lambda r: r.key == "F", **kw)
+
+    passed = search(records(4000.0, 1010.0))
+    assert passed.unconfirmed == (day(3), 4000.0) and passed.found == (day(9), 1010.0)
+    assert passed.next_count == 1000.0
+    assert f"unconfirmed; the first the next sample confirms is {day(9)}'s" in passed.detail
+    kept = search(records(4000.0, 1010.0), confirm=False)
+    assert kept.found == (day(3), 4000.0) and kept.unconfirmed is None
+    near = search(records(920.0, 1010.0))
+    assert near.found == (day(3), 920.0) and near.unconfirmed is None and "confirmed" in near.detail
+
+
+def test_an_isolated_bad_sample_is_removed_and_alternation_steps_and_splits_are_left():
+    """DGX's case: one sample a tenth of the four either side, which agree with each other --
+    not carried. Two wrong samples in a row, samples alternating between two counts, a real
+    step the later samples share, a sample without two on each side, and one with a split
+    between its neighbours: none of them is removed, the rule unable to tell which count is
+    true, or the split's to explain."""
+    def column(key):
+        return securities.Column(key, (key,), key, (span(key, key, 0, 39),))
+
+    def seq(*pairs):
+        return [(day(i), "T", float(c)) for i, c in pairs]
+
+    samples = {
+        "ERR": seq((0, 100), (5, 101), (10, 10), (15, 102), (20, 100)),
+        "TWO": seq((0, 100), (5, 101), (10, 10), (15, 11), (20, 100), (25, 100)),
+        "ALT": seq((0, 100), (5, 150), (10, 100), (15, 150), (20, 100)),
+        "STEP": seq((0, 100), (5, 100), (10, 150), (15, 150), (20, 150)),
+        "SPLIT": seq((0, 100), (5, 100), (10, 50), (15, 100), (20, 100)),
+        "EDGE": seq((0, 10), (5, 100), (10, 100), (15, 100), (20, 100)),
+    }
+    split = SplitCheck("SPLIT", "SPLIT", Split(day(12), 1.0, 2.0, "SPLIT"), None, None, True,
+                       None, "split", False, "a split")
+    columns = [column(k) for k in samples]
+    (repair,) = securities.isolated_errors(columns, samples, [split])
+    assert (repair.key, repair.day, repair.count) == ("ERR", day(10), 10.0)
+    assert repair.neighbours == ((day(0), 100.0), (day(5), 101.0), (day(15), 102.0),
+                                 (day(20), 100.0))
+    unsplit = securities.isolated_errors(columns, samples, [])
+    assert {(r.key, r.day) for r in unsplit} == {("ERR", day(10)), ("SPLIT", day(10))}
+
+
+def test_an_override_carries_its_count_or_none_and_reads_no_sample_inside():
+    """HON's case and SKYD's: a ruling carries a count over its range, or leaves the range with
+    none, and the samples inside it are not read; the split before it still applies, a count
+    carried into a span is closed where the ruling starts, and each override used is listed
+    with its days, member-days and the samples it did not read."""
+    carry = securities.Override("F1", "NEW", day(16), day(20), "carry", 150.0, "evidence", "r")
+    none = securities.Override("S", "RE", day(25), day(39), "none", None, "evidence", "r")
+    panel = small_panel(overrides=[carry, none])
+    f1, re = panel.shares[:, 0], panel.shares[:, 1]
+    assert list(f1[[15, 16, 19, 20, 21, 24]]) == [200.0, 150.0, 150.0, 150.0, 150.0, 150.0]
+    assert list(re[[19, 24]]) == [50.0, 50.0] and not np.isfinite(re[25:]).any()
+    (into,) = [c for c in panel.carries if c.key == "S"]
+    assert into.first == day(20) and into.until == day(25)
+    assert [(o.key, days, member, unread) for o, days, member, unread in panel.overridden] == [
+        ("F1", 5, 5, 2), ("S", 15, 11, 1)]
+
+
+def test_the_overrides_file_is_read_with_its_rules(tmp_path):
+    """Each entry a key, a range, a carry with its count or none without one, and evidence; a
+    carry without a count, a none with one, a range backwards, no evidence, or two entries
+    overlapping for one security are refused."""
+    import json
+
+    def write(*entries):
+        path = tmp_path / "overrides.json"
+        path.write_text(json.dumps({"entries": list(entries)}), encoding="utf-8")
+        return path
+
+    good = {"key": "K", "label": "KK", "first": "2026-10-12", "last": "2026-11-03",
+            "action": "carry", "count": 635675701, "evidence": "a contaminated record",
+            "ruled": "midoffice08"}
+    (read,) = securities.read_overrides(write(good))
+    assert (read.key, read.label, read.first, read.action, read.count) == (
+        "K", "KK", dt.date(2026, 10, 12), "carry", 635675701.0)
+    for bad, why in (({**good, "count": None}, "needs a count"),
+                     ({**good, "action": "none"}, "only a carry has one"),
+                     ({**good, "action": "halve"}, "not 'halve'"),
+                     ({**good, "last": "2026-10-01"}, "ends before it starts"),
+                     ({**good, "evidence": ""}, "needs its evidence")):
+        with pytest.raises(ValueError, match=why):
+            securities.read_overrides(write(bad))
+    with pytest.raises(ValueError, match="overlap"):
+        securities.read_overrides(
+            write(good, {**good, "first": "2026-10-20", "last": "2026-12-01"}))
+    path = Path(__file__).resolve().parents[2] / "config" / "sp500_share_count_overrides.json"
+    assert {o.label for o in securities.read_overrides(path)} == {"HON", "SKYD"}

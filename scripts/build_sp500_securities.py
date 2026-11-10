@@ -17,10 +17,24 @@ See `midoffice.refdata.securities` for what the panel holds and how. In order:
    adjusted volumes, share counts, the market series.
 4. **Its guards**, any failing a non-zero status: the identity table's, on the panel; every
    member-day the snapshot's walk through the table's renames gives, mapped to a column; and the
-   split guard, exact. Then the weighted-count check, standing and reported, never a source.
+   split guard, exact. Then the weighted-count check and the count moves, standing and reported,
+   never a source.
 
-Writes, beside the plan (gitignored, like it): `sp500_securities_<first>_<last>.npz`, the panel,
-and `sp500_securities_<first>_<last>.json`, the report.
+The counts follow midoffice08's rulings on what Polygon's records get wrong, each switchable:
+
+- **A first count must be confirmed** (`--first-counts confirmed`): it stands only if the span's
+  next sample confirms it within 10%; otherwise the search goes on to the first record the next
+  sample confirms, and the days before it have no count. `found` takes the first record with
+  any count, midoffice08's build.
+- **Isolated errors are repaired** (`--repair isolated`): a sample whose two samples before and
+  two after agree with each other within 10%, which differs from each beyond it with no split
+  between, is not carried, and the count before it carries through. Every one is listed.
+- **The overrides file** (`--overrides`, `config/sp500_share_count_overrides.json`): rulings on
+  single securities' counts, each with its evidence, applied and listed. `none` reads none.
+
+Writes, beside the plan (gitignored, like it): `sp500_securities_<first>_<last><suffix>.npz`,
+the panel, and `.json`, the report -- `--suffix` `_repaired` by default; midoffice08's panel, by
+its rules, has none. An existing file is never overwritten without `--overwrite`.
 """
 
 from __future__ import annotations
@@ -87,6 +101,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tolerance", type=float, default=rebuild.TOLERANCE)
     parser.add_argument("--largest-term", type=int, default=rebuild.LARGEST_TERM)
     parser.add_argument("--out", default=None, help="where to write; the plan's directory")
+    parser.add_argument("--first-counts", choices=("confirmed", "found"), default="confirmed",
+                        help="a span's first count must be confirmed by its next sample, within "
+                             "the tolerance (the default, midoffice08's ruling 1), or the first "
+                             "record with any count stands (found, midoffice08's build)")
+    parser.add_argument("--repair", choices=("isolated", "none"), default="isolated",
+                        help="isolated: a sample whose two samples before and two after agree "
+                             "and which differs from them, no split between, is not carried "
+                             "(the default, midoffice08's ruling 2); none repairs nothing")
+    parser.add_argument("--overrides", default="config/sp500_share_count_overrides.json",
+                        help="the rulings on single securities' counts (midoffice08's ruling "
+                             "3); none reads none")
+    parser.add_argument("--suffix", default="_repaired",
+                        help="appended to the output's stem (default _repaired; midoffice08's "
+                             "panel, built by its rules, has none)")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="write over an existing panel of the same name; without it the "
+                             "build stops first")
     args = parser.parse_args(argv)
 
     plan_path = Path(args.plan)
@@ -148,7 +179,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # ------------------------------------------------------------------ 2. the search
     print("\nThe first-count search: each span that starts without a share count, no count "
-          "carried into it, searched between its first sample and its first with a count")
+          "carried into it, searched between its first sample and its first with a count"
+          + (f"; a first count the next sample does not confirm within {args.tolerance:.0%} is "
+             f"passed over for the first it confirms, the days before that without a count"
+             if args.first_counts == "confirmed" else "; the first record with any count "
+             "stands (--first-counts found)"))
     searches: list[securities.FirstCount] = []
     asked = 0
     for column in columns:
@@ -174,8 +209,9 @@ def main(argv: list[str] | None = None) -> int:
                         rebuild.reconciles(record, key, share_classes, ciks))
 
                 try:
-                    found = securities.search_first_count(span, list(days), first_count, lookup,
-                                                          names)
+                    found = securities.search_first_count(
+                        span, list(days), first_count, lookup, names,
+                        confirm=args.first_counts == "confirmed", tolerance=args.tolerance)
                 except PolygonError as error:
                     raise SystemExit(f"  {span.ticker}: {error}") from None
                 searches.append(found)
@@ -199,6 +235,22 @@ def main(argv: list[str] | None = None) -> int:
         if found.found is not None and found.found[0] not in found.span.samples:
             samples.setdefault(found.span.key, []).append(
                 (found.found[0], found.span.ticker, found.found[1]))
+    repairs: list[securities.Repair] = []
+    if args.repair == "isolated":
+        repairs = securities.isolated_errors(columns, samples, checks, args.tolerance)
+        removed = {(r.sample_key, r.day) for r in repairs}
+        samples = {key: [row for row in rows if (key, row[0]) not in removed]
+                   for key, rows in samples.items()}
+    print(f"\nIsolated errors: a sample whose two samples before and two after agree with each "
+          f"other within {args.tolerance:.0%}, and which differs from each of them beyond it, no "
+          f"split between, is not carried -- " + (f"{len(repairs)} removed" if args.repair ==
+                                                  "isolated" else "none removed (--repair none)"))
+    for r in repairs:
+        print(f"  {r.label:<6} {r.ticker:<6} {r.day} {r.count:>16,.0f}; around it "
+              + ", ".join(f"{d} {c:,.0f}" for d, c in r.neighbours)
+              + f" -- {r.count / np.median([c for _, c in r.neighbours]):.3f} of their median")
+    overrides = ([] if args.overrides == "none"
+                 else securities.read_overrides(args.overrides))
     members = list(csv.DictReader(sibling(plan_path, "_membership.csv").open(encoding="utf-8")))
     member_days: dict[str, list[tuple[dt.date, dt.date]]] = {}
     for row in members:
@@ -207,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     panel = securities.build_panel(
         dates, columns, bars, checks, samples, fetched.dividends, member_days,
         (bars(args.market, "adj"), bars(args.market, "raw"),
-         fetched.dividends.get(args.market, ())))
+         fetched.dividends.get(args.market, ())), overrides)
     labels = [c.label for c in columns]
     repeated = [label for label, k in collections.Counter(labels).items() if k > 1]
     if repeated:
@@ -272,12 +324,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    {carry.ticker:<6} from {carry.first} at {carry.count:,.0f} "
               f"{'(a reorganisation)' if carry.reorganisation else '(from its own earlier span)'}"
               f", {'to ' + str(carry.until) if carry.until else 'to the span end, 1:1, FLAGGED'}")
+    print(f"  overrides, {args.overrides}: {len(overrides)} in the file, "
+          f"{len(panel.overridden)} used" if args.overrides != "none"
+          else "  overrides: none read (--overrides none)")
+    for o, days, member, unread in panel.overridden:
+        what = f"carry {o.count:,.0f}" if o.action == "carry" else "no count"
+        print(f"    {o.label:<6} {o.key} {o.first}..{o.last}: {what} -- {days} days in its spans, "
+              f"{member} member-days, {unread} sample(s) inside not read; {o.ruled}\n"
+              f"      {o.evidence}")
+    used = {o for o, *_ in panel.overridden}
+    for o in overrides:
+        if o not in used:
+            print(f"  ! an override no column uses: {o.label} {o.key} {o.first}..{o.last}")
     no_count = panel.membership & ~np.isfinite(panel.shares)
     unspanned = panel.membership & (panel.tickers == "")
+    ruled_none = sum(member for o, _, member, _ in panel.overridden if o.action == "none")
     print(f"  member-days without a count: {int(no_count.sum()):,} (midoffice07, before the "
-          f"search: 696) -- {int((no_count & ~unspanned).sum()):,} inside the spans, before a "
-          f"first count; {int(unspanned.sum()):,} after a member's last trade, outside its "
-          f"spans, which no price or count reaches")
+          f"search: 696) -- {int((no_count & ~unspanned).sum()) - ruled_none:,} inside the "
+          f"spans, before a first count; {ruled_none:,} in an override's range of no count; "
+          f"{int(unspanned.sum()):,} after a member's last trade, outside its spans, which no "
+          f"price or count reaches")
     for j in np.flatnonzero((no_count & ~unspanned).any(axis=0)):
         days = np.flatnonzero(no_count[:, j] & ~unspanned[:, j])
         print(f"    {labels[j]:<6} {len(days):>4}: {dates[days[0]]}..{dates[days[-1]]}")
@@ -409,8 +475,11 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------ write
     out_dir = Path(args.out) if args.out else plan_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"sp500_securities_{dates[0]}_{dates[-1]}"
+    stem = f"sp500_securities_{dates[0]}_{dates[-1]}{args.suffix}"
     destination = out_dir / f"{stem}.npz"
+    for path in (destination, out_dir / f"{stem}.json"):
+        if path.exists() and not args.overwrite:
+            raise SystemExit(f"  {path} exists: give another --suffix or --out, or --overwrite")
     np.savez_compressed(
         destination,
         dates=np.array([d.isoformat() for d in dates]),
@@ -443,7 +512,18 @@ def main(argv: list[str] | None = None) -> int:
         "gate": {"passed": verdict.passed, "identity": len(identities),
                  "reconciled": [[c.span.ticker, c.reconciled, c.detail] for c in reconciled],
                  "splits": dict(kinds)},
+        "rules": {"first_counts": args.first_counts, "repair": args.repair,
+                  "overrides": args.overrides, "tolerance": args.tolerance},
+        "repairs": [{"label": r.label, "key": r.key, "sample_key": r.sample_key,
+                     "ticker": r.ticker, "day": str(r.day), "count": r.count,
+                     "neighbours": [[str(d), c] for d, c in r.neighbours]} for r in repairs],
+        "overrides": [{"label": o.label, "key": o.key, "first": str(o.first), "last": str(o.last),
+                       "action": o.action, "count": o.count, "days": days, "member_days": member,
+                       "unread": unread, "ruled": o.ruled, "evidence": o.evidence}
+                      for o, days, member, unread in panel.overridden],
         "searches": [{"ticker": s.span.ticker, "key": s.span.key,
+                      "unconfirmed": [str(s.unconfirmed[0]), s.unconfirmed[1]]
+                      if s.unconfirmed else None,
                       "bracket": [str(d) for d in s.bracket] if s.bracket else None,
                       "found": [str(s.found[0]), s.found[1]] if s.found else None,
                       "probes": [[str(d), c, k] for d, c, k in s.probes], "detail": s.detail}

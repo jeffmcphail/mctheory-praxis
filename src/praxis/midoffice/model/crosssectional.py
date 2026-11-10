@@ -172,6 +172,18 @@ class CrossSectionalNotes:
     # How many shared dates before each return its exposures, weights and membership were
     # read; see `regression_design`.
     lag: int = 1
+    # Whose residuals each security's own specific-risk history is built from: "regression",
+    # its residuals in the regressions that held it; or "covered", its specific return in every
+    # estimated period in which it had a return and a complete characteristic row, member or
+    # not -- see `estimate_cross_sectional_model`.
+    specific_history: str = "regression"
+    # Under "covered": the specific returns measured outside the regressions, against the
+    # members' factor returns; and the securities outside every regression whose forecast
+    # blends a history of their own, so are no fallback.
+    outside_residuals: int = 0
+    blended_outside: tuple[str, ...] = ()
+    # For each security with a forecast, how many specific returns its own history holds.
+    history_lengths: dict[str, int] = field(default_factory=dict, repr=False, compare=False)
     # The estimated factor returns, period by period: what the covariance was estimated from.
     factor_returns: FactorReturns | None = field(default=None, repr=False, compare=False)
 
@@ -365,12 +377,27 @@ class CrossSectionalNotes:
                 f"the blend of model and history having fallen below it: "
                 f"{', '.join(self.delivered_floor[:5])}"
             )
-        if self.fallback_specific_risk:
+        if self.fallback_specific_risk and self.specific_history == "covered":
+            out.append(
+                f"{len(self.fallback_specific_risk)} security(ies) have no specific return of "
+                f"their own, in a regression or out of one, so their forecast is a fallback, "
+                f"not a model one -- the characteristic forecast extrapolated to them: "
+                f"{', '.join(self.fallback_specific_risk[:5])}"
+            )
+        elif self.fallback_specific_risk:
             out.append(
                 f"{len(self.fallback_specific_risk)} security(ies) are in no estimated "
                 f"period's regression, so the specific risk model was not estimated on them "
                 f"and their forecast is a fallback, not a model one -- the characteristic "
                 f"forecast extrapolated to them: {', '.join(self.fallback_specific_risk[:5])}"
+            )
+        if self.blended_outside:
+            out.append(
+                f"{len(self.blended_outside)} security(ies) are in no estimated period's "
+                f"regression and have specific returns of their own, measured against the "
+                f"members' factor returns: their forecast blends that history with the "
+                f"characteristic forecast extrapolated to them: "
+                f"{', '.join(self.blended_outside[:5])}"
             )
         if self.specific_risk_model is not None:
             out.extend(self.specific_risk_model.notes.qualifications())
@@ -657,6 +684,7 @@ def estimate_cross_sectional_model(
     annualise: bool = True,
     first_factor_id: int = 1,
     residual_spread: str = "mad",
+    specific_history: str = "regression",
 ) -> FactorModel:
     """Regress returns cross-sectionally on characteristics, period by period.
 
@@ -716,7 +744,23 @@ def estimate_cross_sectional_model(
 
     `residual_spread` is how the specific risk model measures the spread its blend weights
     answer to -- see `specificrisk.estimate_specific_risk_model`: "mad", the default, or "sd".
+
+    `specific_history` is whose residuals a security's own specific-risk history -- the
+    standard deviation `historical` takes, and the history `blend` weighs -- is built from.
+    "regression", the default, is its residuals in the regressions that held it. "covered"
+    adds, in every estimated period, its specific return wherever it had a return and a
+    complete characteristic row and the regression did not hold it -- not a member, or no
+    weight: its return less its exposures times the period's factor returns, with no
+    degrees-of-freedom inflation, since no fit absorbed it. A joiner then arrives with its
+    history from before it joined, and a leaver keeps forecasting from its own history after.
+    Factor returns still come from the regression alone, and the specific risk model's
+    estimation -- the V fit, kappa, the blend's model error -- from its residuals alone; a
+    security outside every regression with a history of its own is blended, not a fallback.
     """
+    if specific_history not in ("regression", "covered"):
+        raise ValueError(
+            f"specific_history must be 'regression' or 'covered', got {specific_history!r}"
+        )
     # Dates and securities common to both, in panel order.
     return_rows, char_rows, return_cols, char_cols = _align(returns, characteristics)
     shared_dates = tuple(returns.dates[i] for i in return_rows)
@@ -782,6 +826,13 @@ def estimate_cross_sectional_model(
     ever_in = np.zeros(n_secs, dtype=bool)
 
     in_regression = design.in_regression
+    # Every security's specific return, member or not, wherever it has a return and a complete
+    # characteristic row: the regression's own residuals, and the rest against its factors.
+    covered = None
+    if specific_history == "covered":
+        covered = np.full((n_periods_in, n_secs), np.nan)
+        reachable = np.isfinite(r_block) & np.isfinite(x_block).all(axis=2)
+    outside_residuals = 0
     # The first `lag` dates have nothing earlier to read: they are not periods, thin or not.
     for t in range(lag, n_periods_in):
         usable = in_regression[t]
@@ -845,6 +896,12 @@ def estimate_cross_sectional_model(
         # applied here rather than once at the end.
         dof_inflation = np.sqrt(n_t / (n_t - rank)) if n_t > rank else 1.0
         residuals[t, usable] = u_t * dof_inflation
+        if covered is not None:
+            covered[t, usable] = residuals[t, usable]
+            outside = reachable[t] & ~usable
+            if outside.any():
+                covered[t, outside] = r_block[t, outside] - x_block[t][outside, :] @ f_t
+                outside_residuals += int(np.count_nonzero(outside))
 
         # Weighted R-squared about the weighted mean, which is the right benchmark when
         # the regression itself is weighted. On the raw residuals: the degrees-of-freedom
@@ -926,6 +983,9 @@ def estimate_cross_sectional_model(
     floored: tuple[str, ...] = ()
     delivered_floor: tuple[str, ...] = ()
     fallback: tuple[str, ...] = ()
+    blended_outside: tuple[str, ...] = ()
+    # A security's own history: its residuals in the regressions, or every specific return.
+    own = residuals if covered is None else covered
     if specific_risk != "historical":
         cap_block = None
         if capitalisations is not None:
@@ -970,15 +1030,21 @@ def estimate_cross_sectional_model(
         if specific_risk == "blend":
             history: dict[str, tuple[float, int]] = {}
             for j, code in enumerate(shared_securities):
-                u = residuals[:, j]
+                u = own[:, j]
                 present = ~np.isnan(u)
                 if int(present.sum()) >= 2:
                     history[code] = (
                         float(np.std(u[present], ddof=1)) * vol_scale,
                         int(present.sum()),
                     )
+            # Outside the universe with a history of its own: blended, its history measured,
+            # only the characteristic forecast extrapolated to it.
+            outside_rows = {c: row for c, row in fallback_rows.items()
+                            if covered is not None and c in history}
+            fallback_rows = {c: row for c, row in fallback_rows.items() if c not in outside_rows}
+            blended_outside = tuple(outside_rows)
             modelled = risk_model.blend(
-                exposure_rows, history, floor_fraction=specific_risk_floor
+                {**exposure_rows, **outside_rows}, history, floor_fraction=specific_risk_floor
             )
         else:
             modelled = risk_model.forecast(
@@ -1000,7 +1066,7 @@ def estimate_cross_sectional_model(
             no_exposures.append(code)
             continue
         if specific_risk == "historical":
-            u = residuals[:, j]
+            u = own[:, j]
             present = ~np.isnan(u)
             if int(present.sum()) < min_observations:
                 short_history.append(code)
@@ -1011,7 +1077,7 @@ def estimate_cross_sectional_model(
             # A security with no residual history at all still gets a forecast here, which
             # is the point of modelling specific risk rather than measuring it.
             specific = float(modelled[code])
-            u = residuals[:, j]
+            u = own[:, j]
             if int(np.count_nonzero(~np.isnan(u))) < min_observations:
                 short_history.append(code)
         if specific <= 0.0:
@@ -1068,6 +1134,13 @@ def estimate_cross_sectional_model(
             code for code, inside in zip(shared_securities, ever_in) if inside
         ),
         lag=lag,
+        specific_history=specific_history,
+        outside_residuals=outside_residuals,
+        blended_outside=blended_outside,
+        history_lengths={
+            code: int(np.count_nonzero(~np.isnan(own[:, shared_securities.index(code)])))
+            for code in exposures
+        },
         factor_returns=factors,
     )
 

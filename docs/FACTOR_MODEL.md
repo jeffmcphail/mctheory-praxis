@@ -634,6 +634,27 @@ carry both. The scale is settled (the ruling of 2026-11-09: the standard deviati
 how much weight a security's history should get against the model is a different question, for
 out-of-sample bias statistics to settle.
 
+### Whose history: every covered name's specific returns
+
+A security's own history was its residuals in the regressions that held it, so a joiner's
+history began the day it joined and a leaver's stopped the day it left, and a security in no
+regression had none: a fallback. `specific_history="covered"` -- the S&P 500 run's default since
+midoffice09 -- adds, in each estimated period, the specific return of every security with a
+return and a complete characteristic row that the regression did not hold: its return less its
+exposures times the members' factor returns, with no degrees-of-freedom inflation, since no fit
+absorbed it. Factor returns and the specific risk model's fit -- V, kappa, the relative residual
+spread -- stay the regression's alone, unchanged to the bit; only the histories lengthen. A
+joiner arrives with its history from before it joined, a leaver keeps forecasting from its own
+history after, and a security in no regression with a history of its own is blended, not a
+fallback.
+
+On the S&P 500 run: 55,830 specific returns measured outside the regressions; all 11 fallbacks
+blended with histories of their own; for the 21 securities in their first year as members, the
+characteristics' weight falls from a median 16.4% to 2.9%; 108 of 551 forecasts move. The
+largest is Signature Bank's, from 58% to 396%: its history after its failure is a stock trading
+at fractions of a cent. The history is still equally weighted over the window, so a joiner's
+oldest volatility counts as much as its newest.
+
 ## Descriptors: building the exposures instead of assuming them
 
 `descriptors.py` implements Appendix A of the US-E3 handbook: the raw measurements underneath
@@ -928,25 +949,42 @@ cache holds the fetch:
   series, SPY, likewise: 1.31% a year above its price return.
 - **Volumes**: traded, the raw bars'. The adjusted bars' are kept beside them, for comparison.
 - **Share counts**, as the split paragraph above has them, carried forward from each sample and
-  never back, across a security's own spans and across a reorganisation. A span that starts
-  without a count, with none carried into it, has its first quarter searched by bisection for
-  its first record with one, and its count carries from that record's own date: 66 lookups over
-  12 spans. Member-days without a count fall from 696 to 206: FedEx Freight's 109 and Vylor's 24,
-  whose records carry none in the window; the spin-offs' first days, one to thirteen of them;
-  and 37 days the index carried a member past its last trade.
+  never back, across a security's own spans and across a reorganisation. Three rulings
+  (midoffice08's) correct what Polygon's records get wrong, each with a later sample: hindsight
+  in cleaning the data, not in what the model knows, since the true counts were public at the
+  time and a wrong count carries no information about the day's return.
+  - **A first count must be confirmed.** A span that starts without a count, with none carried
+    into it, has its first quarter searched by bisection for its first record with one. That
+    count stands only if the span's next sample confirms it within 10%; otherwise the search
+    goes on to the first record the next sample confirms, and the days before it have no count.
+    GE Vernova's first records carry GE's own count, four times its own, and Amentum's 0.63 of
+    its own: 78 lookups over 12 spans.
+  - **An isolated error is not carried.** A sample whose two samples before and two after agree
+    with each other within 10%, and which differs from each beyond it with no split between, is
+    an error, and the count before it carries through: seven, among them Quest Diagnostics' at
+    0.104 of its neighbours, Starbucks' at 0.123 and Block's at 0.110. Samples alternating
+    between two counts, as Constellation's do, are left: the rule cannot tell which is true.
+  - **Rulings for what no rule can tell,** in `config/sp500_share_count_overrides.json`, each
+    with its evidence: Honeywell's records carrying Honeywell Aerospace's count from
+    2026-10-12, Skydance's carrying none after it took Warner Bros. Discovery. The build lists
+    every entry it uses.
+
+  Member-days without a count: 234 -- FedEx Freight's 109 and Vylor's 24, whose records carry
+  none in the window; the spin-offs' first days; Skydance's 21, by its ruling; and 37 days the
+  index carried a member past its last trade.
 
 Two standing checks report on the counts; neither is a source. Polygon's weighted share count
 is an earnings-per-share denominator, an average over a period, not the shares in existence; so
 wherever a record carries one, it is set against the count the panel carries that day and
 flagged beyond 10%. It confirms the 1:1 carries of OKE's and XOM's reorganisations (1.0001 and
-0.9920) and flags Carnival's (1.118), Skydance's after it took Warner Bros. Discovery (4.62) and
-Honeywell's on 2026-07-14 (0.50). Where a record's own share-class count is a single class of a
-company with several -- GOOGL, BRK.B, FOXA -- the weighted count spans them all, so those flag
-on every record. The second check reports every move of a carried count beyond 10% that no
-split explains: 103, mostly mergers' issuance, and a handful of samples Polygon got wrong for a
-quarter -- Quest Diagnostics' at 0.104 of the count either side, Starbucks' at 0.123, Block's at
-0.109 -- and the first records of some spin-offs, GE Vernova's carrying GE's count, four times
-its own.
+0.9920), and the repairs of Quest Diagnostics', Everest's and Starbucks' samples, whose own
+records' weighted counts sit within 0.6% of the count carried through them; it flags Carnival's
+unification (1.118) and Honeywell's contaminated records (0.50), and PG&E's, where both of
+Polygon's counts agree with the sample the error rule removed. Where a record's own share-class
+count is a single class of a company with several -- GOOGL, BRK.B, FOXA -- the weighted count
+spans them all, so those flag on every record. The second check reports every move of a carried
+count beyond 10% that no split explains: 86 after the rulings, mostly mergers' issuance, and
+the counts that alternate.
 
 ### What it changes
 
@@ -966,12 +1004,19 @@ On securities the regression holds 26 to 78 more members each period, 470,548 of
 member-periods; of the rest, 1,058 lack Momentum, new listings short of RSTR's half-year, 197 a
 weight, 23 a return. The 87 securities it adds include enough brokers and asset managers for
 SIC62 to be its own industry, leaving Finance & Real Estate with 12 members and a noise share
-of 31%. The 467 securities in both runs keep their specific-risk percentiles within about 0.1 of a
-point; BNY's falls by 14 points and Marsh McLennan's by 11, their histories now their own. Traded volumes take Trading
-Activity's mean from +4.11% to +2.26% a year and its volatility from 5.80% to 6.22%. Total
-returns raise every industry's mean, from 0.65% (Services) to 2.95% (SIC67, the REITs), in line
-with what their members paid (correlation 0.945 across the 20), and lower Volatility's by 0.58%;
-the high yielders' specific risk falls most, Altria's by 0.58 of a point.
+of 31%. The 467 securities in both runs keep their specific-risk percentiles within about 0.1
+of a point; BNY's falls by 14 points and Marsh McLennan's by 11, their histories now their own.
+Traded volumes take Trading Activity's mean from +4.11% to +2.26% a year and its volatility
+from 5.80% to 6.22%. Total returns raise every industry's mean, from 0.65% (Services) to 2.95%
+(SIC67, the REITs), in line with what their members paid (correlation 0.945 across the 20), and
+lower Volatility's by 0.58%; the high yielders' specific risk falls most, Altria's by 0.58 of a
+point.
+
+Since midoffice09 the run's defaults are the panel on securities with its counts repaired, total
+returns, and each security's history built from every specific return it has. The three count
+rulings move the model little -- 533 member-days change their count, and mean R-squared moves
+from 0.293189 to 0.293204 -- and covered histories move no factor return at all: specific risk
+is 15.58 / 24.79 / 40.56% at p10 / median / p90.
 
 ## Status
 

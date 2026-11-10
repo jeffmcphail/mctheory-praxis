@@ -1,11 +1,13 @@
 """Build a factor model from a fetched S&P 500 panel, and say which descriptors earn a place.
 
-    python scripts/run_sp500_model.py data/external/polygon/sp500_daily_*.npz
-    python scripts/run_sp500_model.py data/external/polygon/sp500_securities_*.npz --returns total
+    python scripts/run_sp500_model.py --industries --membership
+    python scripts/run_sp500_model.py data/external/polygon/sp500_daily_*.npz --returns price
 
-The first panel is on tickers (`fetch_sp500_panel.py`); the second on securities
-(`build_sp500_securities.py`), which carries total returns and traded volumes, and its own
-membership and industry codes, besides.
+By default the panel is on securities (`build_sp500_securities.py`, `DEFAULT_PANEL`), which
+carries total returns and traded volumes, and its own membership and industry codes besides;
+the returns are total, Barra's, and price returns stay runnable (midoffice08's rulings 4 and
+5). The first panel, on tickers (`fetch_sp500_panel.py`), stays runnable for comparison: it
+carries price returns alone, so it runs with `--returns price`.
 
 The descriptor screen follows the US-E3 handbook's own method -- "asset returns are regressed
 against industries and descriptors, one descriptor at a time, after the normalization step.
@@ -69,6 +71,10 @@ from praxis.midoffice.refdata.polygon import (  # noqa: E402
     read_api_key,
 )
 
+DEFAULT_PANEL = "data/external/polygon/sp500_securities_2022-01-03_2026-11-03_repaired.npz"
+"""The panel on securities, its share counts repaired by midoffice08's rulings: the run's panel
+when none is given."""
+
 UNBLENDED = {
     "SERDP": "its residual series is kept for the last window alone, so it has a value on the "
              "last date and no other; no estimated period reads it, and blended it would enter "
@@ -116,8 +122,9 @@ def load_panel(
         )
     else:
         if returns == "total":
-            raise SystemExit("  this panel, on tickers, carries price returns alone: --returns "
-                             "total needs build_sp500_securities.py's")
+            raise SystemExit("  this panel, on tickers, carries price returns alone: run it "
+                             "with --returns price; total returns, the default, need "
+                             "build_sp500_securities.py's")
         if volumes == "traded":
             raise SystemExit("  this panel, on tickers, stores the adjusted bars' volumes alone: "
                              "--volumes traded needs build_sp500_securities.py's")
@@ -482,12 +489,13 @@ def unreproduced_changes(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("panel", help="the .npz written by fetch_sp500_panel.py, on tickers, or "
-                                      "by build_sp500_securities.py, on securities")
-    parser.add_argument("--returns", choices=("price", "total"), default="price",
-                        help="the panel's price returns (the default) or its total returns, "
-                             "every distribution reinvested, the market's to match; total "
-                             "returns need a panel on securities")
+    parser.add_argument("panel", nargs="?", default=DEFAULT_PANEL,
+                        help="the .npz written by build_sp500_securities.py, on securities (by "
+                             f"default {DEFAULT_PANEL}), or by fetch_sp500_panel.py, on tickers")
+    parser.add_argument("--returns", choices=("price", "total"), default="total",
+                        help="the panel's total returns, every distribution reinvested (the "
+                             "default), or its price returns, the market's to match; a panel on "
+                             "tickers carries price returns alone")
     parser.add_argument("--volumes", choices=("traded", "adjusted"), default=None,
                         help="the volumes the turnovers and VLVR read: the panel's stored ones "
                              "by default -- traded on securities, the adjusted bars' on tickers "
@@ -542,6 +550,13 @@ def main(argv: list[str] | None = None) -> int:
                              "blends are built from; by default a period is estimated only if "
                              "every risk index's blend in it has exactly the descriptors the "
                              "forecast's has")
+    parser.add_argument("--specific-history", choices=("covered", "regression"),
+                        default="covered",
+                        help="whose residuals each security's own specific-risk history is "
+                             "built from: every specific return it has, member or not (the "
+                             "default), or its residuals in the regressions alone; factor "
+                             "returns and the specific risk model's fit keep to the "
+                             "regressions either way")
     args = parser.parse_args(argv)
     # None leaves the window to the library.
     beta_months = (
@@ -866,6 +881,7 @@ def main(argv: list[str] | None = None) -> int:
         membership=membership,
         periods=periods,
         residual_spread=args.residual_spread,
+        specific_history=args.specific_history,
         # Industries sum to one per security, which IS the unit column. Fitting a market
         # factor alongside them makes the design exactly singular, not nearly so.
         fit_market=scheme is None,
@@ -1178,9 +1194,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {'':<17} largest shares of the sd's square: "
               f"{named(spread.residual_spread_shares)}")
         # What the spread is for: the characteristics' weight in a blended forecast, at the
-        # history a security in the regression typically has.
-        history = held_in.sum(axis=0)
-        typical = int(np.median(history[history > 1]))
+        # history a security typically has -- in the regression, or every specific return.
+        if notes.specific_history == "covered":
+            lengths = np.array([n for n in notes.history_lengths.values() if n > 1])
+            typical = int(np.median(lengths))
+            print(f"  {'':<17} each security's own history is every specific return it has, "
+                  f"member or not: {notes.outside_residuals:,} measured outside the "
+                  f"regressions; {len(notes.blended_outside)} security(ies) in no regression "
+                  f"blended with their own")
+        else:
+            history = held_in.sum(axis=0)
+            typical = int(np.median(history[history > 1]))
         print(f"  {'':<17} the characteristics' weight in a blended forecast, at the median "
               f"history of {typical} periods: {risk_model.model_weight(typical):.2%}")
 

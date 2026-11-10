@@ -1106,6 +1106,52 @@ def test_a_membership_that_holds_everyone_changes_nothing():
     ) == regression_universe(returns, chars, min_securities=20, lag=0)
 
 
+def test_covered_histories_measure_every_specific_return_and_leave_the_fit_alone():
+    """Residuals for every covered name: in each estimated period, every security with a return
+    and a complete characteristic row gets its specific return, member or not -- its return
+    less its exposures times the members' factor returns. Factor returns and the specific risk
+    model's fit stay the regression's alone, exactly; only the histories lengthen. The ten
+    leavers keep theirs after leaving, and a security in no regression, trading throughout, is
+    blended with a history of its own rather than a fallback."""
+    returns, chars, caps, members = _departures()
+    members = members.copy()
+    members[:, 10] = False              # never a member, trading throughout
+    kw = dict(membership=members, min_securities=20, capitalisations=caps)
+    plain = _fit(returns, chars, specific_risk="blend", **kw)
+    covered = _fit(returns, chars, specific_risk="blend", specific_history="covered", **kw)
+    assert np.array_equal(plain.covariance.matrix, covered.covariance.matrix)
+    assert np.array_equal(plain.notes.factor_returns.returns,
+                          covered.notes.factor_returns.returns)
+    assert plain.notes.mean_r_squared == covered.notes.mean_r_squared
+    fitted, again = plain.notes.specific_risk_model, covered.notes.specific_risk_model
+    assert np.array_equal(fitted.gamma, again.gamma)
+    assert fitted.relative_residual_sd == again.relative_residual_sd
+    assert all(plain.exposures[c].exposures == covered.exposures[c].exposures
+               for c in plain.exposures)
+    n = len(covered.notes.estimated_dates)
+    leaver, outsider = returns.securities[0], returns.securities[10]
+    assert plain.notes.history_lengths[leaver] < covered.notes.history_lengths[leaver] == n
+    assert outsider in plain.notes.fallback_specific_risk
+    assert outsider not in covered.notes.fallback_specific_risk
+    assert covered.notes.blended_outside == (outsider,)
+    assert plain.notes.specific_history == "regression" and plain.notes.outside_residuals == 0
+    rows = [returns.dates.index(d) for d in covered.notes.estimated_dates]
+    assert covered.notes.outside_residuals == int((~members[rows]).sum())
+
+    # The outsider's history is its return less its exposures times the factor returns,
+    # with no degrees-of-freedom inflation: read through the historical method, its own sd.
+    historical = _fit(returns, chars, specific_risk="historical", specific_history="covered",
+                      **kw)
+    j = returns.securities.index(outsider)
+    factors = historical.notes.factor_returns.returns
+    design = np.concatenate([np.ones((len(rows), 1)), chars.values[rows, j, :]], axis=1)
+    u = returns.returns[rows, j] - np.einsum("tk,tk->t", design, factors)
+    assert historical.exposures[outsider].specific.by_issuer[outsider] == pytest.approx(
+        float(np.std(u, ddof=1)), rel=1e-12)
+    with pytest.raises(ValueError, match="specific_history must be"):
+        _fit(returns, chars, specific_history="everyone", **kw)
+
+
 def test_the_regression_universe_counts_only_periods_in_which_a_security_was_a_member():
     """An industry scheme counts its members over this. A security that reached a regression
     only after leaving the index must not count, and nor may one whose member periods were

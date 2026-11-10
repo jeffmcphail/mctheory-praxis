@@ -60,7 +60,9 @@ Pure functions over in-memory inputs; `scripts/build_sp500_securities.py` reads 
 from __future__ import annotations
 
 import datetime as dt
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
@@ -126,18 +128,27 @@ def columns_of(spans: Sequence[Span], reorganisations: Mapping[str, str]) -> lis
 
 @dataclass(frozen=True)
 class FirstCount:
-    """The search of a span that starts without a share count for its first record with one."""
+    """The search of a span that starts without a share count for its first record with one
+    that the span's next sample confirms."""
 
     span: Span
     bracket: tuple[dt.date, dt.date] | None
-    """The span's first sample, without a count, and its first sample with one; None where no
-    sample in the span carries one -- nothing to search between."""
+    """The span's first sample, without a count, and its first sample with one -- its next
+    sample, once a record with a count is found between; None where no sample in the span
+    carries one -- nothing to search between."""
     found: tuple[dt.date, float] | None
-    """The first record with a count: its date, from which the count carries, and the count."""
+    """The record the count carries from, its date and count: the first with a count that the
+    next sample confirms within the tolerance."""
     probes: tuple[tuple[dt.date, float | None, str | None], ...] = ()
     """Each record asked for, in order: its date, its count, the security it names."""
     failure: str | None = None
     """A probe naming another security than the span's: the search stops on it."""
+    unconfirmed: tuple[dt.date, float] | None = None
+    """The first record with a count, where the next sample does not confirm it: a figure
+    Polygon carries until it corrects the record, never carried here (midoffice08, ruling 1).
+    The days before `found` have no count."""
+    next_count: float | None = None
+    """The next sample's count, which confirms a first count or does not."""
 
     @property
     def detail(self) -> str:
@@ -147,10 +158,15 @@ class FirstCount:
             return (f"{self.span.ticker}: no sample in {self.span.first}..{self.span.last} "
                     f"carries a share-class count, so there is nothing to search between")
         a, b = self.bracket
-        assert self.found is not None
-        return (f"{self.span.ticker}: between {a}, without a count, and {b}, with one, the "
-                f"first record with a count is {self.found[0]}'s, {self.found[1]:,.0f}, in "
-                f"{len(self.probes)} lookup(s)")
+        assert self.found is not None and self.next_count
+        first = self.unconfirmed or self.found
+        text = (f"{self.span.ticker}: between {a}, without a count, and {b}, {self.next_count:,.0f}"
+                f", the first record with a count is {first[0]}'s, {first[1]:,.0f}, "
+                f"{first[1] / self.next_count:.3f} of the next sample's")
+        if self.unconfirmed is None:
+            return text + f", confirmed; in {len(self.probes)} lookup(s)"
+        return (text + f", unconfirmed; the first the next sample confirms is "
+                f"{self.found[0]}'s, {self.found[1]:,.0f}; in {len(self.probes)} lookup(s)")
 
 
 def search_first_count(
@@ -159,33 +175,168 @@ def search_first_count(
     bracket: tuple[dt.date, float] | None,
     lookup: Callable[[str, dt.date], tuple[Record | None, float | None]],
     names: Callable[[Record], bool],
+    *,
+    confirm: bool = True,
+    tolerance: float = TOLERANCE,
 ) -> FirstCount:
-    """The first record with a share count under the span's ticker, by bisection of the
-    trading days `days` between the span's first sample, which has none, and `bracket`, its
-    first sample with one (date and count), assuming that a record once carrying a count goes
-    on carrying one. `lookup(ticker, day)` is the reference endpoint's record on the day and
-    its share-class count. Every record asked for must name the span's security (`names`); one
-    naming another stops the search. Each lookup is one request at most: the client caches."""
+    """The first record with a share count under the span's ticker that the span's next sample
+    confirms, by bisection of the trading days `days` between the span's first sample, which
+    has none, and `bracket`, its first sample with one (date and count).
+
+    The first bisection finds the first record with any count, assuming that a record once
+    carrying a count goes on carrying one. A first count stands only if the next sample --
+    `bracket` -- confirms it within `tolerance`; otherwise a second bisection, between it and
+    the next sample, finds the first record that the next sample confirms, assuming that one
+    confirmed stays confirmed, and the days before that one have no count (midoffice08, ruling
+    1). `confirm=False` keeps the first record with any count, midoffice08's rule.
+
+    `lookup(ticker, day)` is the reference endpoint's record on the day and its share-class
+    count. Every record asked for must name the span's security (`names`); one naming another
+    stops the search. Each lookup is one request at most: the client caches."""
     if bracket is None:
         return FirstCount(span, None, None)
     first = span.samples[0]
-    lo = days.index(first)
-    hi = days.index(bracket[0])
-    found = bracket
+    end = (first, bracket[0])
     probes: list[tuple[dt.date, float | None, str | None]] = []
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        record, count = lookup(span.ticker, days[mid])
-        probes.append((days[mid], count, record.key if record is not None else None))
-        if record is not None and record.identified and not names(record):
-            return FirstCount(span, (first, bracket[0]), None, tuple(probes),
-                              f"{span.ticker} on {days[mid]} names {record.name} "
-                              f"({record.key}), not {span.name} ({span.key}): the search stops")
-        if count:
-            hi, found = mid, (days[mid], float(count))
-        else:
-            lo = mid
-    return FirstCount(span, (first, bracket[0]), found, tuple(probes))
+
+    def bisect(lo: int, hi: int, accepts) -> tuple[int, tuple[dt.date, float], str | None]:
+        """The first index after `lo`, up to `hi` -- the next sample, which accepts -- whose
+        record's count `accepts`; that record; or a failure."""
+        found = (bracket[0], float(bracket[1]))
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            record, count = lookup(span.ticker, days[mid])
+            probes.append((days[mid], count, record.key if record is not None else None))
+            if record is not None and record.identified and not names(record):
+                return hi, found, (f"{span.ticker} on {days[mid]} names {record.name} "
+                                   f"({record.key}), not {span.name} ({span.key}): the search "
+                                   f"stops")
+            if count and accepts(float(count)):
+                hi, found = mid, (days[mid], float(count))
+            else:
+                lo = mid
+        return hi, found, None
+
+    top = days.index(bracket[0])
+    at, found, failure = bisect(days.index(first), top, lambda count: True)
+    if failure is not None:
+        return FirstCount(span, end, None, tuple(probes), failure, next_count=bracket[1])
+    if not confirm or abs(found[1] / bracket[1] - 1.0) <= tolerance:
+        return FirstCount(span, end, found, tuple(probes), next_count=bracket[1])
+    unconfirmed = found
+    _, found, failure = bisect(at, top, lambda count: abs(count / bracket[1] - 1.0) <= tolerance)
+    if failure is not None:
+        return FirstCount(span, end, None, tuple(probes), failure, unconfirmed, bracket[1])
+    return FirstCount(span, end, found, tuple(probes), None, unconfirmed, bracket[1])
+
+
+# ----------------------------------------------------------------------------- repairs
+
+
+@dataclass(frozen=True)
+class Repair:
+    """A sample the isolated-error rule removes (midoffice08, ruling 2): its two samples before
+    and its two after agree with each other within the tolerance, it differs from each of them
+    beyond it, and no split the gate applies falls between them. It is not carried; the count
+    before it carries through."""
+
+    key: str
+    """Its column's key."""
+    sample_key: str
+    """The plan key whose sample it is: the column's, or a reorganisation's predecessor's."""
+    label: str
+    ticker: str
+    day: dt.date
+    count: float
+    neighbours: tuple[tuple[dt.date, float], ...]
+    """The two samples before it and the two after: date and count."""
+
+
+def isolated_errors(
+    columns: Sequence[Column],
+    samples: Mapping[str, Sequence[tuple[dt.date, str, float]]],
+    splits: Sequence[SplitCheck],
+    tolerance: float = TOLERANCE,
+) -> list[Repair]:
+    """Every sample the isolated-error rule removes, per column over its keys' samples in date
+    order -- the stale ones, read past by the lag rule, are none of them.
+
+    One pass over the samples as they are, so the rule reads only its own case: where two
+    samples in a row are wrong, or the samples alternate between two counts, as CEG's do, the
+    neighbours of each disagree and nothing is removed -- the rule cannot tell which count is
+    the true one -- and the count-move report still flags them. A real change, a merger's
+    issuance or a unification, is a step the later samples share, and is adopted."""
+    out = []
+    for column in columns:
+        mine = [c for c in splits if c.key in column.keys and c.applies]
+        stale = {(day, float(count)) for c in mine for day, count in c.stale}
+        split_days = [c.split.execution_date for c in mine]
+        sequence = sorted(
+            (day, ticker, float(count), key) for key in column.keys
+            for day, ticker, count in samples.get(key, ())
+            if count and (day, float(count)) not in stale
+        )
+        for k in range(2, len(sequence) - 2):
+            around = [sequence[k - 2], sequence[k - 1], sequence[k + 1], sequence[k + 2]]
+            values = [count for _, _, count, _ in around]
+            if max(values) / min(values) - 1.0 > tolerance:
+                continue
+            if any(around[0][0] < day <= around[-1][0] for day in split_days):
+                continue
+            day, ticker, count, key = sequence[k]
+            if all(abs(count / value - 1.0) > tolerance for value in values):
+                out.append(Repair(column.key, key, column.label, ticker, day, count,
+                                  tuple((d, c) for d, _, c, _ in around)))
+    return out
+
+
+@dataclass(frozen=True)
+class Override:
+    """A ruling on a security's share counts, where its records are wrong and no general rule
+    can tell (`read_overrides`). Over `first` to `last`, "carry" sets the carried count to
+    `count` on the range's first day, and "none" leaves the range with none. Either way the
+    samples inside the range are not read, and a split the gate applies inside it still
+    multiplies a carried count. A "none" range carries nothing out: the next sample sets the
+    count."""
+
+    key: str
+    label: str
+    first: dt.date
+    last: dt.date
+    action: str
+    count: float | None
+    evidence: str
+    ruled: str
+
+
+def read_overrides(path: Path | str) -> list[Override]:
+    """The overrides file, `config/sp500_share_count_overrides.json`: rulings, not vendor data,
+    so in the repo rather than in `data/`. Each entry a security's key, a date range, what the
+    build does there, and the evidence (midoffice08, ruling 3). A new anomaly goes in the file
+    with its evidence, not into a rule written for one case."""
+    entries = json.loads(Path(path).read_text(encoding="utf-8"))["entries"]
+    out = []
+    for entry in entries:
+        action, count = entry["action"], entry.get("count")
+        if action not in ("carry", "none"):
+            raise ValueError(f"{entry['key']}: an override carries a count or none, not "
+                             f"{action!r}")
+        if (action == "carry") != (count is not None):
+            raise ValueError(f"{entry['key']}: a carry needs a count, and only a carry has one")
+        first, last = dt.date.fromisoformat(entry["first"]), dt.date.fromisoformat(entry["last"])
+        if last < first:
+            raise ValueError(f"{entry['key']}: its range ends before it starts")
+        if not entry.get("evidence"):
+            raise ValueError(f"{entry['key']}: an override needs its evidence")
+        out.append(Override(entry["key"], entry.get("label", entry["key"]), first, last, action,
+                            None if count is None else float(count), entry["evidence"],
+                            entry.get("ruled", "")))
+    keys = [(o.key, o.first, o.last) for o in out]
+    for o in out:
+        if any(k == o.key and a <= o.last and o.first <= b and (a, b) != (o.first, o.last)
+               for k, a, b in keys):
+            raise ValueError(f"{o.key}: two overrides overlap")
+    return out
 
 
 # ----------------------------------------------------------------------------- the build
@@ -269,6 +420,9 @@ class Panel:
     unapplied: list[tuple[str, dt.date, str]] = field(default_factory=list)
     """Splits the gate classified as splits whose execution date found no count to apply to:
     column key, date, why."""
+    overridden: list[tuple[Override, int, int, int]] = field(default_factory=list)
+    """Each override used: it, the days of its range inside the column's spans, the member-days
+    among them, and the samples inside it not read."""
 
 
 def _by_date(bars: Sequence[Bar]) -> dict[dt.date, Bar]:
@@ -297,13 +451,15 @@ def build_panel(
     dividends: Mapping[str, Sequence[Dividend]],
     member_days: Mapping[str, Sequence[tuple[dt.date, dt.date]]],
     market: tuple[Sequence[Bar], Sequence[Bar], Sequence[Dividend]],
+    overrides: Sequence[Override] = (),
 ) -> Panel:
     """Assemble the panel. `bars(ticker, "adj" | "raw")` is a ticker's daily bars;
     `splits` the gate's classification of every split event inside the spans; `samples[key]`
     each plan key's share counts, (date, ticker, count), the searched first counts among them;
     `dividends[ticker]` each ticker's distributions; `member_days[key]` each plan key's runs of
     membership, (first, last), read through the renames; `market` the market series' adjusted
-    and raw bars and its distributions. `dates` are the trading calendar, the market's."""
+    and raw bars and its distributions; `overrides` the rulings on counts (`Override`).
+    `dates` are the trading calendar, the market's."""
     dates = tuple(dates)
     n, m = len(dates), len(columns)
     at = {day: i for i, day in enumerate(dates)}
@@ -418,6 +574,8 @@ def build_panel(
         carried = np.nan
         # A count carried into the span being walked, not yet reset by a sample of its own.
         pending: Carry | None = None
+        mine = [o for o in overrides if o.key in column.keys]
+        unread = {o: 0 for o in mine}
         for i in range(int(assigned[0]), int(assigned[-1]) + 1):
             day = dates[i]
             for check in splits_on.get(day, ()):
@@ -426,13 +584,25 @@ def build_panel(
                     out.applied.append((column.key, day, check.split.ratio))
                 else:
                     out.unapplied.append((column.key, day, "no count carried to it"))
+            active = next((o for o in mine if o.first <= day <= o.last), None)
+            if active is not None and (i == assigned[0]
+                                       or not active.first <= dates[i - 1] <= active.last):
+                # The ruling governs from the range's first day: a carry into it ends there.
+                carried = active.count if active.action == "carry" else np.nan
+                if pending is not None and pending.first != day:
+                    out.carries.append(Carry(pending.key, pending.ticker, pending.first,
+                                             pending.count, day, pending.reorganisation))
+                pending = None
             starts = span_of[i] >= 0 and (i == assigned[0] or span_of[i - 1] != span_of[i])
-            if starts and np.isfinite(carried):
+            if starts and np.isfinite(carried) and active is None:
                 span = column.spans[span_of[i]]
                 before = column.spans[span_of[i] - 1] if span_of[i] > 0 else None
                 pending = Carry(column.key, span.ticker, day, float(carried), None,
                                 before is not None and before.key != span.key)
             for _ticker, count in by_day.get(day, ()):
+                if active is not None:
+                    unread[active] += 1
+                    continue
                 if (day, count) in stale:
                     out.stale_read_past.append((column.key, day, count))
                     continue
@@ -455,6 +625,9 @@ def build_panel(
                     if membership[i, j]:
                         raise ValueError(f"{column.label}: a member twice on {dates[i]}")
                     membership[i, j] = True
+        for o in mine:
+            inside = [i for i in assigned if o.first <= dates[i] <= o.last]
+            out.overridden.append((o, len(inside), int(membership[inside, j].sum()), unread[o]))
 
     # The market series, both returns; a distribution on its ex-date, or the first trading day
     # after it.
