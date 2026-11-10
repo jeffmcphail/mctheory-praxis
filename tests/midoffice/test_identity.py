@@ -553,6 +553,31 @@ def test_a_span_the_endpoint_names_at_both_ends_with_its_prices_unbroken_is_conf
         idn.confirm_span(DATES, rows, over, lookup, lambda t: every)
 
 
+def test_a_confirmed_span_may_end_on_a_record_of_a_day_its_ticker_did_not_trade():
+    """Coherent, Inc. under COHR: the endpoint names it on 2022-07-01, the day II-VI's purchase
+    of it closed, and its last price is the day before. Stated as its last price, the span ends
+    on the record and the prices are checked to that day exactly: a price after it inside the
+    span refuses it, as does a last price the prices do not reach, or none stated."""
+    rows = [events_row("K", "COHR", 30, N - 1)]
+
+    def lookup(ticker, on):
+        return Record(ticker, on, "OLDC", "C", ticker, "CS")
+
+    to_19 = tuple(DATES[:20])
+    spec = idn.Confirmation("COHR", day(0), day(20), "Coherent, Inc.", expect="OLDC",
+                            last_price=day(19))
+    out, correction = idn.confirm_span(DATES, rows, spec, lookup, lambda t: to_19)
+    assert ("OLDC", "COHR", day(0), day(20)) in [(r.key, r.ticker, r.first, r.last) for r in out]
+    assert f"from the first to its last price, on {day(19)}" in correction.detail
+    with pytest.raises(ValueError, match=f"and none after it to {day(20)}"):
+        idn.confirm_span(DATES, rows, spec, lookup, lambda t: tuple(DATES[:21]))
+    with pytest.raises(ValueError, match="do not run unbroken"):
+        idn.confirm_span(DATES, rows, spec, lookup, lambda t: tuple(DATES[:19]))
+    unstated = idn.Confirmation("COHR", day(0), day(20), "Coherent, Inc.", expect="OLDC")
+    with pytest.raises(ValueError, match="do not run unbroken"):
+        idn.confirm_span(DATES, rows, unstated, lookup, lambda t: to_19)
+
+
 def test_a_corrected_plan_keeps_its_grid_and_names_each_spans_previous_holder():
     """A span moved to its first price, or one added before a security's first, keeps the
     sampling grid the fetch used: it runs through the uncorrected first day, both ways. And a

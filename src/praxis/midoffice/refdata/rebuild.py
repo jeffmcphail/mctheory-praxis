@@ -16,7 +16,9 @@ Two checks stand between the fetch and the build, and either failing stops it:
   ticker on its first day. It must name the security the table expects there (`check_identities`).
   A ticker the events gave for a span -- CRHC for CRH, the presumed CASY -- is believed only once
   its record agrees. A record with no identifier is no evidence, and nor is the change day's
-  naming the ticker's previous holder: the next sample decides.
+  naming the ticker's previous holder: the next sample decides. A record naming another
+  composite FIGI names the expected security if it carries a share-class FIGI the expected
+  security's own records carry: a check that reconciles the record, not a re-keying.
 - **Splits.** Every split event a security's tickers record inside its spans is classified by
   its ratio -- whole numbers or not -- and two tests (`check_splits`): whether the share counts
   move by it, within 10%, and whether the raw price gaps by it on its execution date, within
@@ -189,6 +191,41 @@ def fetch(
     return out
 
 
+def own_identifiers(
+    spans: Sequence[Span], fetched: Fetched
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Per security, the share-class FIGIs and the CIKs its own records carry: the records at
+    its spans' samples that name it by its key."""
+    share_classes: dict[str, set[str]] = {}
+    ciks: dict[str, set[str]] = {}
+    for span in spans:
+        for day in span.samples:
+            record = fetched.records.get((span.ticker, day))
+            if record is None or not record.identified or record.key != span.key:
+                continue
+            if record.share_class:
+                share_classes.setdefault(span.key, set()).add(record.share_class)
+            if record.cik:
+                ciks.setdefault(span.key, set()).add(record.cik)
+    return share_classes, ciks
+
+
+def reconciles(
+    record: Record,
+    key: str,
+    share_classes: Mapping[str, set[str]],
+    ciks: Mapping[str, set[str]],
+) -> str | None:
+    """The share-class FIGI by which a record naming another composite FIGI names the security
+    keyed `key`, or None: the record carries a composite FIGI, its share-class FIGI is one
+    `key`'s own records carry, and no CIK on it contradicts theirs (`own_identifiers`)."""
+    own = ciks.get(key, set())
+    if record.figi and record.share_class in share_classes.get(key, set()) \
+            and not (record.cik and own and record.cik not in own):
+        return record.share_class
+    return None
+
+
 @dataclass(frozen=True)
 class IdentityCheck:
     """A span's first share sample that carries evidence, set against the security the table
@@ -200,6 +237,9 @@ class IdentityCheck:
     detail: str
     skipped: tuple[tuple[dt.date, str], ...] = ()
     """Samples read past before the one that decides, each with why."""
+    reconciled: str | None = None
+    """The share-class FIGI by which a record naming another composite FIGI was reconciled to
+    the expected security, or None where the record named it outright (`check_identities`)."""
 
 
 def check_identities(spans: Sequence[Span], fetched: Fetched) -> list[IdentityCheck]:
@@ -210,15 +250,17 @@ def check_identities(spans: Sequence[Span], fetched: Fetched) -> list[IdentityCh
     Two samples are no evidence, and the next one decides: a record with neither a FIGI nor a
     CIK (`Record.identified`), which names nobody; and on the span's first day, a record naming
     the security that held the ticker before (`Span.previous`) -- the change day's, still
-    carrying the identifier the ticker had. A failure says whether the record's share-class
-    FIGI is one the expected security's own records carry."""
-    share_classes: dict[str, set[str]] = {}
-    for span in spans:
-        for day in span.samples:
-            record = fetched.records.get((span.ticker, day))
-            if record is not None and record.identified and record.key == span.key \
-                    and record.share_class:
-                share_classes.setdefault(span.key, set()).add(record.share_class)
+    carrying the identifier the ticker had.
+
+    A record naming another composite FIGI names the expected security if its share-class FIGI
+    -- the level that names a security across its composite listings -- is one the expected
+    security's own records carry, and no CIK on it contradicts theirs. A check, not a
+    re-keying: it reconciles a record to the security the table already expects, the table
+    stays keyed by composite FIGI, and each such pass says so (`IdentityCheck.reconciled`).
+    COHR's change-day record is the case, Coherent Corp.'s share class under a composite FIGI
+    seen nowhere else (midoffice07's gate; ruled so for midoffice08). A failure says whether
+    the record's share-class FIGI is the expected security's."""
+    share_classes, ciks = own_identifiers(spans, fetched)
     out = []
     for span in spans:
         skipped: list[tuple[dt.date, str]] = []
@@ -246,9 +288,21 @@ def check_identities(spans: Sequence[Span], fetched: Fetched) -> list[IdentityCh
                 break
             expected = share_classes.get(span.key, set())
             share = record.share_class
+            own = ciks.get(span.key, set())
+            contradicts = bool(record.cik and own and record.cik not in own)
+            if reconciles(record, span.key, share_classes, ciks):
+                check = IdentityCheck(
+                    span, record, True,
+                    f"{span.ticker} on {day} names {record.name} ({record.key}), reconciled to "
+                    f"{span.name} ({span.key}) by its share-class FIGI, {share}, which the "
+                    f"expected security's own records carry", reconciled=share)
+                break
             note = ("" if not share else
-                    f"; its share-class FIGI, {share}, is the expected security's"
-                    if share in expected else
+                    f"; its share-class FIGI, {share}, is the expected security's, but its CIK, "
+                    f"{record.cik}, is not ({', '.join(sorted(own))})" if share in expected
+                    and contradicts else
+                    f"; its share-class FIGI, {share}, is the expected security's, but it "
+                    f"carries no composite FIGI" if share in expected else
                     f"; its share-class FIGI, {share}, is not the expected security's "
                     f"({', '.join(sorted(expected)) or 'none on its records'})")
             check = IdentityCheck(span, record, False,
@@ -261,7 +315,7 @@ def check_identities(spans: Sequence[Span], fetched: Fetched) -> list[IdentityCh
         if skipped:
             check = IdentityCheck(check.span, check.record, check.passed, check.detail + (
                 "; read past " + "; ".join(f"{day}, {why}" for day, why in skipped)),
-                tuple(skipped))
+                tuple(skipped), check.reconciled)
         out.append(check)
     return out
 

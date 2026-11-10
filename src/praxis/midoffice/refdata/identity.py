@@ -1788,6 +1788,10 @@ class Confirmation:
     statement: str
     expect: str | None = None
     """The security the endpoint must name, where the statement says which."""
+    last_price: dt.date | None = None
+    """The span's last price, where the endpoint names the security on a last day it did not
+    trade: Coherent, Inc. under COHR on 2022-07-01, the day II-VI's purchase of it closed, its
+    last price on 2022-06-30. None: the span's last day."""
 
 
 def confirm_span(
@@ -1799,7 +1803,8 @@ def confirm_span(
 ) -> tuple[list[Row], Correction]:
     """Add `spec`'s span if the endpoint names one identified security under its ticker on its
     first and its last day -- `spec.expect`, where given -- and the ticker's prices run from
-    one to the other without a gap longer than a halt, so nobody else traded between. Raises
+    the first to its last price, `spec.last_price` or else the last day, without a gap longer
+    than a halt, so nobody else traded between, and none after it inside the span. Raises
     ValueError otherwise, saying why; and where the span would put its security under two
     tickers on one date, or its ticker under two securities."""
     at = {day: i for i, day in enumerate(dates)}
@@ -1811,18 +1816,23 @@ def confirm_span(
         raise ValueError(f"{spec.statement}: not confirmed -- {spec.ticker} names {named}")
     record = ends[1]
     days = priced(spec.ticker) or ()
+    final = spec.last_price or spec.last
     inside = [at[day] for day in days if spec.first <= day <= spec.last and day in at]
-    if not inside or dates[inside[0]] != spec.first or dates[inside[-1]] != spec.last or any(
-            b - a - 1 >= HALT_DAYS for a, b in zip(inside, inside[1:])):
+    if not spec.first <= final <= spec.last or not inside or dates[inside[0]] != spec.first \
+            or dates[inside[-1]] != final \
+            or any(b - a - 1 >= HALT_DAYS for a, b in zip(inside, inside[1:])):
         raise ValueError(f"{spec.statement}: {spec.ticker}'s prices do not run unbroken from "
-                         f"{spec.first} to {spec.last}")
+                         f"{spec.first} to {final}"
+                         + (f", and none after it to {spec.last}" if final != spec.last else ""))
     clash = [r for r in rows if r.first <= spec.last and spec.first <= r.last
              and (r.key == record.key or r.ticker == spec.ticker)]
     if clash:
         raise ValueError(f"{spec.statement}: the span overlaps " + "; ".join(
             f"{r.name or r.key} as {r.ticker} {r.first}..{r.last}" for r in clash))
+    between = ("its prices unbroken between" if final == spec.last else
+               f"its prices unbroken from the first to its last price, on {final}")
     note = (f"reference: {spec.ticker} names {record.name} ({record.key}) on {spec.first} and "
-            f"{spec.last}, its prices unbroken between")
+            f"{spec.last}, {between}")
     row = Row(record.key, record.figi, record.cik, record.name, record.kind, spec.ticker,
               spec.first, spec.last, 0, "reference", note, note)
     return sorted([*rows, row], key=lambda r: (r.key, r.first, r.ticker)), Correction(

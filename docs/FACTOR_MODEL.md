@@ -774,15 +774,34 @@ split boundary: for AAPL at 2020-06-30 it reports $5.99tn, which is the unadjust
 price of $364.80 multiplied by the *post-split* share count of 16.4bn. Four times the true
 figure, from mixing two bases in one product.
 
-The panel's own share counts make the same mistake for a while after every split. They are
-sampled every 63 trading days and carried forward, so until the next sample the capitalisation
-pairs a post-split price with a pre-split count: 896 security-days on the S&P 500 panel, 621 of
-them member-days an estimated period reads (AVGO, NVDA, CMG and 23 more splits). For the
-rebuild, not yet done: a share count must change on its split's execution date, taken from the
-split events rather than the price adjustment factor -- DD's steps of 2.39 and 0.33 are not
-split ratios, so that factor carries other actions too; each split applied must be checked
-against the next share sample, with any that disagree flagged; and a guard must find no
-member-day pairing a post-split price with a pre-split count.
+A panel's own share counts make the same mistake after every split unless it is built not to.
+The first S&P 500 panel, on tickers, sampled each count every 252 trading days -- six dates over
+the window -- and carried it forward, so until the next sample its capitalisation paired a
+post-split price with a pre-split count: 4,196 member-days across 37 splits, measured in
+midoffice06 (the eight spin-offs Polygon records as fractional splits left out: their counts do
+not move). Its volumes made the mistake the other way. They were the adjusted bars', so before
+every split, and every spin-off, its turnover and dollar volume read the adjustment too high:
+24,386 member-day cells over 39 tickers, by a factor of 0.2 to 50.
+
+The panel on securities (below) applies each split to the carried count on its execution date,
+from Polygon's split events -- and not every event is a split. Polygon records a spin-off as a
+fractional ratio that adjusts the parent's price history -- GE's 1.281 for GE HealthCare,
+DuPont's 2.39 for Qnity -- and the parent's count does not move across it. So each event is
+classified first (`rebuild.check_splits`), by its ratio and two tests. The ratio is whole numbers
+or not: no term over 100 in lowest terms, so DuPont's later three-to-one consolidation, 0.33, is
+whole, and its counts follow it. The counts either side move by the ratio, within 10%, or stay
+within 10% of unchanged. And the raw price gaps by it on the execution date: the open over the
+previous close, within the same of the ratio's reciprocal. A whole ratio the counts follow or
+the price gaps by is a split; a fractional one the counts leave unchanged is price-only, which
+the adjusted prices carry and the count does not; a test disagreeing stops the build. Polygon's
+counts lag a split by up to five months, so a sample on or after one still at the pre-split
+count is stale and does not reset the carried count; the first that follows the ratio does. The
+guard is exact: no day on or after a split carries a pre-split count -- one carried before it,
+or a stale sample's -- and the execution date carries the count before it times the ratio. Over
+the window's 55 events: 47 splits and 8 price-only, none contradicting; 15 stale samples read
+past; the guard checks 25,846 security-days, 25,260 of them member-days, and finds none. And the
+panel's volumes are the raw bars', so turnover pairs the shares traded with the shares then in
+existence.
 
 ### A frequency mismatch worth naming
 
@@ -841,6 +860,118 @@ index is standardised again, which is what Barra's own normalisation formula des
 written for the *risk index*, not for the descriptor. `build_risk_indices` does both passes
 and returns exposures that drop straight into
 `estimate_cross_sectional_model(..., standardise=False)`.
+
+## The S&P 500 panel on securities
+
+The first S&P 500 panel named each security by a ticker: the index on its first day, each
+ticker asked for its prices over the whole window. A ticker is not a security. That panel's META
+was the Roundhill Ball Metaverse ETF until 2022-01-28 and Meta Platforms from 2022-06-09; its BNY
+a municipal bond trust until 2026-02-06; its INFO an ETF from 2024-10-10, two years after IHS
+Markit left. A member renamed since -- Ball as BLL, Marsh McLennan as MMC, Fiserv as FI -- had no
+price before the rename, and the index's later joiners, 86 tickers with 46,625 member-days, were
+not in it at all. The rebuild (midoffice05 to midoffice08) replaces it with a panel whose columns
+are securities. Figures elsewhere in this document are the old panel's, as measured when they
+were written.
+
+### The identity table
+
+A security is a share class, keyed by its composite FIGI, else its CIK; the CIK is the
+cross-check, since GOOGL and GOOG are one CIK and two FIGIs, and both members. `refdata.identity`
+works out who traded under each ticker on each date from three sources, none of them complete:
+the reference records the panel fetch cached, Polygon's ticker events, and the prices.
+Member-days neither source names went to the reference endpoint on stated public-record
+hypotheses, and only what it confirmed entered. The rebuild's own evidence then corrected the
+table: a span starts at its first price; a span with no price, or one every record under its
+ticker refutes, goes; a reorganisation is dated by the identifier the table keys on; and a span
+the endpoint names at both ends, its prices unbroken, joins its security. Four guards stop the
+build: every priced (ticker, date) maps to one security; no security trades under two tickers on
+one date; no ticker names two securities on one date; every member-day is mapped or named.
+
+Three kinds of boundary are kept apart. A splice is two unrelated securities under one ticker
+(BNY, DOC, INFO, META, COHR): two columns, each cut to its own spans. A reorganisation is one
+security under a new identifier, the prices unbroken -- a holding-company exchange (BLK, XOM,
+OKE, J, LH), a redomicile (Bunge), Carnival's unification, Vylor's two FIGIs -- and is one column
+with one return series, keyed by its successor. A merger's predecessor (WestRock, Paramount) is
+another security, linked only for membership.
+
+Membership is membership() read through the table's renames, in today's tickers, and mapped to
+securities, so EchoStar's 1,057 phantom days as ECHO, before it joined as SATS, are nobody's.
+
+### The gate
+
+`scripts/fetch_sp500_rebuild.py` fetches what the table plans, resumably and through the cache:
+each ticker's bars, adjusted and raw, its split events and its cash distributions; and a share
+count at each span's first and last day and every 63 trading days, inside the security's own
+spans only. Then it checks two things before anything is built. Every span's first sample with
+an identifier must name the security the table expects -- and a record naming another composite
+FIGI under the expected security's own share-class FIGI names it: a check that reconciles the
+record, not a re-keying (COHR's change-day record, Coherent Corp.'s share class under a FIGI seen
+nowhere else). And every split event is classified, as above. On the 628 spans of the 600 member
+securities, all pass, one by its share class; 47 splits, 8 price-only, no contradiction.
+
+### The build
+
+`scripts/build_sp500_securities.py` builds the panel (`refdata.securities`), offline once the
+cache holds the fetch:
+
+- **Prices, stitched.** Within a run of one ticker's bars, the ticker's adjusted closes times
+  one scale for the run; across a change of ticker, the raw closes' return times any split
+  between, each earlier run scaled to continue the later. Polygon adjusts each ticker's history
+  for that ticker's events, a later holder's included -- Paramount Global's under PARA carries
+  two reverse splits of whoever took the ticker after it, a constant 200 -- so two tickers'
+  adjusted closes need not share a basis. 26 changes of ticker are bridged so. On the 581,521
+  cells the old panel and the new take from the same bar, the closes are identical and the
+  returns agree to 2.2e-16.
+- **Total returns.** Every cash distribution under the security's tickers inside its spans,
+  regular and special, reinvested on its ex-date on the prices' split basis -- the ex-date's
+  adjusted over raw close. 8,229 of them, TEL's duplicate of 2024-11-22 kept once. The market
+  series, SPY, likewise: 1.31% a year above its price return.
+- **Volumes**: traded, the raw bars'. The adjusted bars' are kept beside them, for comparison.
+- **Share counts**, as the split paragraph above has them, carried forward from each sample and
+  never back, across a security's own spans and across a reorganisation. A span that starts
+  without a count, with none carried into it, has its first quarter searched by bisection for
+  its first record with one, and its count carries from that record's own date: 66 lookups over
+  12 spans. Member-days without a count fall from 696 to 206: FedEx Freight's 109 and Vylor's 24,
+  whose records carry none in the window; the spin-offs' first days, one to thirteen of them;
+  and 37 days the index carried a member past its last trade.
+
+Two standing checks report on the counts; neither is a source. Polygon's weighted share count
+is an earnings-per-share denominator, an average over a period, not the shares in existence; so
+wherever a record carries one, it is set against the count the panel carries that day and
+flagged beyond 10%. It confirms the 1:1 carries of OKE's and XOM's reorganisations (1.0001 and
+0.9920) and flags Carnival's (1.118), Skydance's after it took Warner Bros. Discovery (4.62) and
+Honeywell's on 2026-07-14 (0.50). Where a record's own share-class count is a single class of a
+company with several -- GOOGL, BRK.B, FOXA -- the weighted count spans them all, so those flag
+on every record. The second check reports every move of a carried count beyond 10% that no
+split explains: 103, mostly mergers' issuance, and a handful of samples Polygon got wrong for a
+quarter -- Quest Diagnostics' at 0.104 of the count either side, Starbucks' at 0.123, Block's at
+0.109 -- and the first records of some spin-offs, GE Vernova's carrying GE's count, four times
+its own.
+
+### What it changes
+
+At today's defaults, the 938 periods from 2023-02-08, in three steps measured each on its own:
+the old panel against the new, both on price returns and the adjusted bars' volumes; then the
+new on traded volumes; then on total returns.
+
+| | old panel | on securities | traded volumes | total returns |
+|---|---|---|---|---|
+| members in the regression a period, median (range) | 451 (422-476) | 502 (499-503) | 502 | 502 |
+| mean R-squared | 0.298076 | 0.290903 | 0.292774 | 0.293189 |
+| residual spread, 1.4826 x MAD (sd) | 0.1333 (0.361) | 0.1362 (0.342) | 0.1313 (0.340) | 0.1330 (0.340) |
+| specific risk, p10 / median / p90 | 15.40 / 23.77 / 36.50% | 15.60 / 24.83 / 40.75% | 15.68 / 24.79 / 40.72% | 15.59 / 24.80 / 40.78% |
+| size-pair risk, smallest 85 / largest 50 | 11.94 / 0.38% | 11.33 / 0.61% | 11.77 / 0.62% | 11.82 / 0.62% |
+
+On securities the regression holds 26 to 78 more members each period, 470,548 of the 471,826
+member-periods; of the rest, 1,058 lack Momentum, new listings short of RSTR's half-year, 197 a
+weight, 23 a return. The 87 securities it adds include enough brokers and asset managers for
+SIC62 to be its own industry, leaving Finance & Real Estate with 12 members and a noise share
+of 31%. The 467 securities in both runs keep their specific-risk percentiles within about 0.1 of a
+point; BNY's falls by 14 points and Marsh McLennan's by 11, their histories now their own. Traded volumes take Trading
+Activity's mean from +4.11% to +2.26% a year and its volatility from 5.80% to 6.22%. Total
+returns raise every industry's mean, from 0.65% (Services) to 2.95% (SIC67, the REITs), in line
+with what their members paid (correlation 0.945 across the 20), and lower Volatility's by 0.58%;
+the high yielders' specific risk falls most, Altria's by 0.58 of a point.
 
 ## Status
 

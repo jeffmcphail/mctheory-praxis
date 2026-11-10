@@ -279,7 +279,7 @@ def test_a_record_with_no_identifier_and_the_change_days_stale_one_are_read_past
         ("EG", D[9]): record("EG", D[9], None, "0001"),
         ("NEW", D[0]): record("NEW", D[0], "OLD", "0002"),
         ("NEW", D[9]): record("NEW", D[9], "F2", "0003", "S2"),
-        ("ODD", D[0]): record("ODD", D[0], "F9", None, "S3"),
+        ("ODD", D[0]): record("ODD", D[0], "F9", None, "S9"),
         ("ODD", D[9]): record("ODD", D[9], "F3", "0004", "S3"),
         ("NONE", D[0]): record("NONE", D[0], None, None),
     })
@@ -291,8 +291,43 @@ def test_a_record_with_no_identifier_and_the_change_days_stale_one_are_read_past
     assert eg.passed and eg.record.on == D[9] and eg.skipped[0][0] == D[0]
     assert "neither a FIGI nor a CIK" in eg.detail
     assert new.passed and "the ticker's previous holder" in new.skipped[0][1]
-    assert not odd.passed and "its share-class FIGI, S3, is the expected security's" in odd.detail
+    assert not odd.passed
+    assert "its share-class FIGI, S9, is not the expected security's (S3)" in odd.detail
     assert not none.passed and "no sample carries an identifier" in none.detail
+
+
+def test_a_record_naming_another_composite_figi_under_the_expected_share_class_names_it():
+    """COHR's change-day record names a composite FIGI seen nowhere else, under the share-class
+    FIGI every Coherent Corp. record carries: it names Coherent Corp., a check that reconciles
+    the record, not a re-keying, and the pass says so. Not where the expected security's own
+    records carry no share-class FIGI, nor where the record's CIK contradicts theirs, nor for a
+    record with a CIK and no composite FIGI."""
+    def record(ticker, on, figi, cik, share):
+        return Record(ticker, on, figi, cik, figi or cik, "CS", None, share)
+
+    fetched = rebuild.Fetched(records={
+        ("COHR", D[0]): record("COHR", D[0], "GS6", None, "S5S6"),
+        ("COHR", D[9]): record("COHR", D[9], "LW1", "0820", "S5S6"),
+        ("BARE", D[0]): record("BARE", D[0], "X1", None, "SB"),
+        ("BARE", D[9]): record("BARE", D[9], "B1", "0001", None),
+        ("CIKS", D[0]): record("CIKS", D[0], "X2", "0999", "SC"),
+        ("CIKS", D[9]): record("CIKS", D[9], "C1", "0002", "SC"),
+        ("NOFG", D[0]): record("NOFG", D[0], None, "0003", "SD"),
+        ("NOFG", D[9]): record("NOFG", D[9], "D1", "0003", "SD"),
+    })
+    spans = [span("LW1", "COHR", D[0], D[19], D[0], D[9]),
+             span("B1", "BARE", D[0], D[19], D[0], D[9]),
+             span("C1", "CIKS", D[0], D[19], D[0], D[9]),
+             span("D1", "NOFG", D[0], D[19], D[0], D[9])]
+    cohr, bare, ciks, nofg = rebuild.check_identities(spans, fetched)
+    assert cohr.passed and cohr.reconciled == "S5S6" and cohr.record.on == D[0]
+    assert "names GS6 (GS6), reconciled to LW1 (LW1) by its share-class FIGI, S5S6" in cohr.detail
+    assert not bare.passed and bare.reconciled is None
+    assert "is not the expected security's (none on its records)" in bare.detail
+    assert not ciks.passed and "but its CIK, 0999, is not (0002)" in ciks.detail
+    assert not nofg.passed and "but it carries no composite FIGI" in nofg.detail
+    assert rebuild.gate([cohr], []).passed
+    assert not rebuild.gate([cohr, bare], []).passed
 
 
 def test_the_plan_reads_back_as_written(tmp_path):

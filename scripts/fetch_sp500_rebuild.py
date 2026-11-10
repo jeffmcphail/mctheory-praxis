@@ -5,10 +5,11 @@ built: every span's identity, and every split against the share counts.
     python scripts/fetch_sp500_rebuild.py --fetch-only     # the fetch alone, the checks left
     python scripts/fetch_sp500_rebuild.py --offline        # the checks again, from the cache alone
 
-The plan is `scripts/build_sp500_identity.py --resolve --correct`'s `*_corrected_fetch.csv`
-(midoffice06's, `*_resolved_fetch.csv`, before the corrections, with `--plan`): per member
-security and span, the ticker it traded under and the dates to sample its share count -- inside
-its own spans only, each span's first and last day among them. Asked for, through
+The plan is `scripts/build_sp500_identity.py --resolve --correct --amend`'s
+`*_amended_fetch.csv` (midoffice07's, `*_corrected_fetch.csv`, and midoffice06's,
+`*_resolved_fetch.csv`, with `--plan`): per member security and span, the ticker it traded
+under and the dates to sample its share count -- inside its own spans only, each span's first
+and last day among them. Asked for, through
 `PolygonClient`'s cache, at the original panel fetch's rate: each ticker's daily prices over the
 window, adjusted and not; the reference record at every sample; each ticker's split events and
 cash distributions, the adjusted prices carrying none; and the market series' prices, split
@@ -16,11 +17,14 @@ events and distributions, as a ticker's.
 
 Then the gate (`midoffice.refdata.rebuild`). It stops -- a non-zero status, and the report says
 why -- if any span's first share sample with an identifier names another security than the
-table expects, or has no record at all; or if any split event but DuPont's is a contradiction:
+table expects, or has no record at all -- a record naming another composite FIGI under the
+expected security's own share-class FIGI names it, and is reported; or if any split event but
+DuPont's is a contradiction:
 a whole-number ratio the share counts move by neither it nor nothing, or whose raw price does
 not gap by it, or a fractional one the counts follow. Writes the report beside the plan, as
 `sp500_rebuild_gate_<first>_<last>.json`, or `..._<first>_<last>_<suffix>.json` for a plan
-written with a suffix -- `_corrected`'s -- so one plan's report never overwrites another's.
+written with a suffix -- `_corrected`'s, `_amended`'s -- so one plan's report never overwrites
+another's.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ from praxis.midoffice.refdata.polygon import (  # noqa: E402
 )
 from praxis.midoffice.refdata.prices import MARKET_PROXY  # noqa: E402
 
-DEFAULT_PLAN = "data/external/polygon/sp500_identity_2022-01-03_2026-11-03_corrected_fetch.csv"
+DEFAULT_PLAN = "data/external/polygon/sp500_identity_2022-01-03_2026-11-03_amended_fetch.csv"
 
 
 class Offline:
@@ -190,7 +194,14 @@ def main(argv: list[str] | None = None) -> int:
                                   tolerance=args.tolerance, largest_term=args.largest_term)
     verdict = rebuild.gate(identities, splits)
     print("\nIdentity: each span's first share sample against the security the table expects")
-    print(f"  {sum(c.passed for c in identities)} of {len(identities)} spans pass")
+    reconciled = [c for c in identities if c.passed and c.reconciled]
+    print(f"  {sum(c.passed for c in identities)} of {len(identities)} spans pass"
+          + (f", {len(reconciled)} of them by the share-class FIGI, the record naming another "
+             f"composite FIGI" if reconciled else ""))
+    for check in reconciled:
+        span = check.span
+        print(f"  share class  {span.ticker} {span.first}..{span.last} ({span.member_days} "
+              f"member-days): {check.detail}")
     for check in verdict.identity_failures:
         span = check.span
         print(f"  FAILED  {span.ticker} {span.first}..{span.last} ({span.member_days} member-days)"
@@ -230,7 +241,8 @@ def main(argv: list[str] | None = None) -> int:
             {"key": c.span.key, "ticker": c.span.ticker, "first": str(c.span.first),
              "last": str(c.span.last), "member_days": c.span.member_days,
              "passed": c.passed, "detail": c.detail,
-             "skipped": [[str(day), why] for day, why in c.skipped]}
+             "skipped": [[str(day), why] for day, why in c.skipped],
+             "reconciled": c.reconciled}
             for c in identities
         ],
         "market": args.market,

@@ -27,6 +27,10 @@ two more: the links between securities, and each security's member-days. The rec
 table is built from stay the panel fetch's own (`--panel-samples-every`), so the rebuild's
 samples check it rather than make it.
 
+`--amend` (with `--correct`) applies midoffice08's rulings on midoffice07's gate as well: each
+confirmation in `AMENDED` replaces its ticker's in `CONFIRMATIONS` -- Coherent, Inc.'s row under
+COHR -- and the outputs carry `_amended`, so `--correct` still writes midoffice07's table.
+
 Writes, beside the panel (gitignored, like it):
 
     sp500_identity_<first>_<last>.csv          the table: one row per security per ticker
@@ -37,7 +41,7 @@ Writes, beside the panel (gitignored, like it):
                                                and span, the ticker, the share-count samples
     sp500_identity_<first>_<last>.json         the guards, the findings and the counts
 
-and, with --correct, two more, carrying `_corrected` as the rest do:
+and, with --correct, two more, carrying `_corrected` (`_amended`) as the rest do:
 
     sp500_identity_<first>_<last>_links.csv       each reorganisation, one security under two
                                                identifiers, and each merger, two securities
@@ -108,7 +112,22 @@ CONFIRMATIONS = (
 )
 """Spans the table lacks, from midoffice06's gate: Coherent Corp. is II-VI Incorporated, which
 bought Coherent, Inc. on 2022-07-01 and traded as COHR from 2022-09-08; its events record only
-COHR. COHR's prices before then run unbroken to 2022-07-01, Coherent, Inc.'s last day."""
+COHR. COHR's prices before then run unbroken to 2022-07-01, Coherent, Inc.'s last day. The COHR
+spec is midoffice07's hypothesis as it was stated, and the endpoint refused it: Coherent, Inc.
+was BBG000BG1DH3 (`AMENDED`)."""
+
+AMENDED = {
+    "COHR": idn.Confirmation("COHR", dt.date(2022, 1, 3), dt.date(2022, 7, 1),
+                             "COHR before II-VI took it: Coherent, Inc., which II-VI bought on "
+                             "2022-07-01", expect="BBG000BG1DH3",
+                             last_price=dt.date(2022, 6, 30)),
+}
+"""midoffice08's rulings on midoffice07's gate, under `--amend`: each replaces the confirmation of
+its ticker in `CONFIRMATIONS`. Coherent, Inc.'s row under COHR, BBG000BG1DH3, 2022-01-03 to
+2022-07-01, as the endpoint answered at both ends and Jeff ruled. Its last price is 2022-06-30:
+the purchase closed on 2022-07-01, which the endpoint answers and nobody traded. The change-day
+record of 2022-09-08 is not this: its composite FIGI, BBG000GS6QB4, is reconciled to Coherent
+Corp. by its share class in the gate (`rebuild.check_identities`)."""
 
 
 class Offline:
@@ -157,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--correct", action="store_true",
                         help="with --resolve: take the rebuild's prices and share samples to "
                              "the table, as midoffice07 ruled; writes the *_corrected files")
+    parser.add_argument("--amend", action="store_true",
+                        help="with --correct: midoffice08's rulings on midoffice07's gate too, "
+                             "the confirmations in AMENDED; writes the *_amended files")
     parser.add_argument("--panel-samples-every", type=int, default=252,
                         help="the panel fetch's share-sample grid, in trading days: the records "
                              "on it are the table's first source (252, the panel's; the "
@@ -168,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.correct and not args.resolve:
         raise SystemExit("--correct corrects the resolved table: give --resolve too")
+    if args.amend and not args.correct:
+        raise SystemExit("--amend amends the corrected table: give --resolve --correct too")
 
     path = Path(args.panel)
     if not path.exists():
@@ -180,7 +204,8 @@ def main(argv: list[str] | None = None) -> int:
     panel_tickers = set(securities)
     first, last = dates[0], dates[-1]
     stem = f"sp500_identity_{first}_{last}" + (
-        "_corrected" if args.correct else "_resolved" if args.resolve else "")
+        "_amended" if args.amend else "_corrected" if args.correct
+        else "_resolved" if args.resolve else "")
     out_dir = Path(args.out) if args.out else path.parent
     grid = list(range(0, len(dates), args.panel_samples_every))
     if grid[-1] != len(dates) - 1:
@@ -342,7 +367,9 @@ def main(argv: list[str] | None = None) -> int:
             corrections.append(correction)
             links = [k for k in links if (k.successor, k.predecessor) != (spec.after, spec.before)]
             links.append(correction.link)
-        for spec in CONFIRMATIONS:
+        confirmations = [AMENDED.get(spec.ticker, spec) if args.amend else spec
+                         for spec in CONFIRMATIONS]
+        for spec in confirmations:
             try:
                 rows, correction = idn.confirm_span(dates, rows, spec, lookup,
                                                     lambda t: priced(t, fetch=True))

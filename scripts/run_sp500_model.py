@@ -1,6 +1,11 @@
 """Build a factor model from a fetched S&P 500 panel, and say which descriptors earn a place.
 
     python scripts/run_sp500_model.py data/external/polygon/sp500_daily_*.npz
+    python scripts/run_sp500_model.py data/external/polygon/sp500_securities_*.npz --returns total
+
+The first panel is on tickers (`fetch_sp500_panel.py`); the second on securities
+(`build_sp500_securities.py`), which carries total returns and traded volumes, and its own
+membership and industry codes, besides.
 
 The descriptor screen follows the US-E3 handbook's own method -- "asset returns are regressed
 against industries and descriptors, one descriptor at a time, after the normalization step.
@@ -82,21 +87,78 @@ def without(panel: CharacteristicPanel, names) -> CharacteristicPanel:
     )
 
 
-def load_panel(path: Path) -> tuple[SecurityPanel, np.ndarray]:
+def load_panel(
+    path: Path, returns: str = "price", volumes: str | None = None
+) -> tuple[SecurityPanel, np.ndarray, dict]:
+    """The panel, the market series and what else the file carries.
+
+    Two kinds of file. `fetch_sp500_panel.py`'s, on tickers: price returns and the adjusted
+    bars' volumes, nothing else. `build_sp500_securities.py`'s, on securities: each column a
+    share class, labelled by its last ticker; price returns or total returns, the market's to
+    match; traded volumes, or the adjusted ones beside them; and its own membership, read
+    through the identity table's renames and mapped to securities, and each security's SIC code
+    from its own records."""
     data = np.load(path, allow_pickle=False)
     dates = tuple(dt.date.fromisoformat(str(d)) for d in data["dates"])
+    on_securities = "membership" in data.files
+    extras: dict = {"on_securities": on_securities}
+    if on_securities:
+        securities = tuple(str(s) for s in data["labels"])
+        prices = data["total_return_prices"] if returns == "total" else data["prices"]
+        traded = data["adjusted_volumes"] if volumes == "adjusted" else data["volumes"]
+        market = data["market_total_returns"] if returns == "total" else data["market_returns"]
+        extras.update(
+            membership=data["membership"].astype(bool),
+            keys=tuple(str(s) for s in data["securities"]),
+            sic_codes={label: (str(code) or None)
+                       for label, code in zip(securities, data["sic_codes"])},
+            snapshot=str(data["snapshot"]),
+        )
+    else:
+        if returns == "total":
+            raise SystemExit("  this panel, on tickers, carries price returns alone: --returns "
+                             "total needs build_sp500_securities.py's")
+        if volumes == "traded":
+            raise SystemExit("  this panel, on tickers, stores the adjusted bars' volumes alone: "
+                             "--volumes traded needs build_sp500_securities.py's")
+        securities = tuple(str(s) for s in data["securities"])
+        prices, traded, market = data["prices"], data["volumes"], data["market_returns"]
     panel = SecurityPanel(
         dates=dates,
-        securities=tuple(str(s) for s in data["securities"]),
-        prices=data["prices"],
+        securities=securities,
+        prices=prices,
         unadjusted_prices=data["unadjusted_prices"],
-        volumes=data["volumes"],
+        volumes=traded,
         shares_outstanding=data["shares_outstanding"],
         highs=data["highs"],
         lows=data["lows"],
         frequency=Frequency.DAILY,
     )
-    return panel, data["market_returns"]
+    return panel, market, extras
+
+
+def kept_out(design, rows: list[int], names: tuple[str, ...]) -> dict:
+    """Of the members of each estimated period, those its regression does not hold, and why:
+    no weight -- no capitalisation, a count or a price missing, on the day its weights are read;
+    else no return on the day; else an exposure missing, by the first factor without one. Read
+    from the estimator's own design, so it is the estimator's test that is counted."""
+    members = design.members[rows]
+    weights = design.weights[rows]
+    weighted = np.isfinite(weights) & (weights > 0.0)
+    returned = np.isfinite(design.returns[rows])
+    exposed = np.isfinite(design.exposures[rows])
+    complete = exposed.all(axis=2)
+    out = {
+        "no weight": members & ~weighted,
+        "no return": members & weighted & ~returned,
+        "an exposure missing": members & weighted & returned & ~complete,
+    }
+    first_missing: dict[str, int] = {}
+    cells = np.argwhere(out["an exposure missing"])
+    for t, j in cells:
+        k = int(np.flatnonzero(~exposed[t, j])[0])
+        first_missing[names[k]] = first_missing.get(names[k], 0) + 1
+    return {"reasons": out, "first_missing": first_missing}
 
 
 def screen(
@@ -420,7 +482,16 @@ def unreproduced_changes(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("panel", help="the .npz written by fetch_sp500_panel.py")
+    parser.add_argument("panel", help="the .npz written by fetch_sp500_panel.py, on tickers, or "
+                                      "by build_sp500_securities.py, on securities")
+    parser.add_argument("--returns", choices=("price", "total"), default="price",
+                        help="the panel's price returns (the default) or its total returns, "
+                             "every distribution reinvested, the market's to match; total "
+                             "returns need a panel on securities")
+    parser.add_argument("--volumes", choices=("traded", "adjusted"), default=None,
+                        help="the volumes the turnovers and VLVR read: the panel's stored ones "
+                             "by default -- traded on securities, the adjusted bars' on tickers "
+                             "-- or the adjusted bars', kept beside them on securities")
     parser.add_argument("--beta-window", type=float, default=None,
                         help="the market model's window in months, in place of the library's "
                              "default of 252 trading days (USE4's); the USE3 value of 60 needs "
@@ -481,11 +552,18 @@ def main(argv: list[str] | None = None) -> int:
     path = Path(args.panel)
     if not path.exists():
         raise SystemExit(f"no such panel: {path}")
-    panel, market = load_panel(path)
+    panel, market, extras = load_panel(path, args.returns, args.volumes)
     returns = panel.returns()
+    on_securities = extras["on_securities"]
 
     print(f"Panel\n  {len(panel.dates)} trading days, {panel.n_securities} securities")
     print(f"  {panel.dates[0]} .. {panel.dates[-1]}")
+    if on_securities:
+        print(f"  on securities, each a share class labelled by its last ticker; "
+              f"{args.returns} returns, the market's {args.returns} return; "
+              f"{args.volumes or 'traded'} volumes")
+    else:
+        print("  on tickers: price returns, the adjusted bars' volumes")
     usable = np.isfinite(returns).sum()
     print(f"  {usable:,} of {returns.size:,} return observations present "
           f"({usable / returns.size:.1%})")
@@ -504,12 +582,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  snapshot {snapshot.content_hash[:12]}, fetched "
               f"{snapshot.fetched_at:%Y-%m-%d %H:%M} UTC, covering "
               f"{snapshot.coverage_start} .. {snapshot.coverage_end}")
-        try:
-            membership, index_sizes = index_membership(
-                snapshot, panel.dates, panel.securities
-            )
-        except sp500.CoverageError as error:
-            raise SystemExit(f"  the run stops: {error}") from None
+        # The roll-forward, where the model is: a change the constituent list has not reached.
+        for issue in sp500.validate(snapshot):
+            if issue.code == "current_stale":
+                print(f"  {issue.detail}")
+        if on_securities:
+            if extras["snapshot"] != snapshot.content_hash:
+                raise SystemExit(f"  the run stops: the panel's membership is snapshot "
+                                 f"{extras['snapshot'][:12]}'s, and the newest is "
+                                 f"{snapshot.content_hash[:12]}'s; rebuild the table and the "
+                                 f"panel on it")
+            # Every member is a column of this panel, so the index is its members.
+            membership = extras["membership"]
+            index_sizes = [int(n) for n in membership.sum(axis=1)]
+            print("  the panel's own: membership() read through the identity table's renames "
+                  "and mapped to securities, a reorganisation's under its successor")
+        else:
+            try:
+                membership, index_sizes = index_membership(
+                    snapshot, panel.dates, panel.securities
+                )
+            except sp500.CoverageError as error:
+                raise SystemExit(f"  the run stops: {error}") from None
         print(f"  one array for every standardisation and every regression below, each held "
               f"to that day's members: {int(membership[0].sum())} of the panel's "
               f"{panel.n_securities} on {panel.dates[0]}, {int(membership[-1].sum())} on "
@@ -707,24 +801,33 @@ def main(argv: list[str] | None = None) -> int:
     scheme = None
     if args.industries:
         print("\nIndustries")
-        try:
-            client = PolygonClient(
-                api_key=read_api_key(args.env), cache_dir=Path(args.cache)
-            )
-        except PolygonError as error:
-            raise SystemExit(f"  industries need the reference cache: {error}") from None
         codes: dict[str, str | None] = {}
-        carried: list[str] = []
-        for ticker in panel.securities:
-            code, on = client.sic_code_any(ticker, panel.dates[-1])
-            codes[ticker] = code
-            if code and on != panel.dates[-1]:
-                carried.append(ticker)
-        if carried:
-            # A company acquired mid-window has no record at the end of it, but its
-            # industry while it traded is exactly what the regression needs.
-            print(f"  {len(carried)} classification(s) carried from an earlier date "
-                  f"(delisted inside the window): {', '.join(sorted(carried)[:5])}")
+        if on_securities:
+            # Each security's own latest record with a code, under its own tickers inside its
+            # spans: a ticker's record can be another security's.
+            codes = dict(extras["sic_codes"])
+            missing = sorted(code for code, sic in codes.items() if not sic)
+            print(f"  each security's SIC code from its own latest record with one: "
+                  f"{len(codes) - len(missing)} of {len(codes)}"
+                  + (f"; none for {', '.join(missing)}" if missing else ""))
+        else:
+            try:
+                client = PolygonClient(
+                    api_key=read_api_key(args.env), cache_dir=Path(args.cache)
+                )
+            except PolygonError as error:
+                raise SystemExit(f"  industries need the reference cache: {error}") from None
+            carried: list[str] = []
+            for ticker in panel.securities:
+                code, on = client.sic_code_any(ticker, panel.dates[-1])
+                codes[ticker] = code
+                if code and on != panel.dates[-1]:
+                    carried.append(ticker)
+            if carried:
+                # A company acquired mid-window has no record at the end of it, but its
+                # industry while it traded is exactly what the regression needs.
+                print(f"  {len(carried)} classification(s) carried from an earlier date "
+                      f"(delisted inside the window): {', '.join(sorted(carried)[:5])}")
         # Counted over the securities in at least one estimated period's regression, not
         # over the panel. A member that never enters a regression contributes nothing to its
         # factor, and counting them let a four-member Unclassified -- one member present in
@@ -1007,6 +1110,29 @@ def main(argv: list[str] | None = None) -> int:
     for label, counts in rows:
         print(f"  {label:<22} {counts.min():>6,} {np.median(counts):>7,.0f} "
               f"{counts.max():>6,}   {counts[0]:>10,}   {counts[-1]:>10,}")
+    if membership is not None:
+        # What keeps a member out of its period's regression, by the estimator's own test.
+        absent = np.array(index_sizes)[read_rows] - membership[read_rows].sum(axis=1)
+        design_read = regression_design(
+            return_panel, indices, regression_weights=weights, membership=membership,
+            lag=notes.lag,
+        )
+        out = kept_out(design_read, estimated_rows, indices.names)
+        held = int(held_in.sum())
+        print(f"  member-periods over the {notes.n_periods} periods: "
+              f"{int(np.array(index_sizes)[read_rows].sum()):,}; in the regression {held:,}; "
+              f"out of it, by why:")
+        print(f"    {'not in the panel':<22} {int(absent.sum()):>8,}")
+        for reason, cells in out["reasons"].items():
+            by_security = cells.sum(axis=0)
+            worst = np.argsort(-by_security)[:6]
+            shown = ", ".join(f"{panel.securities[j]} {int(by_security[j])}" for j in worst
+                              if by_security[j])
+            print(f"    {reason:<22} {int(cells.sum()):>8,}" + (f"   {shown}" if shown else ""))
+        if out["first_missing"]:
+            print("    the first exposure missing: " + ", ".join(
+                f"{name} {n:,}" for name, n in sorted(out["first_missing"].items(),
+                                                     key=lambda kv: -kv[1])))
 
     # noise_share cannot see a factor with one member: the regression fits that member
     # exactly, its residual is zero, and the sampling variance looks small. Other Industries

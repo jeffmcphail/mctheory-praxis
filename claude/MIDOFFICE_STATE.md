@@ -1,15 +1,15 @@
 # Mid-office state
 
-**Updated:** 2026-11-10, at the end of midoffice07 (stopped at its gate). Brought up to date at the
-end of every piece, in the same commit as its retro (Rule 43). Not a history: the state a new
-session needs to carry on. The detail is in the retros named below.
+**Updated:** 2026-11-10, at the end of midoffice08 (the build). Brought up to date at the end of
+every piece, in the same commit as its retro (Rule 43). Not a history: the state a new session
+needs to carry on. The detail is in the retros named below.
 
 ---
 
 ## Start here
 
 1. Read `claude/CLAUDE_CODE_RULES.md` (Rule 43 above all), then this file, then the latest retro:
-   `claude/retros/RETRO_midoffice07_rebuild.md`.
+   `claude/retros/RETRO_midoffice08_build.md`.
 2. **How the work runs.**
    - **The brief.** Each piece, `midofficeNN`, is a brief written in Chat and pasted into the Code
      session. Code transcribes it verbatim to `claude/handoffs/BRIEF_midofficeNN_<slug>.md`; its
@@ -19,17 +19,23 @@ session needs to carry on. The detail is in the retros named below.
      path, then Code stops.
    - **The commit.** Jeff commits with Chat's message; Code never commits or pushes. The next
      brief opens with "committed" (check it in `git log`) and Jeff's rulings on the decisions the
-     last retro left.
+     last retro left. This file travels in the retro's own commit (08 ruling 4).
 3. **The discipline every brief restates.**
    - Changes go in the order given, each decomposed against the one before.
    - A gate means stop and report before building anything.
-   - Nothing in `data/` is overwritten or deleted without Jeff.
+   - Nothing in `data/` is overwritten or deleted without Jeff: each stage writes files of its
+     own (`_resolved`, `_corrected`, `_amended`).
    - Scratch goes to `claude/scratch/midofficeNN/` (gitignored), its outputs copied into the retro.
-   - Python is ASCII and keeps the file's line endings (most `.py` here are CRLF; the `claude/`
-     docs LF).
-   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,279 passed
-     and 1 skipped at midoffice07. That file looks for `../core_repo/src`, which isn't on this
+   - Python is ASCII and keeps the file's line endings (most `.py` here are CRLF in the working
+     copy; the `claude/` briefs and retros LF).
+   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,290 passed
+     and 1 skipped at midoffice08. That file looks for `../core_repo/src`, which isn't on this
      machine.
+4. **Working notes, from the pieces so far.**
+   - A bash heredoc containing an apostrophe fails in this harness: write a patch script to a
+     file instead.
+   - An `.npz` member is decompressed afresh on every access: read each array once into a dict.
+   - The Write tool writes LF; `Path.write_text` without `newline=""` writes CRLF on Windows.
 
 ---
 
@@ -70,23 +76,31 @@ layer (c92d343 to e859b4e, 2026-11-01).
 - 701794e: **midoffice05** -- the identity table: members as securities, not tickers.
 - 208ca80 (11-10): **midoffice06** -- the rebuild's fetch, the split classification, the
   distributions; stopped at its gate.
-- Next: **midoffice07** -- the identity corrections, the lag rule and the price-gap test; stopped
-  at its gate. Jeff commits it after 208ca80, and this file after it (`git log --oneline -3`).
+- 5ccbb70: **midoffice07** -- the identity corrections, the lag rule and the price-gap test;
+  stopped at its gate.
+- 7228b01: this file, and Rule 43's step that keeps it.
+- Next: **midoffice08** -- the build. Jeff commits it after 7228b01 (`git log --oneline -3`).
 
-**The current piece: midoffice07, STOPPED AT THE GATE (2026-11-10).**
+**The current piece: midoffice08, COMPLETE (2026-11-10).**
 
-- **Item 1 is done.** The corrections were made in 21 requests, and the plan regenerated: 600
-  securities, 628 spans, 617 tickers.
-- **The gate:**
-  - **Identity:** 627 of 628 spans pass.
-  - **Splits:** 55 events and no contradiction -- 47 splits, every one gapping by its ratio, and 8
-    price-only.
-  - **COHR fails.** Its record of 2022-09-08 names BBG000GS6QB4, which is not old Coherent's FIGI
-    (BBG000BG1DH3). Its share-class FIGI is Coherent Corp.'s.
-- **Waiting on the gate:** items 2 to 5 -- the panel, total returns, the model comparison, the
-  docs.
-- **The model still runs on the old panel:** 506 tickers, price returns, split-adjusted volumes,
-  and share counts sampled yearly.
+- **The gate passes, offline, with no requests.**
+  - The share-class rule is a check in the gate (08 ruling 1).
+  - Coherent, Inc.'s row is in the `_amended` table.
+  - 628 of 628 spans pass, COHR by its share class; 47 splits, 8 price-only, no contradiction.
+- **The first-count search: 66 lookups over 12 spans.** Member-days without a count fall from
+  696 to 206.
+- **The panel on securities is built,** with all seven of its guards passing:
+  - 592 securities, 1,214 days;
+  - prices stitched, total returns, traded volumes;
+  - counts per span, with splits on their execution dates;
+  - membership through the renames.
+- **The comparison, three steps, each measured on its own**:
+  - mean R-squared: 0.298076 on the old panel; 0.290903 on securities; 0.292774 on traded
+    volumes; 0.293189 on total returns;
+  - members in each period's regression: median 451 before, 502 after.
+- **`docs/FACTOR_MODEL.md`:** the split paragraph rewritten, and a section on the panel on
+  securities.
+- **Waiting on Jeff:** the count decisions and the returns default (What is next).
 
 ---
 
@@ -108,8 +122,9 @@ in `docs/FACTOR_MODEL.md`.
   - reads the constituent list brought up to the change table (current_stale);
   - with dated renames from the identity table, reads the change table in today's tickers --
     ECHO's phantom days go. (05, 07)
-- The rebuild reads membership through the renames and maps it to securities; the run prints
-  current_stale. (05 ruling 3; not yet built)
+- The panel on securities carries membership read through the table's renames and mapped to
+  securities, a reorganisation's member-days under its successor's column; the run uses it, and
+  prints current_stale on either panel. (05 ruling 3; built in 08)
 
 **Time and coverage**
 
@@ -142,14 +157,20 @@ in `docs/FACTOR_MODEL.md`.
   04 ruling 4)
 - **Weights and industries.** Regression weights are sqrt(cap), and the standardisation's mean
   is cap-weighted. Industries come from SIC, groups under 15 merged into their division, with no
-  market factor beside them. Newey-West takes 10 lags at half-life 90. (666599b; docs)
-- **Noise shares** -- Size Nonlinearity 41.8%, Construction 52%, Wholesale 40% -- get one
-  model-wide answer after the rebuild, never a deletion per factor. (04 ruling 1)
+  market factor beside them. Newey-West takes 10 lags at half-life 90. (666599b; docs) On the
+  panel on securities, each security's SIC code is its own latest record's. (08)
+- **Noise shares** get one model-wide answer after the rebuild, never a deletion per factor.
+  As of run D: Construction 38.1%, Wholesale 46.2%, Finance & Real Estate 30.9%, Size
+  Nonlinearity 47.0%. (04 ruling 1)
 
-**The identity table (05, 06, 07)**
+**The identity table (05, 06, 07, 08)**
 
 - **Keys.** A security is a share class, keyed by composite FIGI, else CIK; the CIK is the
   cross-check. A record with neither is no evidence. (05; 06 ruling 1)
+- **The share-class rule.** A record naming another composite FIGI names the expected security
+  if its share-class FIGI is one that security's own records carry (and no CIK on it
+  contradicts theirs). It is a check in the gate, not a re-keying: the table stays keyed by
+  composite FIGI. (08 ruling 1; `rebuild.reconciles`)
 - **Sources.** The table is built from the panel fetch's own records (its 252-day grid), Polygon's
   ticker events and the panel's prices. The rebuild's share samples check it and never build it.
   (05, 07)
@@ -165,18 +186,27 @@ in `docs/FACTOR_MODEL.md`.
   - a span starts at its first price under its ticker;
   - a span with no price goes, and so does one its records refute: S600, CEGV, CRHC;
   - CRH's ADR history before 2023-09-25 stays out;
-  - II-VI's IIVI history, 2022-01-03 to 2022-09-07, is Coherent Corp.'s. (06 ruling 1; 07)
+  - II-VI's IIVI history, 2022-01-03 to 2022-09-07, is Coherent Corp.'s;
+  - Coherent, Inc. holds COHR from 2022-01-03 to 2022-07-01, BBG000BG1DH3, its last price
+    2022-06-30 (`Confirmation.last_price`). (06 ruling 1; 07; 08 ruling 1)
 - **The identity check** reads each span's first sample with an identifier. It reads past a
   change-day record naming the ticker's previous holder (code since 07). (05 ruling 5; 06, 07)
 - **The fetch** covers the whole window for every member security. A span-plus-look-back cut is
   to be a parameter for future panels; it is not built. (05 ruling 4)
 
-**Share counts and splits (06, 07)**
+**Share counts and splits (06, 07, 08)**
 
 - **Sampling.** Counts are sampled inside each security's own spans: each span's first and last
   day, and a 63-day grid kept in its phase.
+- **The first count.** A span that starts without a count, none carried into it, has its first
+  quarter searched by bisection for its first record with one, and its count carries from that
+  record's own date, forward only; the days before it have none. Only the found record enters,
+  not the search's others. (08 ruling 2)
+- **Weighted counts are never data.** They are a standing check: wherever a record carries one,
+  against the count the panel carries that day, flagged beyond 10%. (08 ruling 2)
 - **Reorganisations' counts.** A successor carries its predecessor's count until its own first
-  sample, never back-filled: Carnival's 1.1054. OKE's and XOM's carry 1:1, flagged. (06 ruling 4)
+  sample, never back-filled: Carnival's 1.1054. OKE's and XOM's carry 1:1, flagged -- and the
+  weighted check confirms them, 1.0001 and 0.9920. (06 ruling 4; 08)
 - **Split events** are classified by the ratio -- "whole" means no term over 100 in lowest terms
   -- and two tests within 10%: the counts either side, and the raw opening gap on the execution
   date against 1/ratio. (06 and its two amendments; 06 ruling 2)
@@ -188,19 +218,27 @@ in `docs/FACTOR_MODEL.md`.
     gate.
 - **The lag rule.** A sample on or after a split still at the pre-split count is stale and does
   not reset the carried count; the first that follows the ratio does. (06 ruling 2)
-- **The split guard** (in the build): no member-day pairs a post-split price with a pre-split
-  count, exactly. (asked in midoffice03's and midoffice06's briefs)
+- **The split guard**, built and exact: no day on or after a split carries a pre-split count,
+  and the execution date carries the count before it times the ratio. (08)
 
-**Prices and returns**
+**Prices, returns and volumes**
 
-- **Price returns so far.** Polygon's adjusted bars are split-adjusted only, so every run so far
-  is on price returns. The market series is SPY. (06)
-- **Total returns:**
+- **The panel on securities** (08):
+  - its columns are securities, labelled by their last ticker;
+  - its calendar is SPY's adjusted bars, the old panel's;
+  - prices are stitched: within one ticker's run, its adjusted closes times one scale; across a
+    change of ticker, the raw closes' return times any split between;
+  - splices are separate columns, a reorganisation one.
+- **Total returns** (built in 08):
   - every cash distribution, specials included, put on the prices' split basis by the ex-date's
     adjusted over raw close;
-  - TEL's duplicate of 2024-11-22 kept once; SPY's distributions too;
+  - an exact duplicate kept once, TEL's of 2024-11-22 the only one; SPY's distributions too;
   - in the comparison, identity first, then dividends. (06's second amendment; 06 ruling 5;
     07's brief)
+- **Price returns** on the old panel: Polygon's adjusted bars are split-adjusted only. The run's
+  default is still price returns (a decision waiting).
+- **Volumes.** The panel on securities stores traded volumes, the raw bars', with the adjusted
+  bars' beside them for comparison; the old panel stored the adjusted ones. (07; 08 ruling 3)
 - **LEN's 2025-01-21 adjustment** is left as Polygon has it, flagged. (06 ruling 6)
 
 ---
@@ -215,48 +253,79 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
   - Regenerate: `python scripts/fetch_sp500_panel.py --start 2022-01-03 --end 2026-11-04
     --shares-every 252`. From the cache it reproduces every array exactly (checked 2026-11-10).
 - **The membership snapshot:** `data/external/sp500/sp500_20261104T033741Z_660dc8159b0a.json`.
-  - Runs use the newest snapshot in the directory.
+  - Runs use the newest snapshot in the directory; the table and the panel on securities record
+    the hash they were built on, and the build and the run stop on another.
   - Validate: `python -m praxis.midoffice.refdata.sp500 check --dir data/external/sp500`.
   - `... fetch --out data/external/sp500` writes a new one, which every run would then use: only
-    to roll membership forward.
-- **The Polygon cache:** `data/external/polygon/cache/`, about 15,250 answers, found or not:
+    to roll membership forward, and the table and the panel rebuilt after.
+- **The Polygon cache:** `data/external/polygon/cache/`, about 15,350 answers, found or not:
   `bars-`, `ref-`, `events-`, `splits-`, `dividends-`.
-  - Every script reads it first, so reruns ask nothing.
+  - Every script reads it first, so reruns ask nothing; midoffice08 added the search's 66 and 35
+    not-found records the old run's `--industries` asked for.
   - It holds the evidence; it can only be rebuilt by asking again.
-- **The identity table and fetch plan, current:**
-  - `data/external/polygon/sp500_identity_2022-01-03_2026-11-03_corrected*`: the table `.csv`,
+- **The identity table and fetch plan, current: `_amended`** (midoffice08).
+  - `data/external/polygon/sp500_identity_2022-01-03_2026-11-03_amended*`: the table `.csv`,
     `.json`, `_members.csv`, `_fetch.csv` (the plan), `_links.csv` (reorganisations and mergers),
     `_membership.csv`.
   - Regenerate: `python scripts/build_sp500_identity.py
-    data/external/polygon/sp500_daily_2022-01-03_2026-11-04.npz --resolve --correct --offline`.
-    Without `--correct` it writes midoffice06's `_resolved` files; without either,
-    midoffice05's.
+    data/external/polygon/sp500_daily_2022-01-03_2026-11-04.npz --resolve --correct --amend
+    --offline`. Without `--amend` it writes midoffice07's `_corrected` files; without `--correct`,
+    midoffice06's `_resolved`; without either, midoffice05's. Each rewrites its own byte for byte
+    (checked 2026-11-10).
 - **The rebuild's fetch and gate:** `python scripts/fetch_sp500_rebuild.py --offline`.
-  - The default plan is the corrected one; without `--offline` it fetches what is missing.
-  - Report: `data/external/polygon/sp500_rebuild_gate_2022-01-03_2026-11-03_corrected.json`.
-    midoffice06's is the unsuffixed one.
-- **The new panel:** not built.
+  - The default plan is the amended one; without `--offline` it fetches what is missing.
+  - Report: `data/external/polygon/sp500_rebuild_gate_2022-01-03_2026-11-03_amended.json`.
+    midoffice07's is `_corrected`, midoffice06's unsuffixed. Run on another plan, it writes that
+    plan's report: given the `_corrected` plan, it would overwrite midoffice07's.
+- **The panel on securities:** `data/external/polygon/sp500_securities_2022-01-03_2026-11-03.npz`,
+  and its report `.json`.
+  - 592 securities -- each a share class, its key in `securities`, its label its last ticker --
+    over the same 1,214 days.
+  - Arrays: prices, total_return_prices, unadjusted_prices, volumes (traded), adjusted_volumes,
+    shares_outstanding, highs, lows, tickers (each cell's), membership, market_returns,
+    market_total_returns, sic_codes and sic_dates, with the snapshot hash and the plan.
+  - Regenerate: `python scripts/build_sp500_securities.py --offline`, about 40 s. It runs the gate
+    offline first and builds only if it passes; it reproduces every array exactly (checked
+    2026-11-10).
 
 ---
 
 ## The run
 
 ```
+python scripts/run_sp500_model.py data/external/polygon/sp500_securities_2022-01-03_2026-11-03.npz --industries --membership
+```
+
+The old panel's, for comparison:
+
+```
 python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2026-11-04.npz --industries --membership
 ```
 
+**On the panel on securities:**
+
+- `--returns price` (the default) or `total`, the market's to match.
+- `--volumes traded` (the default, the stored) or `adjusted`.
+- `--membership` is the panel's own, checked against the newest snapshot's hash.
+- `--industries` reads the panel's own SIC codes and needs no key.
+- The old panel takes price returns and adjusted volumes only; its `--industries` reads the
+  cache and needs `.env`'s `POLYGON_API_KEY`.
+
 **At today's defaults:**
 
-- **Time:** about 90 s. `--industries` reads SIC codes from the cache but needs `.env`'s
-  `POLYGON_API_KEY`.
-- **Headline:** mean R-squared 0.298076 over 938 periods from 2023-02-08.
-- **The size pair:** 11.94% for the smallest 85, 0.38% for the largest 50, 0.01% for the index.
+| | old panel | on securities, price | on securities, total |
+|---|---|---|---|
+| time | about 50 s | about 50 s | about 50 s |
+| mean R-squared, 938 periods from 2023-02-08 | 0.298076 | 0.292774 | 0.293189 |
+| members in the regression a period, median (range) | 451 (422-476) | 502 (499-503) | 502 (499-503) |
+| size pair: smallest 85 / largest 50 / index | 11.94 / 0.38 / 0.01% | 11.77 / 0.62 / 0.01% | 11.82 / 0.62 / 0.01% |
 
 **Its standing lines, and what each is there to catch:**
 
-- **The snapshot.** Its hash and coverage, and the members in the panel on the first and last
-  days. A change membership() does not reproduce is the change table disagreeing with itself. A
-  date the snapshot cannot answer stops the run.
+- **The snapshot.** Its hash and coverage; current_stale, the roll-forward; the members in the
+  panel on the first and last days. A change membership() does not reproduce is the change table
+  disagreeing with itself. A date the snapshot cannot answer stops the run, and so does a panel
+  on securities built on another snapshot.
 - **The market model's window and half-life:** which beta the model is using.
 - **Coverage:** values from an empty window, or from under min_coverage, counted against each
   descriptor's own inputs independently. It must read "none".
@@ -271,8 +340,15 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
 - **Same-day membership:** the security-periods that move against it. The lag in effect.
 - **The industry universe against the regression's:** counts taken over the wrong set; `!` if
   they differ.
-- **Securities per estimated period** -- members, in the panel, in the regression: what keeps
-  members out.
+- **Securities per estimated period** -- members, in the panel, in the regression -- **and the
+  members kept out, by why:**
+  - not in the panel;
+  - no weight;
+  - no return;
+  - an exposure missing, by the first factor without one.
+
+  On securities: 197 without a weight, 23 without a return, and 1,058 without Momentum, new
+  listings short of RSTR's half-year.
 - **The factor table's noise share, and its exactly-1 and none columns:** thin and one-member
   factors.
 - **Specific risk:**
@@ -283,7 +359,7 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   Together: who drives the specific risk model.
 - **Qualifications:** dropped periods, excluded securities, fallback forecasts.
 
-**The other guards:**
+**The other guards and standing checks:**
 
 - `build_sp500_identity.py` exits non-zero on a failed guard:
   - each priced ticker-date belongs to one security;
@@ -291,43 +367,46 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   - no ticker names two securities on one date;
   - every member-day is mapped or named.
 - `fetch_sp500_rebuild.py` exits non-zero when its gate stops.
+- `build_sp500_securities.py` refuses to build unless the gate passes, and exits non-zero on a
+  failed guard:
+  - each (ticker, date) price feeds one column;
+  - no column takes two tickers on one date;
+  - every member-day is a column's, inside its spans or on a day the table maps outside them;
+  - every bar of a span is its column's, and only those;
+  - the walk through the renames and the panel's membership are the same member-days;
+  - the split guard, exact.
+
+  Its standing checks are:
+  - the weighted check -- carried counts listed in full, own records by security;
+  - every count move beyond 10% that no split explains.
 
 ---
 
 ## What is next
 
-1. **Jeff's rulings on midoffice07** (its retro, "Decisions left for Jeff"):
-   - **COHR's change-day record:**
-     - **(a)** a record whose composite FIGI the table does not expect, but whose share-class FIGI
-       is the expected security's, names the expected security -- it accounts for all seven such
-       records;
-     - **(b)** or a one-off, reading COHR at its second sample.
-     - Either way, add Coherent, Inc.'s row under COHR: BBG000BG1DH3, 2022-01-03 to 2022-07-01.
-   - **Share counts the records do not carry** (696 member-days, spin-offs' first quarters, all of
-     FDXF's and Vylor's):
-     - leave them out, the default;
-     - or search for each first count, about 70 requests;
-     - or take weighted counts where the share-class count is missing.
-   - **Volumes:** build the new panel on traded volumes? The old panel's are split-adjusted:
-     24,386 member-day cells off by 0.2 to 50. The basis would be measured as its own step.
-2. **The gate again**, offline. Nothing but COHR stops it now.
-3. **midoffice07's items 2 to 5:**
-   - **the new panel** -- securities as columns; prices stitched by the table, splices separated,
-     reorganisations continuous; counts per span with splits on their execution dates;
-     membership through the renames; current_stale printed; the identity and split guards on the
-     built panel;
-   - **total returns;**
-   - **the model in two steps** -- old panel against new on price returns, then the new panel's
-     price returns against its total returns, the factor and industry means especially;
-   - **the docs** -- `docs/FACTOR_MODEL.md`'s split paragraph (lines 777-786) rewritten for the new
-     rule, with the old panel's 4,196 member-days over 37 splits, and a section on the identity
-     table and the rebuild.
-4. **After the rebuild:** residuals for every covered name, not only regression members; then the
-   model-wide noise-share question.
+1. **Jeff's rulings on midoffice08** (its retro, "Decisions left for Jeff"):
+   - **Transitional first counts.** GEV 4.0x for 59 member-days, AMTM 0.63x for 58, WBD 0.92x
+     for 62.
+     - **(a)** as ruled, as built;
+     - **(b)** a first count stands only if the next sample confirms it within 10%;
+     - **(c)** every record the search fetched.
+   - **Single samples Polygon got wrong for a quarter:** 504 member-days -- DGX, SBUX, XYZ, NWS,
+     EG, CEG, PCG. Leave them, or rule a sample the next one reverses stale. And PCG's two
+     alternating counts.
+   - **HON and SKYD:**
+     - HON halves from 2026-10-12, to within 0.06% of HONA's count, with no split and no price
+       gap;
+     - SKYD's post-merger count, which its records do not carry.
+   - **The run's returns by default:** price or total.
+   - **The panel on securities as the run's from now on** (this file gives its command first).
+2. **After the rulings, per midoffice07's brief:** residuals for every covered name, not only
+   regression members; then the model-wide noise-share question.
 
 **Open, not queued:**
 
 - fit_index_weights is whole-sample, though unused;
 - VLVR runs the market model a second time;
 - the span-plus-look-back cut;
-- `tests/test_market_data.py`'s missing `../core_repo/src`.
+- `tests/test_market_data.py`'s missing `../core_repo/src`;
+- `run_sp500_model.py` imports `HorizonCovariance` unused (ruff F401);
+- FDXF and Vylor carry no share-class count in the window, so they enter no regression.
