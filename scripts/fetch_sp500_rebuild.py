@@ -5,7 +5,8 @@ built: every span's identity, and every split against the share counts.
     python scripts/fetch_sp500_rebuild.py --fetch-only     # the fetch alone, the checks left
     python scripts/fetch_sp500_rebuild.py --offline        # the checks again, from the cache alone
 
-The plan is `scripts/build_sp500_identity.py --resolve`'s `*_resolved_fetch.csv`: per member
+The plan is `scripts/build_sp500_identity.py --resolve --correct`'s `*_corrected_fetch.csv`
+(midoffice06's, `*_resolved_fetch.csv`, before the corrections, with `--plan`): per member
 security and span, the ticker it traded under and the dates to sample its share count -- inside
 its own spans only, each span's first and last day among them. Asked for, through
 `PolygonClient`'s cache, at the original panel fetch's rate: each ticker's daily prices over the
@@ -14,10 +15,12 @@ cash distributions, the adjusted prices carrying none; and the market series' pr
 events and distributions, as a ticker's.
 
 Then the gate (`midoffice.refdata.rebuild`). It stops -- a non-zero status, and the report says
-why -- if any span's first share sample names another security than the table expects, or has
-no record at all, or if any split event but DuPont's is a contradiction: a whole-number ratio
-the share counts either side do not follow, or a fractional one they do not leave unchanged.
-Writes the report beside the plan, as `sp500_rebuild_gate_<first>_<last>.json`.
+why -- if any span's first share sample with an identifier names another security than the
+table expects, or has no record at all; or if any split event but DuPont's is a contradiction:
+a whole-number ratio the share counts move by neither it nor nothing, or whose raw price does
+not gap by it, or a fractional one the counts follow. Writes the report beside the plan, as
+`sp500_rebuild_gate_<first>_<last>.json`, or `..._<first>_<last>_<suffix>.json` for a plan
+written with a suffix -- `_corrected`'s -- so one plan's report never overwrites another's.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from praxis.midoffice.refdata.polygon import (  # noqa: E402
 )
 from praxis.midoffice.refdata.prices import MARKET_PROXY  # noqa: E402
 
-DEFAULT_PLAN = "data/external/polygon/sp500_identity_2022-01-03_2026-11-03_resolved_fetch.csv"
+DEFAULT_PLAN = "data/external/polygon/sp500_identity_2022-01-03_2026-11-03_corrected_fetch.csv"
 
 
 class Offline:
@@ -175,7 +178,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if not fetched.failures else 1
 
     identities = rebuild.check_identities(spans, fetched)
-    splits = rebuild.check_splits(spans, fetched, exempt=args.exempt.split(","),
+    raw: dict[str, tuple] = {}
+
+    def gaps(ticker: str, on: dt.date):
+        # Read back from the cache: the fetch asked for every ticker's raw bars.
+        if ticker not in raw:
+            raw[ticker] = client.daily_bars(ticker, start, end, adjusted=False)
+        return rebuild.raw_gap(raw[ticker], on)
+
+    splits = rebuild.check_splits(spans, fetched, gaps=gaps, exempt=args.exempt.split(","),
                                   tolerance=args.tolerance, largest_term=args.largest_term)
     verdict = rebuild.gate(identities, splits)
     print("\nIdentity: each span's first share sample against the security the table expects")
@@ -185,8 +196,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  FAILED  {span.ticker} {span.first}..{span.last} ({span.member_days} member-days)"
               f": {check.detail}")
     print(f"\nSplits: each event classified by its ratio -- whole numbers, no term over "
-          f"{args.largest_term} in lowest terms, or not -- and by the security's share counts "
-          f"either side, within {args.tolerance:.0%}")
+          f"{args.largest_term} in lowest terms, or not -- by the security's share counts "
+          f"either side, within {args.tolerance:.0%}, a sample still at the pre-split count "
+          f"stale until one follows, and by its raw price on the execution date, within the "
+          f"same of the ratio's reciprocal")
     kinds = {kind: [c for c in splits if c.kind == kind]
              for kind in ("split", "price-only", "contradiction")}
     exempted = [c for c in kinds["contradiction"] if c.exempt]
@@ -203,9 +216,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nGate: {'passes' if verdict.passed and not fetched.failures else 'STOPS'}")
     if fetched.failures:
         print(f"  {len(fetched.failures)} request(s) failed; run again to ask for them")
-    report = plan_path.parent / (
-        "sp500_rebuild_gate_" + "_".join(plan_path.stem.split("_")[2:4]) + ".json"
-    )
+    # sp500_identity_<first>_<last>[_suffix]_fetch: the report carries the plan's dates and
+    # suffix, so a corrected plan's never overwrites the plan before it's.
+    parts = plan_path.stem.split("_")
+    tag = [p for p in parts[4:] if p not in ("resolved", "fetch")]
+    report = plan_path.parent / ("sp500_rebuild_gate_" + "_".join(parts[2:4] + tag) + ".json")
     report.write_text(json.dumps({
         "plan": str(plan_path),
         "spans": len(spans),
@@ -214,7 +229,8 @@ def main(argv: list[str] | None = None) -> int:
         "identity": [
             {"key": c.span.key, "ticker": c.span.ticker, "first": str(c.span.first),
              "last": str(c.span.last), "member_days": c.span.member_days,
-             "passed": c.passed, "detail": c.detail}
+             "passed": c.passed, "detail": c.detail,
+             "skipped": [[str(day), why] for day, why in c.skipped]}
             for c in identities
         ],
         "market": args.market,
@@ -240,7 +256,12 @@ def main(argv: list[str] | None = None) -> int:
              "before": None if c.before is None else [str(c.before[0]), c.before[1]],
              "after": None if c.after is None else [str(c.after[0]), c.after[1]],
              "whole": c.whole, "counts": c.counts, "kind": c.kind, "tested": c.tested,
-             "applies": c.applies, "exempt": c.exempt, "detail": c.detail}
+             "applies": c.applies, "exempt": c.exempt, "detail": c.detail,
+             "stale": [[str(day), n] for day, n in c.stale],
+             "followed": None if c.followed is None else [str(c.followed[0]), c.followed[1]],
+             "gap": None if c.gap is None else [str(c.gap[0]), c.gap[1], str(c.gap[2]),
+                                                 c.gap[3]],
+             "prices": c.prices}
             for c in splits
         ],
         "passed": verdict.passed and not fetched.failures,

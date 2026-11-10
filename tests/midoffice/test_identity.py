@@ -422,3 +422,147 @@ def test_a_confirmed_span_is_cut_where_the_security_already_has_a_row():
     assert [(r.first, r.last) for r in found.rows] == [(day(0), day(39))]
     assert found.confirmed and not after.named
     assert idn.guard_one_ticker([*rows, *found.rows]).passed
+
+
+# ------------------------------------------------------------------ the rebuild's evidence
+
+
+def events_row(key, ticker, lo, hi, source="events", starts="the first of its events"):
+    return idn.Row(key, key, f"C{key}", key, "CS", ticker, day(lo), day(hi), 0, source, starts,
+                   "")
+
+
+def test_records_off_the_panels_grid_are_not_read_and_one_with_no_identifier_names_nobody(
+    tmp_path,
+):
+    """The table is built from the panel fetch's own records; the rebuild's samples, cached
+    beside them, check it. And a record with neither a FIGI nor a CIK -- Everest Group's
+    first under EG -- is no anchor: the ticker stays one security's."""
+    for on, payload in ((day(0), {"composite_figi": "F1", "cik": "0001", "name": "Aaa"}),
+                        (day(5), {"composite_figi": "F2", "cik": "0002", "name": "Bbb"})):
+        (tmp_path / f"ref-AAA-{on}.json").write_text(
+            json.dumps({"status": "OK", "results": payload}), encoding="utf-8")
+    assert [r.on for r in idn.read_records(tmp_path, ["AAA"])["AAA"]] == [day(0), day(5)]
+    assert [r.on for r in idn.read_records(tmp_path, ["AAA"], on=[day(0)])["AAA"]] == [day(0)]
+    blank = Record("EG", day(30), None, None, "Everest Group, Ltd.", "CS")
+    assert not blank.identified and rec("EG", 0, "F1").identified
+    ident = idn.segment_ticker("EG", DATES, held((0, N - 1)),
+                               [rec("EG", 0, "F1"), blank, rec("EG", N - 1, "F1")], {})
+    assert [(s.key, s.first, s.last) for s in ident.segments] == [("F1", day(0), day(N - 1))]
+    assert not ident.boundaries
+
+
+def test_a_span_starts_at_its_first_price_and_one_with_none_is_dropped():
+    """GE HealthCare's span began at its listing date, the first of its events, a week before
+    its first regular-way price: it starts at that price. S600 has no price at all: it goes.
+    The panel's own rows begin at a price, and a ticker whose prices were not fetched is left
+    as it is."""
+    rows = [events_row("G", "GEHC", 5, N - 1), events_row("S", "S600", 30, N - 1),
+            panel_row("P", "PPP", 0, N - 1), events_row("U", "UNF", 3, N - 1)]
+    days = {"GEHC": tuple(day(i) for i in range(10, N)), "S600": (), "PPP": ()}
+    out, corrections = idn.start_at_first_price(rows, days.get)
+    assert [(r.key, r.first) for r in out] == [("G", day(10)), ("P", day(0)), ("U", day(3))]
+    assert [(c.rule, c.key) for c in corrections] == [("first price", "G"), ("unpriced", "S")]
+    assert out[0].starts.startswith(f"its first price under GEHC, {day(10)}")
+
+
+def test_a_span_every_record_under_its_ticker_names_another_security_in_is_refuted():
+    """CRH's CRHC, from its events: each record under CRHC names Cohn Robbins, a SPAC, or
+    nobody. The span goes. One with a record of its own stays, and so does one whose records
+    name nobody -- that is no evidence of another security."""
+    rows = [events_row("CRH", "CRHC", 0, 40), events_row("K", "KKK", 0, 40),
+            events_row("E", "EEE", 0, 40)]
+    other = Record("CRHC", day(0), None, "0001818212", "Cohn Robbins Holdings Corp.", "CS")
+    answers = {
+        "CRHC": [(day(0), other), (day(20), other), (day(30), None)],
+        "KKK": [(day(0), other), (day(20), rec("KKK", 20, "K"))],
+        "EEE": [(day(0), None)],
+    }
+    out, (refuted,) = idn.drop_refuted(rows, lambda t: answers.get(t, []))
+    assert [r.key for r in out] == ["K", "E"] and refuted.rule == "refuted"
+    assert "2 record(s) name Cohn Robbins Holdings Corp. (CIK0001818212)" in refuted.detail
+    assert "1 answer(s) no record; none names it" in refuted.detail
+
+
+def test_a_reorganisation_is_dated_where_the_identifier_changes():
+    """Vylor's first record under VYLR names one FIGI and its later ones another, under one
+    CIK: the boundary is found by bisection on the endpoint's answers, the earlier FIGI's span
+    created, and the two linked as one security. Bunge's records name Bunge Limited's CIK a week
+    past Bunge Global's first event: the answers on disk already bracket it, nothing is asked,
+    and the predecessor's span runs to it."""
+    rows = [events_row("NEW", "VVV", 10, N - 1)]
+    names = {i: ("OLD" if i < 25 else "NEW") for i in range(10, N)}
+    asked = []
+
+    def lookup(ticker, on):
+        asked.append(on)
+        return Record(ticker, on, names[DATES.index(on)], "C1", "Vylor", "CS")
+
+    known = [(day(10), lookup("VVV", day(10))), (day(N - 1), lookup("VVV", day(N - 1)))]
+    asked.clear()
+    spec = idn.Reorganisation("VVV", "OLD", "NEW", "two FIGIs")
+    out, correction = idn.reorganise(DATES, rows, spec, lookup, known)
+    assert [(r.key, r.first, r.last, r.source) for r in out] == [
+        ("NEW", day(25), day(N - 1), "events"), ("OLD", day(10), day(24), "reference")]
+    assert correction.link == idn.Link("NEW", "OLD", day(24), correction.link.evidence,
+                                       kind="reorganisation")
+    assert correction.asked == len(asked) <= 6
+    rows = [idn.Row("CIK1144519", None, "1144519", "Bunge Limited", "CS", "BG", day(0),
+                    day(19), 0, "reference", "", ""),
+            idn.Row("CIK1996862", None, "1996862", "Bunge Global SA", "CS", "BG", day(20),
+                    day(N - 1), 0, "events", "the first of its events", "")]
+    known = [(day(i), Record("BG", day(i), None, "1144519" if i <= 26 else "1996862", "Bunge",
+                             "CS")) for i in (0, 19, 20, 26, 27, 40)]
+    spec = idn.Reorganisation("BG", "CIK1144519", "CIK1996862", "the redomicile")
+    out, correction = idn.reorganise(DATES, rows, spec, lambda t, on: None, known)
+    assert correction.asked == 0
+    assert [(r.key, r.first, r.last) for r in out] == [
+        ("CIK1144519", day(0), day(26)), ("CIK1996862", day(27), day(N - 1))]
+    with pytest.raises(ValueError, match="names nobody, neither identifier"):
+        idn.reorganise(DATES, [events_row("NEW", "VVV", 10, N - 1)],
+                       idn.Reorganisation("VVV", "OLD", "NEW", "two FIGIs"),
+                       lambda t, on: None,
+                       [(day(10), Record("VVV", day(10), "OLD", "C1", "V", "CS")),
+                        (day(N - 1), Record("VVV", day(N - 1), "NEW", "C1", "V", "CS"))])
+
+
+def test_a_span_the_endpoint_names_at_both_ends_with_its_prices_unbroken_is_confirmed():
+    """II-VI under IIVI, before it took COHR: the endpoint names its FIGI on the span's first
+    and last days and the prices run between, so the span joins the security. Naming another
+    security than expected -- Coherent, Inc. for the FIGI on COHR's change day -- refuses it;
+    so do a gap in the prices and a span over the security's own."""
+    rows = [events_row("K", "COHR", 30, N - 1)]
+
+    def lookup(ticker, on):
+        return Record(ticker, on, "K" if ticker == "IIVI" else "OLDC", "C", ticker, "CS")
+
+    every = tuple(DATES)
+    spec = idn.Confirmation("IIVI", day(0), day(29), "II-VI's history", expect="K")
+    out, correction = idn.confirm_span(DATES, rows, spec, lookup, lambda t: every)
+    assert [(r.key, r.ticker, r.first, r.last) for r in out] == [
+        ("K", "IIVI", day(0), day(29)), ("K", "COHR", day(30), day(N - 1))]
+    assert correction.rule == "confirmed" and correction.asked == 2
+    hypothesis = idn.Confirmation("COHR", day(0), day(20), "old Coherent", expect="GS6QB4")
+    with pytest.raises(ValueError, match="not confirmed"):
+        idn.confirm_span(DATES, rows, hypothesis, lookup, lambda t: every)
+    gapped = tuple(d for i, d in enumerate(DATES) if not 10 <= i <= 15)
+    with pytest.raises(ValueError, match="do not run unbroken"):
+        idn.confirm_span(DATES, rows, spec, lookup, lambda t: gapped)
+    over = idn.Confirmation("IIVI", day(0), day(35), "too long", expect="K")
+    with pytest.raises(ValueError, match="overlaps"):
+        idn.confirm_span(DATES, rows, over, lookup, lambda t: every)
+
+
+def test_a_corrected_plan_keeps_its_grid_and_names_each_spans_previous_holder():
+    """A span moved to its first price, or one added before a security's first, keeps the
+    sampling grid the fetch used: it runs through the uncorrected first day, both ways. And a
+    span taking a ticker another security held names that security, whose identifier the change
+    day's record may still carry."""
+    rows = [panel_row("K", "IIVI", 0, 19), panel_row("K", "COHR", 20, N - 1),
+            panel_row("Q", "COHR", 0, 15)]
+    plan = idn.fetch_plan(DATES, rows, {}, ["K"], set(), every=10, origins={"K": day(25)})
+    assert [(p.ticker, [DATES.index(d) for d in p.samples], p.previous) for p in plan] == [
+        ("IIVI", [0, 5, 15, 19], None), ("COHR", [20, 25, 35, 45, 55, 59], "Q")]
+    plain = idn.fetch_plan(DATES, rows, {}, ["K"], set(), every=10)
+    assert [[DATES.index(d) for d in p.samples] for p in plain] == [
+        [0, 10, 19], [20, 30, 40, 50, 59]]

@@ -17,6 +17,16 @@ at all, and stops if an answer is missing.
 confirms (`identity.resolve_named`); its outputs carry `_resolved` in their names, so the
 table without it is never overwritten.
 
+`--correct` (with `--resolve`) then takes the rebuild's own evidence -- its prices and share
+samples, cached by `scripts/fetch_sp500_rebuild.py` -- to the table, as midoffice07 ruled on
+midoffice06's gate: each span starts at its first price, and one with none goes; a span every
+record under its ticker refutes goes; `REORGANISATIONS` are dated by the identifier the table
+keys on; `CONFIRMATIONS` add what the endpoint confirms at both ends. It reads membership
+through the renames, maps it to securities for the plan, and writes `_corrected` files, with
+two more: the links between securities, and each security's member-days. The records the
+table is built from stay the panel fetch's own (`--panel-samples-every`), so the rebuild's
+samples check it rather than make it.
+
 Writes, beside the panel (gitignored, like it):
 
     sp500_identity_<first>_<last>.csv          the table: one row per security per ticker
@@ -26,6 +36,13 @@ Writes, beside the panel (gitignored, like it):
     sp500_identity_<first>_<last>_fetch.csv    what a rebuild must fetch: per member security
                                                and span, the ticker, the share-count samples
     sp500_identity_<first>_<last>.json         the guards, the findings and the counts
+
+and, with --correct, two more, carrying `_corrected` as the rest do:
+
+    sp500_identity_<first>_<last>_links.csv       each reorganisation, one security under two
+                                               identifiers, and each merger, two securities
+    sp500_identity_<first>_<last>_membership.csv  each security's member-days, membership read
+                                               through the renames
 
 and stops with a non-zero status if a guard fails: every (ticker, date) the panel prices maps
 to exactly one security; no security under two tickers on one date; no ticker naming two
@@ -71,6 +88,28 @@ from the brief of midoffice06: hypotheses for the reference endpoint to confirm,
 in the table themselves. VIAC is asked beside PARA because PARA has no record before
 2022-02-17; KVUE, which the brief does not list, under its own ticker."""
 
+REORGANISATIONS = (
+    idn.Reorganisation("BG", "CIK0001144519", "CIK0001996862",
+                       "Bunge Limited to Bunge Global SA, the redomicile, dated by the CIK"),
+    idn.Reorganisation("VYLR", "BBG024W5VJC3", "BBG024CQR6X9",
+                       "Vylor's two FIGIs under one CIK, the prices unbroken"),
+)
+"""midoffice06's gate found two reorganisations the table did not date by its own key, and
+midoffice07 ruled both so: Bunge's records carry Bunge Limited's CIK to 2023-11-07 under the new
+name; Vylor's first record names another FIGI than its later ones, under one CIK."""
+
+CONFIRMATIONS = (
+    idn.Confirmation("IIVI", dt.date(2022, 1, 3), dt.date(2022, 9, 7),
+                     "II-VI's history under IIVI, before it took COHR as Coherent Corp.",
+                     expect="BBG000BLW102"),
+    idn.Confirmation("COHR", dt.date(2022, 1, 3), dt.date(2022, 7, 1),
+                     "COHR before II-VI took it: Coherent, Inc., whose FIGI the change-day "
+                     "record of 2022-09-08 carries", expect="BBG000GS6QB4"),
+)
+"""Spans the table lacks, from midoffice06's gate: Coherent Corp. is II-VI Incorporated, which
+bought Coherent, Inc. on 2022-07-01 and traded as COHR from 2022-09-08; its events record only
+COHR. COHR's prices before then run unbroken to 2022-07-01, Coherent, Inc.'s last day."""
+
 
 class Offline:
     """A transport that refuses: under --offline every answer must already be on disk."""
@@ -115,7 +154,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resolve", action="store_true",
                         help="put the member-days neither source names to the reference "
                              "endpoint, on HYPOTHESES; writes the *_resolved files")
+    parser.add_argument("--correct", action="store_true",
+                        help="with --resolve: take the rebuild's prices and share samples to "
+                             "the table, as midoffice07 ruled; writes the *_corrected files")
+    parser.add_argument("--panel-samples-every", type=int, default=252,
+                        help="the panel fetch's share-sample grid, in trading days: the records "
+                             "on it are the table's first source (252, the panel's; the "
+                             "rebuild's samples, cached beside them, are its checks)")
+    parser.add_argument("--bars-start", default="2022-01-03",
+                        help="the first day of the rebuild's price requests "
+                             "(fetch_sp500_rebuild.py's --start), so --correct reads them back")
+    parser.add_argument("--bars-end", default="2026-11-04", help="their last, likewise")
     args = parser.parse_args(argv)
+    if args.correct and not args.resolve:
+        raise SystemExit("--correct corrects the resolved table: give --resolve too")
 
     path = Path(args.panel)
     if not path.exists():
@@ -127,8 +179,13 @@ def main(argv: list[str] | None = None) -> int:
     held = {t: np.isfinite(prices[:, j]) for j, t in enumerate(securities)}
     panel_tickers = set(securities)
     first, last = dates[0], dates[-1]
-    stem = f"sp500_identity_{first}_{last}" + ("_resolved" if args.resolve else "")
+    stem = f"sp500_identity_{first}_{last}" + (
+        "_corrected" if args.correct else "_resolved" if args.resolve else "")
     out_dir = Path(args.out) if args.out else path.parent
+    grid = list(range(0, len(dates), args.panel_samples_every))
+    if grid[-1] != len(dates) - 1:
+        grid.append(len(dates) - 1)
+    panel_samples = [dates[i] for i in grid]
 
     print(f"Panel\n  {path}: {len(securities)} tickers over {len(dates)} trading days, "
           f"{first} .. {last}; {sum(int(m.sum()) for m in held.values()):,} priced "
@@ -153,11 +210,12 @@ def main(argv: list[str] | None = None) -> int:
           f"{', '.join(unreturned) or 'nothing'} that membership() never returns")
 
     # ------------------------------------------------------------------- the sources
-    records = idn.read_records(args.cache, securities)
+    records = idn.read_records(args.cache, securities, on=panel_samples)
     n_records = sum(len(r) for r in records.values())
     print(f"\nSources\n  reference records cached by the panel fetch: {n_records:,} over "
           f"{sum(bool(r) for r in records.values())} of the {len(securities)} tickers, at "
-          f"{len({r.on for rs in records.values() for r in rs})} sample dates -- no requests")
+          f"{len({r.on for rs in records.values() for r in rs})} sample dates -- no requests; "
+          f"read on its grid of every {args.panel_samples_every} trading days alone")
     if args.offline:
         client = PolygonClient(api_key="offline", transport=Offline(), cache_dir=Path(args.cache))
     else:
@@ -225,7 +283,8 @@ def main(argv: list[str] | None = None) -> int:
             return idn.Record(ticker, on, results.get("composite_figi") or None,
                               results.get("cik") or None, results.get("name") or None,
                               results.get("type") or None,
-                              idn._date(results.get("list_date")))
+                              idn._date(results.get("list_date")),
+                              results.get("share_class_figi") or None)
 
         named_before = len(mapping.named)
         resolutions = idn.resolve_named(dates, mapping, rows, HYPOTHESES, lookup)
@@ -247,6 +306,86 @@ def main(argv: list[str] | None = None) -> int:
             if r.link is not None:
                 print(f"      link: {r.link.predecessor} before {r.link.successor}, to "
                       f"{r.link.until} -- {r.link.evidence}")
+    corrections: list = []
+    refused: list[str] = []
+    uncorrected = list(rows)
+    if args.correct:
+        window = (dt.date.fromisoformat(args.bars_start), dt.date.fromisoformat(args.bars_end))
+        trading_days: dict[str, tuple] = {}
+        looked["bars"] = 0
+
+        def priced(ticker, fetch=False):
+            """The ticker's trading days, from the rebuild's prices read back from the cache;
+            None where it has not fetched them, unless `fetch`."""
+            if ticker not in trading_days:
+                key = f"bars-{ticker}-{window[0]}-{window[1]}-adj"
+                if not client.has_cached(key) and not fetch:
+                    return None
+                looked["bars"] += not client.has_cached(key)
+                try:
+                    bars = client.daily_bars(ticker, *window, adjusted=True)
+                except PolygonError as error:
+                    raise SystemExit(f"  prices of {ticker}: {error}") from None
+                trading_days[ticker] = tuple(b.date for b in bars)
+            return trading_days[ticker]
+
+        asked_before = looked["asked"]
+        # A correction the endpoint refuses is a finding, not a failure of the build: the
+        # table goes on without it, and the gate reads the span as it stands.
+        for spec in REORGANISATIONS:
+            try:
+                rows, correction = idn.reorganise(dates, rows, spec, lookup,
+                                                  idn.read_answers(cache, spec.ticker))
+            except ValueError as error:
+                refused.append(str(error))
+                continue
+            corrections.append(correction)
+            links = [k for k in links if (k.successor, k.predecessor) != (spec.after, spec.before)]
+            links.append(correction.link)
+        for spec in CONFIRMATIONS:
+            try:
+                rows, correction = idn.confirm_span(dates, rows, spec, lookup,
+                                                    lambda t: priced(t, fetch=True))
+            except ValueError as error:
+                refused.append(str(error))
+                continue
+            corrections.append(correction)
+        rows, moved = idn.start_at_first_price(rows, priced)
+        answers: dict[str, list] = {}
+
+        def answers_of(ticker):
+            if ticker not in answers:
+                answers[ticker] = idn.read_answers(cache, ticker)
+            return answers[ticker]
+
+        rows, refuted = idn.drop_refuted(rows, answers_of)
+        corrections += moved + refuted
+        # A tenure the records refute is no ticker of its security's: CRH's CRHC, from which
+        # the renames would read a changes-table CRHC, had it one, as CRH.
+        for correction in refuted:
+            gone = correction.removed[0]
+            tenures_of[correction.key] = [
+                t for t in tenures_of.get(correction.key, ())
+                if not (t.ticker == gone.ticker and t.start <= gone.last
+                        and (t.end is None or t.end >= gone.first))
+            ]
+        mapping = idn.map_members(dates, members, rows, by_ticker, tenures_of, panel_tickers,
+                                  links)
+        print(f"\nThe rebuild's evidence, taken to the table: {len(corrections)} corrections; "
+              f"{looked['asked'] - asked_before} reference lookups and {looked['bars']} price "
+              f"request(s) over the network this run")
+        for rule in ("reorganisation", "confirmed", "first price", "unpriced", "refuted"):
+            for correction in (c for c in corrections if c.rule == rule):
+                print(f"  {rule:<14} {correction.detail}"
+                      + (f" [{correction.asked} lookups]" if correction.asked else ""))
+                for row in correction.removed:
+                    print(f"      was   {row.ticker} {row.first}..{row.last}: {row.name} "
+                          f"[{row.key}]")
+                for row in correction.added:
+                    print(f"      now   {row.ticker} {row.first}..{row.last}: {row.name} "
+                          f"[{row.key}]")
+        for why in refused:
+            print(f"  refused        {why}")
     guards = [
         idn.guard_cells(dates, held, rows),
         idn.guard_one_ticker(rows),
@@ -337,6 +476,35 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {label}: {detail.split(' recorded')[0]} {code.replace('_', ' ')}, "
                   f"{detail.split(' on ')[1].split(' ')[0]}")
 
+    member_lists, member_map = members, mapping
+    if args.correct:
+        # The panel's membership: read through the renames, so a phantom -- ECHO before
+        # EchoStar joined as SATS -- is nobody's member-day, and mapped to securities.
+        member_lists = renamed
+        member_map = idn.map_members(dates, renamed, rows, by_ticker, tenures_of,
+                                     panel_tickers, links)
+        unasked = sorted({t for day in renamed for t in day} - set(by_ticker) - panel_tickers)
+        read_guard = idn.guard_members(dates, renamed, member_map)
+        read_guard = idn.GuardResult(read_guard.name + ", membership read through the renames",
+                                     read_guard.checked, read_guard.failures)
+        guards.append(read_guard)
+        print(f"\nMembership read through the renames, for the plan and the panel: "
+              f"{len(member_map.mapped):,} member-days mapped to securities, "
+              f"{len(member_map.named):,} named; against membership() as given, "
+              f"{len(mapping.mapped):,} and {len(mapping.named):,}")
+        print(f"  {'ok' if read_guard.passed else 'FAILED'}  {read_guard.name}: "
+              f"{read_guard.checked:,} checked, {len(read_guard.failures)} failure(s)")
+        for failure in read_guard.failures[:20]:
+            print(f"      {failure}")
+        if unasked:
+            print(f"  member tickers whose events were never asked: {', '.join(unasked)}")
+        moved_days = collections.Counter(
+            v[0] for v in mapping.mapped.values()) - collections.Counter(
+            v[0] for v in member_map.mapped.values())
+        for key, n in sorted(moved_days.items()):
+            name = next((r.name for r in rows if r.key == key), key)
+            print(f"  {name} [{key}]: {n:,} member-day(s) fewer, read through the renames")
+
     truncated = idn.truncations(dates, mapping, panel_tickers, exclude=phantom_set)
     print("\nTruncations: member dates on which the member traded under another ticker than "
           "the panel's, which has no price for it (phantom dates left out)")
@@ -349,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  and {len(absent)} member tickers the panel does not hold at all, "
           f"{absent_days:,} member-days")
 
-    dups = idn.duplicates(dates, members, mapping)
+    dups = idn.duplicates(dates, member_lists, member_map)
     print(f"\nDuplicates: one security named by two member tickers on one date: "
           f"{sum(len(v) for v in dups.values())}")
     for key, items in sorted(dups.items()):
@@ -359,9 +527,9 @@ def main(argv: list[str] | None = None) -> int:
     # Named member-days, with the change table's same-day swaps as candidates.
     named_runs: dict[tuple[str, str], list[int]] = {}
     at = {day: i for i, day in enumerate(dates)}
-    for (ticker, day), why in mapping.named.items():
+    for (ticker, day), why in member_map.named.items():
         named_runs.setdefault((ticker, why), []).append(at[day])
-    print(f"\nMember-days no security accounts for: {len(mapping.named):,} -- named, each with "
+    print(f"\nMember-days no security accounts for: {len(member_map.named):,} -- named, each with "
           f"why")
     candidates_of: dict[str, list] = {}
     for (ticker, why), cells in sorted(named_runs.items()):
@@ -383,21 +551,21 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------- the member listing
     how_by_run: dict[tuple, collections.Counter] = {}
     traded_by_run: dict[tuple, dict[str, list[int]]] = {}
-    for (ticker, run_first, run_last), key in mapping.anchors.items():
+    for (ticker, run_first, run_last), key in member_map.anchors.items():
         counts = collections.Counter()
         traded: dict[str, list[int]] = {}
         for i in range(at[run_first], at[run_last] + 1):
-            hit = mapping.mapped.get((ticker, dates[i]))
+            hit = member_map.mapped.get((ticker, dates[i]))
             if hit is not None:
                 counts[hit[2]] += 1
                 traded.setdefault(hit[1], []).append(i)
-            elif (ticker, dates[i]) in mapping.named:
-                counts[mapping.named[(ticker, dates[i])].split(":")[0]] += 1
+            elif (ticker, dates[i]) in member_map.named:
+                counts[member_map.named[(ticker, dates[i])].split(":")[0]] += 1
         how_by_run[(ticker, run_first, run_last)] = counts
         traded_by_run[(ticker, run_first, run_last)] = traded
     describe = {r.key: r for r in rows}
     member_rows = []
-    for (ticker, run_first, run_last), key in sorted(mapping.anchors.items()):
+    for (ticker, run_first, run_last), key in sorted(member_map.anchors.items()):
         row = describe.get(key)
         traded = traded_by_run[(ticker, run_first, run_last)]
         sources = []
@@ -431,11 +599,17 @@ def main(argv: list[str] | None = None) -> int:
               f"{k} {v}" for k, v in by_source.most_common()))
 
     # ------------------------------------------------------------------- the fetch plan
-    member_keys = sorted({v[0] for v in mapping.mapped.values()})
-    member_days = collections.Counter((v[0], v[1]) for v in mapping.mapped.values())
+    member_keys = sorted({v[0] for v in member_map.mapped.values()})
+    member_days = collections.Counter((v[0], v[1]) for v in member_map.mapped.values())
     cached_refs = {(ticker, r.on) for ticker, rs in records.items() for r in rs}
+    # A corrected table keeps the grid its securities were sampled on: their first days in the
+    # table before the corrections.
+    origins = {}
+    for row in uncorrected:
+        if row.key not in origins or row.first < origins[row.key]:
+            origins[row.key] = row.first
     plan = idn.fetch_plan(dates, rows, member_days, member_keys, cached_refs,
-                          every=args.shares_every)
+                          every=args.shares_every, origins=origins if args.correct else None)
     tickers = sorted({p.ticker for p in plan})
     new_tickers = [t for t in tickers if t not in panel_tickers]
     samples = sum(len(p.samples) for p in plan)
@@ -453,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  split events, for the share-count rule recorded in midoffice03: one request a "
           f"ticker, {len(tickers)}")
     print(f"  in all {2 * len(new_tickers) + new_samples + len(tickers):,} requests")
-    unresolved = sorted({t for (t, _) in mapping.named})
+    unresolved = sorted({t for (t, _) in member_map.named})
     print(f"  not in it: the member-days named above, under {', '.join(unresolved)}, which "
           f"need a source this one is not" if unresolved else
           "  every member-day is in it: none is named")
@@ -477,11 +651,43 @@ def main(argv: list[str] | None = None) -> int:
     with fetch.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["key", "name", "ticker", "first", "last", "held", "member_days",
-                         "samples", "new_samples", "sample_dates"])
+                         "samples", "new_samples", "sample_dates"]
+                        + (["previous"] if args.correct else []))
         for p in plan:
             writer.writerow([p.key, p.name or "", p.ticker, p.first, p.last, p.held,
                              p.member_days, len(p.samples), p.new_samples,
-                             " ".join(str(d) for d in p.samples)])
+                             " ".join(str(d) for d in p.samples)]
+                            + ([p.previous or ""] if args.correct else []))
+    written = [table, listing, fetch]
+    if args.correct:
+        # The links the panel needs: a reorganisation is one security, its prices one series,
+        # whether the panel's records found it or the corrections did; a merger is two.
+        first_of, last_of = {}, {}
+        for r in rows:
+            first_of.setdefault(r.key, r)
+            last_of[r.key] = r
+        linked = [(b.after, b.before, "reorganisation", b.ticker, b.last_before, b.first_after,
+                   b.evidence, "records") for b in boundaries if b.kind == "reorganisation"]
+        linked += [(k.successor, k.predecessor, k.kind, last_of[k.predecessor].ticker, k.until,
+                    first_of[k.successor].first, k.evidence, "reference") for k in links]
+        joins = out_dir / f"{stem}_links.csv"
+        with joins.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["successor", "predecessor", "kind", "ticker", "until",
+                             "first_after", "evidence", "source"])
+            writer.writerows(sorted(linked, key=lambda x: (x[4], x[0])))
+        # Each security's member-days, read through the renames: who the panel holds when.
+        runs_of: dict[tuple, list[int]] = {}
+        for (ticker, day), (key, traded_as, how) in member_map.mapped.items():
+            runs_of.setdefault((key, ticker, traded_as, how), []).append(at[day])
+        member_file = out_dir / f"{stem}_membership.csv"
+        with member_file.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["key", "member", "traded", "how", "first", "last", "days"])
+            for (key, ticker, traded_as, how), cells in sorted(runs_of.items()):
+                for a, b, n in idn.date_runs(dates, cells):
+                    writer.writerow([key, ticker, traded_as, how, a, b, n])
+        written += [joins, member_file]
     summary = out_dir / f"{stem}.json"
     summary.write_text(json.dumps({
         "panel": str(path),
@@ -503,7 +709,7 @@ def main(argv: list[str] | None = None) -> int:
         "named": {f"{t}|{why}": len(cells) for (t, why), cells in named_runs.items()},
         "candidates": {t: [[c[0], c[1], c[2], str(c[3])] for c in found]
                        for t, found in candidates_of.items()},
-        "mapped": dict(collections.Counter(v[2] for v in mapping.mapped.values())),
+        "mapped": dict(collections.Counter(v[2] for v in member_map.mapped.values())),
         "resolutions": [
             {"statement": r.hypothesis.statement, "member": r.hypothesis.member,
              "named": [str(r.named[0]), str(r.named[1]), r.named[2]] if r.named else None,
@@ -515,8 +721,19 @@ def main(argv: list[str] | None = None) -> int:
                                                    str(r.link.until), r.link.evidence]}
             for r in resolutions
         ],
+        **({"corrections": [
+            {"rule": c.rule, "key": c.key, "ticker": c.ticker, "detail": c.detail,
+             "asked": c.asked,
+             "removed": [[r.key, r.ticker, str(r.first), str(r.last)] for r in c.removed],
+             "added": [[r.key, r.ticker, str(r.first), str(r.last)] for r in c.added]}
+            for c in corrections
+        ], "links": [[k.successor, k.predecessor, str(k.until), k.kind, k.evidence]
+                     for k in links],
+            "refused": refused, "renamed_named": len(member_map.named)}
+           if args.correct else {}),
     }, indent=1), encoding="utf-8")
-    print(f"\nWrote\n  {table}\n  {listing}\n  {fetch}\n  {summary}")
+    written.append(summary)
+    print("\nWrote\n" + "\n".join(f"  {f}" for f in written))
     return 0 if all(g.passed for g in guards) else 1
 
 

@@ -43,14 +43,22 @@ the dates between are left unassigned and reported, never guessed. Before a tick
 record and after its last, its prices go to that record's security as far as they run without
 a gap and the security's events allow.
 
-Pure functions over in-memory inputs, and two readers of the client's cache. No network.
+**The rebuild's evidence.** The table is built from the panel fetch's own records. The
+rebuild's fetch then prices every member security's spans and samples its share count inside
+them, and what it found corrects the table (`start_at_first_price`, `drop_refuted`,
+`reorganise`, `confirm_span`): a span starts at its first price under its ticker; a span with
+no price, or one every record under its ticker refutes, goes; a reorganisation is dated by the
+identifier the table keys on; and a span the reference endpoint confirms at both ends joins
+its security. Each correction is recorded with why (`Correction`).
+
+Pure functions over in-memory inputs, and three readers of the client's cache. No network.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
@@ -94,10 +102,20 @@ class Record:
     kind: str | None
     """Polygon's `type`: CS for common stock, ETF, FUND, and others."""
     list_date: dt.date | None = None
+    share_class: str | None = None
+    """The share-class FIGI, which every composite FIGI of one share class shares: reported
+    beside a composite FIGI the table does not expect, and not yet a key."""
 
     @property
     def key(self) -> str:
         return security_key(self.figi, self.cik, self.name)
+
+    @property
+    def identified(self) -> bool:
+        """Whether it carries a FIGI or a CIK. One with neither -- Everest Group's under EG on
+        its first day there, a name and a list date and nothing else -- is no evidence of
+        another security: its key would be the name, which no other record carries."""
+        return bool(self.figi or self.cik)
 
 
 @dataclass(frozen=True)
@@ -168,27 +186,37 @@ def _date(text) -> dt.date | None:
         return None
 
 
-def read_records(cache: Path | str, tickers: Iterable[str]) -> dict[str, tuple[Record, ...]]:
+def read_records(
+    cache: Path | str, tickers: Iterable[str], on: Iterable[dt.date] | None = None
+) -> dict[str, tuple[Record, ...]]:
     """Every cached reference record of each ticker, oldest first -- `ref-<ticker>-<date>.json`,
-    as `PolygonClient.ticker_details` writes them. No requests."""
+    as `PolygonClient.ticker_details` writes them. No requests.
+
+    `on`, if given, keeps the records on those dates alone: the panel fetch's own sample
+    dates, so that the records a later fetch caches beside them -- the rebuild's share samples,
+    which check the table -- do not become the evidence it is built from."""
     cache = Path(cache)
+    dates = None if on is None else set(on)
     out: dict[str, tuple[Record, ...]] = {}
     for ticker in tickers:
         prefix = f"ref-{ticker}-"
         found = []
         for path in cache.glob(f"{prefix}*.json"):
-            on = _date(path.stem[len(prefix):])
+            on_day = _date(path.stem[len(prefix):])
+            if on_day is None or (dates is not None and on_day not in dates):
+                continue
             results = json.loads(path.read_text(encoding="utf-8")).get("results") or {}
-            if on is None or not results:
+            if not results:
                 continue
             found.append(Record(
                 ticker=ticker,
-                on=on,
+                on=on_day,
                 figi=results.get("composite_figi") or None,
                 cik=results.get("cik") or None,
                 name=results.get("name") or None,
                 kind=results.get("type") or None,
                 list_date=_date(results.get("list_date")),
+                share_class=results.get("share_class_figi") or None,
             ))
         out[ticker] = tuple(sorted(found, key=lambda r: r.on))
     return out
@@ -351,9 +379,12 @@ def segment_ticker(
         if cells:
             unassigned.append((dates[cells[0]], dates[cells[-1]], len(cells), why))
 
-    # Anchors: consecutive records naming one security, as [key, first, last, records].
+    # Anchors: consecutive records naming one security, as [key, first, last, records]. A
+    # record with neither a FIGI nor a CIK names nobody (`Record.identified`).
     anchors: list[list] = []
     for record in sorted(records, key=lambda r: r.on):
+        if not record.identified:
+            continue
         if record.on not in at:
             raise ValueError(f"{ticker}'s record of {record.on} is not on a panel date")
         i = at[record.on]
@@ -1164,6 +1195,10 @@ class PlanRow:
     `every`-th trading day of the security's own first-to-last span that falls in it."""
     new_samples: int
     """Of `samples`, those with no reference record on disk under this ticker."""
+    previous: str | None = None
+    """The security the table has under the same ticker before the span, if any. On the
+    span's first day a record naming it is the change day's, still carrying the identifier the
+    ticker had: Coherent, Inc.'s FIGI on II-VI's first day as COHR."""
 
 
 def fetch_plan(
@@ -1173,6 +1208,7 @@ def fetch_plan(
     keys: Iterable[str],
     cached_refs: set[tuple[str, dt.date]],
     every: int = 63,
+    origins: Mapping[str, dt.date] | None = None,
 ) -> list[PlanRow]:
     """What a rebuild must fetch to price `keys` -- the securities that are index members in
     the window -- through the window under the tickers they actually traded under.
@@ -1182,27 +1218,37 @@ def fetch_plan(
     carried across a change of identity or ticker, and a grid of every `every` trading days
     across the security's first-to-last span -- each asked under the ticker it traded under on
     the day. `member_days` counts membership per (security, ticker). Samples already on disk
-    under that ticker cost nothing."""
+    under that ticker cost nothing.
+
+    The grid runs through the security's first day, or through `origins[key]` where given, in
+    both directions: a table corrected after a fetch keeps the grid it was sampled on -- a span
+    moved a week later, to its first price, would otherwise move every sample after it."""
     at = {day: i for i, day in enumerate(dates)}
     by_key: dict[str, list[Row]] = {}
+    by_ticker: dict[str, list[Row]] = {}
     for row in rows:
         by_key.setdefault(row.key, []).append(row)
+        by_ticker.setdefault(row.ticker, []).append(row)
     plan: list[PlanRow] = []
     for key in keys:
         mine = sorted(by_key.get(key, ()), key=lambda r: r.first)
         if not mine:
             continue
-        start = at[mine[0].first]
-        grid = set(range(start, at[mine[-1].last] + 1, every))
+        first, last = at[mine[0].first], at[mine[-1].last]
+        origin = at.get((origins or {}).get(key), first)
+        grid = {i for i in range(first, last + 1) if (i - origin) % every == 0}
         for row in mine:
             lo, hi = at[row.first], at[row.last]
             chosen = sorted({lo, hi} | {i for i in grid if lo <= i <= hi})
             samples = tuple(dates[i] for i in chosen)
+            earlier = [r for r in by_ticker.get(row.ticker, ())
+                       if r.key != key and r.last < row.first]
             plan.append(PlanRow(
                 key=key, name=row.name, ticker=row.ticker, first=row.first, last=row.last,
                 held=row.held, member_days=member_days.get((key, row.ticker), 0),
                 samples=samples,
                 new_samples=sum((row.ticker, day) not in cached_refs for day in samples),
+                previous=max(earlier, key=lambda r: r.last).key if earlier else None,
             ))
     return plan
 
@@ -1278,6 +1324,10 @@ class Link:
     predecessor: str
     until: dt.date
     evidence: str
+    kind: str = "merger"
+    """"merger": two securities, the member one and then the other (WestRock, then Smurfit
+    Westrock). "reorganisation": one security under a new identifier, its prices one series
+    (Bunge Limited, then Bunge Global SA, under BG)."""
 
 
 @dataclass(frozen=True)
@@ -1514,3 +1564,267 @@ def resolve_named(
             verdict, len(answers),
         ))
     return out
+
+
+# --------------------------------------------------------------- the rebuild's evidence
+
+
+def read_answers(cache: Path | str, ticker: str) -> list[tuple[dt.date, Record | None]]:
+    """Every reference answer on disk under a ticker, oldest first: a `Record`, or None where
+    the endpoint had none -- the rebuild's share samples among them. No requests."""
+    prefix = f"ref-{ticker}-"
+    out: list[tuple[dt.date, Record | None]] = []
+    for path in Path(cache).glob(f"{prefix}*.json"):
+        on = _date(path.stem[len(prefix):])
+        if on is None:
+            continue
+        results = json.loads(path.read_text(encoding="utf-8")).get("results") or {}
+        out.append((on, Record(
+            ticker=ticker, on=on, figi=results.get("composite_figi") or None,
+            cik=results.get("cik") or None, name=results.get("name") or None,
+            kind=results.get("type") or None, list_date=_date(results.get("list_date")),
+            share_class=results.get("share_class_figi") or None,
+        ) if results else None))
+    return sorted(out, key=lambda pair: pair[0])
+
+
+@dataclass(frozen=True)
+class Correction:
+    """One change the rebuild's evidence makes to the table, and why."""
+
+    rule: str
+    """"first price": a span starts at its first price under its ticker, not at the first of
+    its security's events; "unpriced": a span with no price under its ticker is no span;
+    "refuted": every record under its ticker inside a span names another security, and none
+    its own; "reorganisation": a new identifier under one ticker, the boundary dated by the
+    identifier the table keys on; "confirmed": a span the reference endpoint names at both
+    ends."""
+    key: str
+    ticker: str
+    removed: tuple[Row, ...]
+    added: tuple[Row, ...]
+    detail: str
+    asked: int = 0
+    """Reference lookups it took, cached or not."""
+    link: Link | None = None
+
+
+def start_at_first_price(
+    rows: Sequence[Row], priced: Callable[[str], Sequence[dt.date] | None]
+) -> tuple[list[Row], list[Correction]]:
+    """Every span the panel's prices did not draw starts at its first price under its ticker.
+
+    A span from Polygon's events starts at the first of them, which for a spin-off is its
+    listing date: GE HealthCare's at 2022-12-15, its first regular-way price on 2023-01-04, and
+    no reference record before then to say who traded. A span with no price under its ticker
+    at all is dropped -- a tenure Polygon records and nobody traded under, First Republic's
+    S600 and Constellation's CEGV. `priced(ticker)` is the ticker's trading days, ascending, or
+    None where its prices were not fetched, which leaves its rows as they are; the panel's own
+    rows begin at a price already."""
+    out: list[Row] = []
+    corrections: list[Correction] = []
+    for row in rows:
+        days = None if row.source == "panel" else priced(row.ticker)
+        if days is None:
+            out.append(row)
+            continue
+        inside = [day for day in days if row.first <= day <= row.last]
+        label = row.name or row.key
+        if not inside:
+            corrections.append(Correction(
+                "unpriced", row.key, row.ticker, (row,), (),
+                f"{label} under {row.ticker} {row.first}..{row.last}: no price under the ticker "
+                f"inside the span, which began at {row.starts}",
+            ))
+            continue
+        if inside[0] > row.first:
+            moved = replace(row, first=inside[0],
+                            starts=f"its first price under {row.ticker}, {inside[0]} (before it, "
+                                   f"{row.starts})")
+            corrections.append(Correction(
+                "first price", row.key, row.ticker, (row,), (moved,),
+                f"{label} under {row.ticker}: from {row.first} to {inside[0]}, its first price "
+                f"there",
+            ))
+            row = moved
+        out.append(row)
+    return out, corrections
+
+
+def drop_refuted(
+    rows: Sequence[Row],
+    answers_of: Callable[[str], Sequence[tuple[dt.date, Record | None]]],
+) -> tuple[list[Row], list[Correction]]:
+    """Every span the records refute is dropped: one the panel's prices did not draw, under
+    whose ticker every record inside it names another identified security, and none its own.
+    Polygon's events give CRH plc the ticker CRHC from 2021-09-23, and each record under CRHC
+    there names Cohn Robbins Holdings, a SPAC, or nobody. `answers_of(ticker)` is every answer
+    on disk under the ticker (`read_answers`)."""
+    out: list[Row] = []
+    corrections: list[Correction] = []
+    for row in rows:
+        if row.source == "panel":
+            out.append(row)
+            continue
+        inside = [(day, r) for day, r in answers_of(row.ticker) if row.first <= day <= row.last]
+        own = [day for day, r in inside if r is not None and r.identified and r.key == row.key]
+        other = [(day, r) for day, r in inside
+                 if r is not None and r.identified and r.key != row.key]
+        if own or not other:
+            out.append(row)
+            continue
+        named: dict[str, list] = {}
+        for day, record in other:
+            entry = named.setdefault(record.key, [record.name, day, day, 0])
+            entry[2], entry[3] = day, entry[3] + 1
+        empty = sum(1 for _, r in inside if r is None)
+        corrections.append(Correction(
+            "refuted", row.key, row.ticker, (row,), (),
+            f"{row.name or row.key} under {row.ticker} {row.first}..{row.last}, from "
+            f"{row.starts}: " + "; ".join(
+                f"{n} record(s) name {name} ({key}), {a}..{b}"
+                for key, (name, a, b, n) in named.items())
+            + (f"; {empty} answer(s) no record" if empty else "") + "; none names it",
+        ))
+    return out, corrections
+
+
+@dataclass(frozen=True)
+class Reorganisation:
+    """A new identifier under one ticker, put to the reference endpoint to be dated. The
+    boundary falls between the last day its records name `before` and the first they name
+    `after`: the identifier the table keys on decides, not the name, which can change first --
+    Bunge Global SA is named under Bunge Limited's CIK from 2023-11-01 to 2023-11-07."""
+
+    ticker: str
+    before: str
+    after: str
+    statement: str
+
+
+def reorganise(
+    dates: Sequence[dt.date],
+    rows: Sequence[Row],
+    spec: Reorganisation,
+    lookup: Callable[[str, dt.date], Record | None],
+    known: Sequence[tuple[dt.date, Record | None]] = (),
+) -> tuple[list[Row], Correction]:
+    """Date `spec`'s boundary by bisection on the endpoint's answers under its ticker, between
+    the latest day `known` -- the answers on disk -- name `before` and the earliest after it
+    they name `after`. `before`'s span under the ticker then ends at the boundary, and starts
+    with `after`'s if the table has none for it (Vylor's first FIGI); `after`'s starts the next
+    day. One security, its prices one series: a `Link` of kind "reorganisation" joins the two.
+    `held` is kept as it was, the spans being of tickers the panel does not hold.
+
+    Raises ValueError where the answers cannot bracket the boundary, or a day inside the
+    bracket names neither."""
+    at = {day: i for i, day in enumerate(dates)}
+    answers: dict[int, Record | None] = {at[day]: r for day, r in known if day in at}
+    asked = 0
+
+    def names(i: int, key: str) -> bool:
+        record = answers.get(i)
+        return record is not None and record.identified and record.key == key
+
+    lo = max((i for i in answers if names(i, spec.before)), default=None)
+    hi = None if lo is None else min(
+        (i for i in answers if i > lo and names(i, spec.after)), default=None)
+    if lo is None or hi is None:
+        raise ValueError(f"{spec.statement}: no answer under {spec.ticker} names {spec.before} "
+                         f"and a later one {spec.after}, so the boundary cannot be bracketed")
+    while hi - lo > 1:
+        middle = (lo + hi) // 2
+        answers[middle] = lookup(spec.ticker, dates[middle])
+        asked += 1
+        if names(middle, spec.before):
+            lo = middle
+        elif names(middle, spec.after):
+            hi = middle
+        else:
+            found = answers[middle]
+            raise ValueError(f"{spec.statement}: {spec.ticker} on {dates[middle]} names "
+                             f"{found.key if found is not None else 'nobody'}, neither identifier")
+    last_before, first_after = dates[lo], dates[hi]
+    evidence = (f"{spec.ticker} names {spec.before} to {last_before} and {spec.after} from "
+                f"{first_after} (the reference endpoint)")
+    after_rows = [r for r in rows if r.key == spec.after and r.ticker == spec.ticker
+                  and r.first <= first_after <= r.last]
+    if len(after_rows) != 1:
+        raise ValueError(f"{spec.statement}: {len(after_rows)} rows of {spec.after} under "
+                         f"{spec.ticker} span {first_after}")
+    successor = after_rows[0]
+    before_rows = [r for r in rows if r.key == spec.before and r.ticker == spec.ticker
+                   and r.first <= last_before]
+    removed, added = [successor], []
+    if before_rows:
+        predecessor = max(before_rows, key=lambda r: r.first)
+        removed.append(predecessor)
+        added.append(replace(predecessor, last=last_before,
+                             ends=f"the reorganisation: {evidence}"))
+    else:
+        record = answers[lo]
+        added.append(Row(spec.before, record.figi, record.cik, record.name, record.kind,
+                         spec.ticker, successor.first, last_before, 0, "reference",
+                         successor.starts, f"the reorganisation: {evidence}"))
+    added.append(replace(successor, first=first_after, starts=f"the reorganisation: {evidence}"))
+    kept = [r for r in rows if not any(r is gone for gone in removed)]
+    link = Link(spec.after, spec.before, last_before, evidence, kind="reorganisation")
+    return sorted([*kept, *added], key=lambda r: (r.key, r.first, r.ticker)), Correction(
+        "reorganisation", spec.after, spec.ticker, tuple(removed), tuple(added),
+        f"{spec.statement}: {evidence}", asked, link,
+    )
+
+
+@dataclass(frozen=True)
+class Confirmation:
+    """A span the table lacks, put to the reference endpoint at both ends: a member security's
+    history under an earlier ticker its events do not record (II-VI's, as IIVI, before it took
+    COHR as Coherent Corp.), or who held a ticker before a member security took it (Coherent,
+    Inc., under COHR)."""
+
+    ticker: str
+    first: dt.date
+    last: dt.date
+    statement: str
+    expect: str | None = None
+    """The security the endpoint must name, where the statement says which."""
+
+
+def confirm_span(
+    dates: Sequence[dt.date],
+    rows: Sequence[Row],
+    spec: Confirmation,
+    lookup: Callable[[str, dt.date], Record | None],
+    priced: Callable[[str], Sequence[dt.date] | None],
+) -> tuple[list[Row], Correction]:
+    """Add `spec`'s span if the endpoint names one identified security under its ticker on its
+    first and its last day -- `spec.expect`, where given -- and the ticker's prices run from
+    one to the other without a gap longer than a halt, so nobody else traded between. Raises
+    ValueError otherwise, saying why; and where the span would put its security under two
+    tickers on one date, or its ticker under two securities."""
+    at = {day: i for i, day in enumerate(dates)}
+    ends = [lookup(spec.ticker, spec.first), lookup(spec.ticker, spec.last)]
+    keys = {r.key if r is not None and r.identified else None for r in ends}
+    if None in keys or len(keys) != 1 or (spec.expect is not None and keys != {spec.expect}):
+        named = ", ".join(f"{day}: {r.name} ({r.key})" if r is not None else f"{day}: nobody"
+                          for day, r in zip((spec.first, spec.last), ends))
+        raise ValueError(f"{spec.statement}: not confirmed -- {spec.ticker} names {named}")
+    record = ends[1]
+    days = priced(spec.ticker) or ()
+    inside = [at[day] for day in days if spec.first <= day <= spec.last and day in at]
+    if not inside or dates[inside[0]] != spec.first or dates[inside[-1]] != spec.last or any(
+            b - a - 1 >= HALT_DAYS for a, b in zip(inside, inside[1:])):
+        raise ValueError(f"{spec.statement}: {spec.ticker}'s prices do not run unbroken from "
+                         f"{spec.first} to {spec.last}")
+    clash = [r for r in rows if r.first <= spec.last and spec.first <= r.last
+             and (r.key == record.key or r.ticker == spec.ticker)]
+    if clash:
+        raise ValueError(f"{spec.statement}: the span overlaps " + "; ".join(
+            f"{r.name or r.key} as {r.ticker} {r.first}..{r.last}" for r in clash))
+    note = (f"reference: {spec.ticker} names {record.name} ({record.key}) on {spec.first} and "
+            f"{spec.last}, its prices unbroken between")
+    row = Row(record.key, record.figi, record.cik, record.name, record.kind, spec.ticker,
+              spec.first, spec.last, 0, "reference", note, note)
+    return sorted([*rows, row], key=lambda r: (r.key, r.first, r.ticker)), Correction(
+        "confirmed", record.key, spec.ticker, (), (row,), f"{spec.statement}: {note}", 2,
+    )
