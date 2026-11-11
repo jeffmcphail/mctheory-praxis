@@ -504,14 +504,66 @@ for a diagnostic that measures what it claims:
 Every ratio is within two standard errors of one, and the share roughly halves as the
 cross-section doubles, as `sigma^2/n` predicts.
 
-The bias **is not subtracted off**. The naive correction can drive a variance negative, and
-flooring that at zero would turn a diagnostic into a fabrication; Barra's own adjustment is
-more careful than a subtraction. It is reported, and reported loudly past 25 percent.
-
 One structural point worth noting: because sampling variance is roughly constant across
 standardised factors, it is a larger *fraction* of a small factor's variance. The noise
 concentrates on the lowest-variance factor -- the same shape as the time-series intercept bias
 landing hardest on HML rather than on the market.
+
+By default the bias **is not subtracted off**. The naive correction can drive a variance
+negative, and flooring that silently would turn a diagnostic into a fabrication; Barra's own
+adjustment is more careful than a subtraction. It is reported, and reported loudly past 25
+percent.
+
+`sampling_correction=True` (the run's `--sampling-correction`, off by default) makes the
+subtraction, and says what the repair after it did (midoffice10):
+
+- **Weighted as the covariance is.** Each period's full `sigma^2 (X'WX)^-1`, weighted by what
+  the covariance estimator carries of that period's noise. The sample, exponential and
+  Newey-West estimators are each a quadratic form `R' K R`, so independent noise of covariance
+  `S_t` adds `sum_t K_tt S_t` to the estimate, and `K_tt` is the estimate of a series one in
+  period t and zero elsewhere (`crosssectional.sampling_weights`). Newey-West at 10 lags and a
+  90-day half-life carries 0.9625 of it: centring on the weighted mean makes a period's noise
+  correlate slightly negatively with its neighbours'. The two-half-life and shrunk estimators are
+  not quadratic forms, and are refused.
+- **The repair.** The subtracted matrix goes through `nearest_psd`. The notes keep its diagonal
+  before the repair, and the qualifications name every factor it left at or below zero.
+- **Verified** over 12 replications: (corrected - realized) / predicted averages zero, where the
+  uncorrected diagonal's averages one.
+
+`noise_share` divides the equal-weighted mean of the sampling variance by a variance weighted
+toward the recent periods; `weighted_noise_share` is the consistent ratio, what the correction
+subtracts. On the S&P 500 model they differ by about half again -- Wholesale 46.2% and 68.8%,
+Size Nonlinearity 46.6% and 67.4% -- because every factor's sampling variance in 2026 is 1.3 to
+2.0 times its 2023-2026 mean, the cross-sections steady at about 500: residual dispersion rose,
+and a 90-day half-life sits on 2026.
+
+There, the subtraction leaves 9 of the 25 eigenvalues negative, the most negative -0.0070 a
+year, in directions that are contrasts of the thin industries: Finance & Real Estate with
+Construction, Wholesale against both, SIC20, Services against SIC67. That is the estimator's own
+sampling error. Drawn from a truth comfortably above the noise in every direction and estimated
+the same way, 938 periods leave a median of 7 negative. Clipped to the floor, those directions
+are close to riskless: a portfolio in one has almost no factor risk. Broad portfolios move
+little -- the index -1.1%, the equal-weighted index +0.8%, the smallest 85 -0.6%, the largest 50
+-1.0% -- and the thin industries' own portfolios fall 9 to 18%.
+
+**Thin industries, folded.** `refdata.industries.merge_industries` (the run's `--merge-industry
+A=B`) folds an industry into another once the scheme is built, its members labelled B. A chain
+resolves to its end, and the folds are recorded in `folded`, apart from the grouping's own
+`merged`. Measured in midoffice10, each industry under 15 members folded into the industry its
+factor return correlates with most over the estimated periods:
+
+| Fold | mean R-squared lost | members' specific risk, median change |
+|---|---|---|
+| Construction (8) into Retail | 0.0030 | +12.4% |
+| Wholesale (12) into Retail | 0.0018 | +1.6% |
+| Finance & Real Estate (12) into SIC62 | 0.0024 | +9.4% |
+
+Each loses about what a regressor of pure noise adds, 0.0016 to 0.0026 (Size Nonlinearity,
+below). Folding all three, a floor of 15, leaves the correction 6 negative eigenvalues where it
+had 9, the most negative -0.0031. Floors of 20 and 25, applied the same way, fold industries
+that carry more -- SIC37 0.0053, SIC60 0.0063 -- and take mean R-squared to 0.2769 and 0.2628.
+Construction is two industries under one division: its homebuilders move with Retail, its
+contractors (EME, FIX, PWR) lately with SIC36.
 
 ### What it flags rather than fixes
 
@@ -774,6 +826,13 @@ regressor of pure noise adds -- (1 - R-squared) / (n - k - 1), roughly 0.0016 to
 Its noise share is Construction's and Wholesale's problem too, and gets one model-wide answer
 after the rebuild rather than a deletion per factor.
 
+Measured on the panel on securities (midoffice10): weighted as the covariance weights the
+periods, 67.4% of its variance is noise, and the sampling-error correction takes its volatility
+from 2.32% to 1.71% (1.32% before the repair). Without it, mean R-squared falls by 0.0036, and no
+reference portfolio's risk moves by more than 0.07 of a point -- the smallest 85's from 13.06% to
+12.99%. Folding the thin industries leaves its noise share where it was: 62% to 67% at every
+floor.
+
 ### Two price bases, and the trap between them
 
 Returns need split-adjusted prices, so a four-for-one split is not a -75% day. Three
@@ -961,13 +1020,24 @@ cache holds the fetch:
     its own: 78 lookups over 12 spans.
   - **An isolated error is not carried.** A sample whose two samples before and two after agree
     with each other within 10%, and which differs from each beyond it with no split between, is
-    an error, and the count before it carries through: seven, among them Quest Diagnostics' at
-    0.104 of its neighbours, Starbucks' at 0.123 and Block's at 0.110. Samples alternating
-    between two counts, as Constellation's do, are left: the rule cannot tell which is true.
+    an error, and the count before it carries through: six, among them Quest Diagnostics' at
+    0.104 of its neighbours, Starbucks' at 0.123 and Block's at 0.110. A sample its own record's
+    weighted count confirms within 10% is no error (midoffice09's ruling 1): PCG's of
+    2026-01-09, at 1.000 of it, is spared, and its series stays flagged as alternating. Samples
+    alternating between two counts, as Constellation's do, are left: the rule cannot tell which
+    is true.
   - **Rulings for what no rule can tell,** in `config/sp500_share_count_overrides.json`, each
     with its evidence: Honeywell's records carrying Honeywell Aerospace's count from
     2026-10-12, Skydance's carrying none after it took Warner Bros. Discovery. The build lists
     every entry it uses.
+
+- **A span ends where its security stops trading on an exchange** (midoffice09's ruling 2). A
+  span's records say where its ticker trades: from its first sample whose market is not
+  "stocks", OTC Link's after a failure, the span goes, but for any day the index still held it.
+  Signature Bank's span from 2023-03-28 goes, 864 priced days, and First Republic's is kept to
+  2023-05-03, its one member-day on OTC Link, 138 priced days going after it. No member-day
+  changes: the index holds only listed shares. A leaver that stays listed keeps forecasting
+  from its own history.
 
   Member-days without a count: 234 -- FedEx Freight's 109 and Vylor's 24, whose records carry
   none in the window; the spin-offs' first days; Skydance's 21, by its ruling; and 37 days the
@@ -1011,6 +1081,11 @@ from 5.80% to 6.22%. Total returns raise every industry's mean, from 0.65% (Serv
 (SIC67, the REITs), in line with what their members paid (correlation 0.945 across the 20), and
 lower Volatility's by 0.58%; the high yielders' specific risk falls most, Altria's by 0.58 of a
 point.
+
+Since midoffice10 the default panel is `_listed`: PCG's sample spared, which changes its count
+over 63 member-days, and the two spans ended off an exchange, which change 1,002 priced cells
+and no member-day. Mean R-squared moves from 0.293204 to 0.293203; Signature Bank's 395.72%
+forecast goes, and 966 specific returns measured outside the regressions with it.
 
 Since midoffice09 the run's defaults are the panel on securities with its counts repaired, total
 returns, and each security's history built from every specific return it has. The three count

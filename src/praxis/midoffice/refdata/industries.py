@@ -41,7 +41,7 @@ change.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Mapping, Sequence
 
 import numpy as np
@@ -142,6 +142,10 @@ class IndustryScheme:
     # Labels in `assignment` that carry no factor: the dropped industries, and OTHER when the
     # pool itself falls short of the hard floor.
     excluded: tuple[str, ...] = ()
+    # Industries folded into another after the grouping, by `merge_industries`: each source
+    # industry and the industry its members went to. Apart from `merged`, which is the
+    # grouping's own record of major groups into divisions and thin ones into OTHER.
+    folded: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def industries(self) -> tuple[str, ...]:
@@ -188,6 +192,9 @@ class IndustryScheme:
             f"largest {biggest} with {counts[biggest]} "
             f"({counts[biggest] / total:.0%}), "
             f"{len(self.merged)} thin group(s) merged into their division"
+            + (f", {len(self.folded)} industry/industries folded into another: "
+               + ", ".join(f"{a} into {b}" for a, b in sorted(self.folded.items()))
+               if self.folded else "")
         )
 
     def qualifications(self) -> tuple[str, ...]:
@@ -367,6 +374,41 @@ def build_scheme(
         dropped=dropped,
         excluded=excluded,
     )
+
+
+def merge_industries(scheme: IndustryScheme, merges: Mapping[str, str]) -> IndustryScheme:
+    """The scheme with each industry in `merges` folded into the industry it names: every
+    member of A labelled B. A chain resolves to its end -- A into B and B into C puts A's
+    members in C -- and a cycle is refused, as is a name that is not one of the scheme's
+    industry factors. The merges are recorded in `folded`; the grouping's own, in `merged`,
+    are left as they were."""
+    factors = set(scheme.industries)
+    for source, target in merges.items():
+        for name in (source, target):
+            if name not in factors:
+                raise ValueError(
+                    f"{name!r} is not an industry factor of the scheme; they are "
+                    f"{', '.join(sorted(factors))}"
+                )
+        if source == target:
+            raise ValueError(f"{source!r} cannot be folded into itself")
+
+    def end(name: str) -> str:
+        path = [name]
+        while name in merges:
+            name = merges[name]
+            if name in path:
+                raise ValueError("the merges form a cycle: " + " into ".join(path + [name]))
+            path.append(name)
+        return name
+
+    resolved = {source: end(source) for source in merges}
+    assignment = {
+        ticker: resolved.get(label, label) for ticker, label in scheme.assignment.items()
+    }
+    folded = {source: resolved.get(target, target) for source, target in scheme.folded.items()}
+    folded.update(resolved)
+    return replace(scheme, assignment=assignment, folded=folded)
 
 
 def industry_exposures(

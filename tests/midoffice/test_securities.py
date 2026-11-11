@@ -329,3 +329,59 @@ def test_the_overrides_file_is_read_with_its_rules(tmp_path):
             write(good, {**good, "first": "2026-10-20", "last": "2026-12-01"}))
     path = Path(__file__).resolve().parents[2] / "config" / "sp500_share_count_overrides.json"
     assert {o.label for o in securities.read_overrides(path)} == {"HON", "SKYD"}
+
+
+def test_a_sample_its_own_weighted_count_confirms_is_spared_and_still_reported():
+    """PCG's case (midoffice09, ruling 1): an isolated sample whose own record's weighted count
+    agrees with it within the tolerance is two fields of one record agreeing -- no error. It is
+    still found and reported, spared; one the weighted count does not confirm is removed."""
+    def column(key):
+        return securities.Column(key, (key,), key, (span(key, key, 0, 39),))
+
+    def seq(*pairs):
+        return [(day(i), "T", float(c)) for i, c in pairs]
+
+    samples = {k: seq((0, 100), (5, 101), (10, 10), (15, 102), (20, 100))
+               for k in ("OWN", "OTHER", "NONE")}
+    weighted = {("OWN", day(10)): 10.4, ("OTHER", day(10)): 99.0}
+    repairs = securities.isolated_errors([column(k) for k in samples], samples, [],
+                                         weighted=weighted)
+    by_key = {r.key: r for r in repairs}
+    assert set(by_key) == {"OWN", "OTHER", "NONE"}
+    assert by_key["OWN"].spared and by_key["OWN"].weighted == 10.4
+    assert not by_key["OTHER"].spared and by_key["OTHER"].weighted == 99.0
+    assert not by_key["NONE"].spared and by_key["NONE"].weighted is None
+
+
+def test_a_span_off_an_exchange_ends_but_for_the_days_the_index_still_held_it():
+    """Midoffice09's ruling 2: from the first sample whose record's market is not "stocks" the
+    span goes; it ends on its last sample on an exchange, or runs on through the member-days
+    after it -- trading days only -- so no member-day changes. A span wholly off one with no
+    member-day goes; a listed span, or one with no records, is kept as it is."""
+    calendar = tuple(d for d in DAYS if d.weekday() < 5)
+    spans = [
+        span("LEFT", "LFT", 0, 39, 0, 10, 20, 30),     # off from day 20; held to day 24
+        span("GONE", "GNE", 5, 39, 5, 15),             # off from its first sample
+        span("STAY", "STY", 0, 39, 0, 10, 20),         # listed throughout
+        span("BARE", "BAR", 0, 39, 0, 10),             # no records at all
+    ]
+    markets = {("LFT", day(0)): ("stocks", "XNAS"), ("LFT", day(10)): ("stocks", "XNAS"),
+               ("LFT", day(20)): ("otc", "OTC Link"), ("LFT", day(30)): ("otc", "OTC Link"),
+               ("GNE", day(5)): ("otc", "OTC Link"), ("GNE", day(15)): ("otc", "OTC Link"),
+               ("STY", day(0)): ("stocks", "XNYS"), ("STY", day(10)): ("stocks", "XNYS"),
+               ("STY", day(20)): ("stocks", "XNYS")}
+    member_days = {"LEFT": [(day(0), day(25))], "GONE": [(day(0), day(4))],
+                   "STAY": [(day(0), day(39))]}
+    kept, ended = securities.listed_spans(
+        spans, lambda ticker, d: markets.get((ticker, d)), member_days, calendar)
+    assert [s.key for s in kept] == ["LEFT", "STAY", "BARE"]
+    left, gone = ended
+    assert (left.span.key, left.off_exchange, left.market, left.exchange) == (
+        "LEFT", day(20), "otc", "OTC Link")
+    assert left.last_listed == day(10)
+    # Days 11 to 25 are the member-days after it; the weekends among them are not.
+    assert left.held == tuple(d for d in DAYS[11:26] if d.weekday() < 5)
+    assert left.kept_to == max(left.held) and kept[0].last == left.kept_to
+    assert kept[0].samples == (day(0), day(10), day(20))
+    assert (gone.span.key, gone.last_listed, gone.kept_to, gone.held) == ("GONE", None, None, ())
+    assert kept[1] == spans[2] and kept[2] == spans[3]

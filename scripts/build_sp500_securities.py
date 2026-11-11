@@ -28,13 +28,21 @@ The counts follow midoffice08's rulings on what Polygon's records get wrong, eac
   any count, midoffice08's build.
 - **Isolated errors are repaired** (`--repair isolated`): a sample whose two samples before and
   two after agree with each other within 10%, which differs from each beyond it with no split
-  between, is not carried, and the count before it carries through. Every one is listed.
+  between, is not carried, and the count before it carries through -- unless its own record's
+  weighted count confirms it within 10% (`--spare weighted`, midoffice09's ruling 1). Every one
+  found is listed, spared or not.
+- **A span ends where its security stops trading on an exchange** (`--listed exchange`,
+  midoffice09's ruling 2): from its first sample whose record's market is not "stocks", OTC
+  Link's after a failure, the span goes, but for any day the index still held it. Every span
+  it ends is listed, with the days it removes.
 - **The overrides file** (`--overrides`, `config/sp500_share_count_overrides.json`): rulings on
   single securities' counts, each with its evidence, applied and listed. `none` reads none.
 
 Writes, beside the plan (gitignored, like it): `sp500_securities_<first>_<last><suffix>.npz`,
-the panel, and `.json`, the report -- `--suffix` `_repaired` by default; midoffice08's panel, by
-its rules, has none. An existing file is never overwritten without `--overwrite`.
+the panel, and `.json`, the report -- `--suffix` `_listed` by default. midoffice09's panel,
+`_repaired`, is `--spare none --listed any`; midoffice08's, with no suffix, is `--first-counts
+found --repair none --overrides none --spare none --listed any`. An existing file is never
+overwritten without `--overwrite`.
 """
 
 from __future__ import annotations
@@ -112,9 +120,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--overrides", default="config/sp500_share_count_overrides.json",
                         help="the rulings on single securities' counts (midoffice08's ruling "
                              "3); none reads none")
-    parser.add_argument("--suffix", default="_repaired",
-                        help="appended to the output's stem (default _repaired; midoffice08's "
-                             "panel, built by its rules, has none)")
+    parser.add_argument("--spare", choices=("weighted", "none"), default="weighted",
+                        help="weighted: an isolated error its own record's weighted count "
+                             "confirms within the tolerance is spared (the default, midoffice09's "
+                             "ruling 1); none spares nothing, midoffice09's build")
+    parser.add_argument("--listed", choices=("exchange", "any"), default="exchange",
+                        help="exchange: a span ends where its records place the security off an "
+                             "exchange, but for any member-day (the default, midoffice09's "
+                             "ruling 2); any keeps every span, midoffice09's build")
+    parser.add_argument("--suffix", default="_listed",
+                        help="appended to the output's stem (default _listed; midoffice09's panel "
+                             "is _repaired, midoffice08's has none)")
     parser.add_argument("--overwrite", action="store_true",
                         help="write over an existing panel of the same name; without it the "
                              "build stops first")
@@ -174,8 +190,37 @@ def main(argv: list[str] | None = None) -> int:
     links = list(csv.DictReader(sibling(plan_path, "_links.csv").open(encoding="utf-8")))
     reorganisations = {r["predecessor"]: r["successor"] for r in links
                        if r["kind"] == "reorganisation"}
-    columns = securities.columns_of(spans, reorganisations)
     share_classes, ciks = rebuild.own_identifiers(spans, fetched)
+    members = list(csv.DictReader(sibling(plan_path, "_membership.csv").open(encoding="utf-8")))
+    member_days: dict[str, list[tuple[dt.date, dt.date]]] = {}
+    for row in members:
+        member_days.setdefault(row["key"], []).append(
+            (dt.date.fromisoformat(row["first"]), dt.date.fromisoformat(row["last"])))
+
+    def market_of(ticker, day):
+        results = reference(cache, ticker, day)
+        return None if not results else (results.get("market"), results.get("primary_exchange"))
+
+    delistings: list[securities.Delisting] = []
+    if args.listed == "exchange":
+        spans, delistings = securities.listed_spans(spans, market_of, member_days, dates)
+    print("\nOff an exchange: a span ends where its records place the security off one, but "
+          "for any day the index still held it -- "
+          + (f"{len(delistings)} span(s) ended" if args.listed == "exchange"
+             else "none ended (--listed any)"))
+    for d in delistings:
+        span = d.span
+        priced = [b.date for b in bars(span.ticker, "adj") if span.first <= b.date <= span.last
+                  and (d.kept_to is None or b.date > d.kept_to)]
+        print(f"  {span.ticker:<6} {span.key} {span.first}..{span.last}: off an exchange from "
+              f"{d.off_exchange} ({d.market}, {d.exchange}); last on one "
+              f"{d.last_listed or 'none in the span'}; "
+              + (f"kept to {d.kept_to}" if d.kept_to else "the span goes")
+              + (f", for the {len(d.held)} member-day(s) the index still held it, "
+                 f"{', '.join(str(x) for x in d.held)}" if d.held else "")
+              + f"; {len(priced)} priced day(s) removed"
+              + (f", {priced[0]}..{priced[-1]}" if priced else ""))
+    columns = securities.columns_of(spans, reorganisations)
 
     # ------------------------------------------------------------------ 2. the search
     print("\nThe first-count search: each span that starts without a share count, no count "
@@ -235,27 +280,36 @@ def main(argv: list[str] | None = None) -> int:
         if found.found is not None and found.found[0] not in found.span.samples:
             samples.setdefault(found.span.key, []).append(
                 (found.found[0], found.span.ticker, found.found[1]))
+    weighted_on: dict[tuple[str, dt.date], float] = {}
+    if args.spare == "weighted":
+        for key, rows in samples.items():
+            for day, ticker, _count in rows:
+                results = reference(cache, ticker, day)
+                if results and results.get("weighted_shares_outstanding"):
+                    weighted_on[(key, day)] = float(results["weighted_shares_outstanding"])
     repairs: list[securities.Repair] = []
     if args.repair == "isolated":
-        repairs = securities.isolated_errors(columns, samples, checks, args.tolerance)
-        removed = {(r.sample_key, r.day) for r in repairs}
+        repairs = securities.isolated_errors(columns, samples, checks, args.tolerance,
+                                             weighted_on)
+        removed = {(r.sample_key, r.day) for r in repairs if not r.spared}
         samples = {key: [row for row in rows if (key, row[0]) not in removed]
                    for key, rows in samples.items()}
+    spared = [r for r in repairs if r.spared]
     print(f"\nIsolated errors: a sample whose two samples before and two after agree with each "
           f"other within {args.tolerance:.0%}, and which differs from each of them beyond it, no "
-          f"split between, is not carried -- " + (f"{len(repairs)} removed" if args.repair ==
-                                                  "isolated" else "none removed (--repair none)"))
+          f"split between, is not carried, unless its own record's weighted count confirms it -- "
+          + (f"{len(repairs)} found, {len(repairs) - len(spared)} removed, {len(spared)} spared"
+             if args.repair == "isolated" else "none removed (--repair none)"))
     for r in repairs:
-        print(f"  {r.label:<6} {r.ticker:<6} {r.day} {r.count:>16,.0f}; around it "
+        own = (f"its weighted count {r.weighted:,.0f}, {r.weighted / r.count:.3f} of it"
+               if r.weighted is not None else "no weighted count")
+        print(f"  {'SPARED ' if r.spared else 'removed'} {r.label:<6} {r.ticker:<6} {r.day} "
+              f"{r.count:>16,.0f}; around it "
               + ", ".join(f"{d} {c:,.0f}" for d, c in r.neighbours)
-              + f" -- {r.count / np.median([c for _, c in r.neighbours]):.3f} of their median")
+              + f" -- {r.count / np.median([c for _, c in r.neighbours]):.3f} of their median; "
+              + own)
     overrides = ([] if args.overrides == "none"
                  else securities.read_overrides(args.overrides))
-    members = list(csv.DictReader(sibling(plan_path, "_membership.csv").open(encoding="utf-8")))
-    member_days: dict[str, list[tuple[dt.date, dt.date]]] = {}
-    for row in members:
-        member_days.setdefault(row["key"], []).append(
-            (dt.date.fromisoformat(row["first"]), dt.date.fromisoformat(row["last"])))
     panel = securities.build_panel(
         dates, columns, bars, checks, samples, fetched.dividends, member_days,
         (bars(args.market, "adj"), bars(args.market, "raw"),
@@ -513,9 +567,17 @@ def main(argv: list[str] | None = None) -> int:
                  "reconciled": [[c.span.ticker, c.reconciled, c.detail] for c in reconciled],
                  "splits": dict(kinds)},
         "rules": {"first_counts": args.first_counts, "repair": args.repair,
+                  "spare": args.spare, "listed": args.listed,
                   "overrides": args.overrides, "tolerance": args.tolerance},
+        "delistings": [{"ticker": d.span.ticker, "key": d.span.key, "first": str(d.span.first),
+                        "last": str(d.span.last), "off_exchange": str(d.off_exchange),
+                        "market": d.market, "exchange": d.exchange,
+                        "last_listed": str(d.last_listed) if d.last_listed else None,
+                        "kept_to": str(d.kept_to) if d.kept_to else None,
+                        "held": [str(x) for x in d.held]} for d in delistings],
         "repairs": [{"label": r.label, "key": r.key, "sample_key": r.sample_key,
                      "ticker": r.ticker, "day": str(r.day), "count": r.count,
+                     "weighted": r.weighted, "spared": r.spared,
                      "neighbours": [[str(d), c] for d, c in r.neighbours]} for r in repairs],
         "overrides": [{"label": o.label, "key": o.key, "first": str(o.first), "last": str(o.last),
                        "action": o.action, "count": o.count, "days": days, "member_days": member,

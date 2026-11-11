@@ -24,6 +24,7 @@ from praxis.midoffice.refdata.industries import (
     division_of,
     industry_exposures,
     major_group_of,
+    merge_industries,
 )
 
 
@@ -364,3 +365,36 @@ def test_cached_reference_dates_finds_what_is_on_disk(tmp_path):
     found = client.cached_reference_dates("ABMD")
     assert found == (date(2023, 1, 3), date(2022, 6, 30), date(2022, 1, 3))
     assert client.cached_reference_dates("NOTHING") == ()
+
+
+# ------------------------------------------------------------------- folding industries
+
+
+def test_an_industry_folded_into_another_takes_its_members_with_it():
+    scheme = merge_industries(build_scheme(_codes(), min_members=MIN_MEMBERS), {"Mining": "SIC35"})
+    assert "Mining" not in scheme.industries
+    assert scheme.counts()["SIC35"] == 26
+    assert all(scheme.assignment[f"MIN{i:02d}"] == "SIC35" for i in range(6))
+    assert scheme.folded == {"Mining": "SIC35"}
+    assert scheme.merged.get("SIC13") == "Mining"      # the grouping's own record stands
+    assert scheme.describe().endswith(
+        "1 industry/industries folded into another: Mining into SIC35"
+    )
+
+
+def test_a_chain_of_folds_resolves_to_its_end_and_a_cycle_is_refused():
+    base = build_scheme(_codes(), min_members=MIN_MEMBERS)
+    scheme = merge_industries(base, {"Mining": "SIC58", "SIC58": "SIC60"})
+    assert scheme.folded == {"Mining": "SIC60", "SIC58": "SIC60"}
+    assert scheme.counts()["SIC60"] == 46
+    stepwise = merge_industries(merge_industries(base, {"Mining": "SIC58"}), {"SIC58": "SIC60"})
+    assert stepwise.folded == scheme.folded and stepwise.assignment == scheme.assignment
+    with pytest.raises(ValueError, match="cycle"):
+        merge_industries(base, {"SIC58": "SIC60", "SIC60": "SIC58"})
+
+
+def test_a_fold_names_only_industries_that_are_factors():
+    base = build_scheme(_codes(), min_members=MIN_MEMBERS)
+    for merges in ({"SIC13": "Mining"}, {"Mining": "Construction"}, {"Mining": "Mining"}):
+        with pytest.raises(ValueError):
+            merge_industries(base, merges)

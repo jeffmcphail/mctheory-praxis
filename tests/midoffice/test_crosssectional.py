@@ -16,13 +16,21 @@ import numpy as np
 import pytest
 
 from praxis.midoffice.model.characteristics import CharacteristicPanel
-from praxis.midoffice.model.covariance import ShrunkCovariance, SampleCovariance
+from praxis.midoffice.model.covariance import (
+    ExponentialCovariance,
+    HorizonCovariance,
+    NeweyWestCovariance,
+    SampleCovariance,
+    ShrunkCovariance,
+)
 from praxis.midoffice.model.crosssectional import (
     MARKET_FACTOR,
     MIN_SECURITIES_PER_PERIOD,
+    _weighted_sampling_bias,
     estimate_cross_sectional_model,
     regression_design,
     regression_universe,
+    sampling_weights,
 )
 from praxis.midoffice.model.panel import Frequency, ReturnPanel
 
@@ -1558,3 +1566,169 @@ def test_the_notes_carry_the_factor_returns_the_covariance_was_estimated_from():
     assert series.dates == model.notes.estimated_dates
     assert series.names == tuple(model.factor_names[fid] for fid in model.factor_ids)
     assert series.returns.shape == (model.notes.n_periods, len(model.factor_ids))
+
+
+# ------------------------------------------------------------- the sampling-error correction
+
+
+def test_the_sampling_weights_are_the_diagonal_of_the_estimators_own_kernel():
+    """Each of these estimators is a quadratic form R' K R in the returns. Estimated on the
+    identity -- one indicator series per period -- it returns K itself, and the weight the
+    correction gives a period's noise is K's diagonal: weighting, centring and lags included."""
+    for estimator in (
+        SampleCovariance(),
+        ExponentialCovariance(half_life=12.0),
+        NeweyWestCovariance(lags=4, half_life=12.0),
+        NeweyWestCovariance(lags=4),
+    ):
+        kernel = estimator.estimate(np.eye(40)).matrix
+        assert np.allclose(sampling_weights(estimator, 40), np.diag(kernel), rtol=0, atol=1e-15)
+
+
+def test_equal_weights_carry_each_periods_noise_as_its_mean():
+    assert np.allclose(sampling_weights(SampleCovariance(), 25), 1.0 / 25, rtol=0, atol=1e-15)
+
+
+def test_newey_west_lags_carry_a_little_less_of_the_noise_than_their_weights_alone():
+    """Centring on the weighted mean makes a period's noise correlate slightly negatively with
+    its neighbours', and the lag terms count that."""
+    plain = sampling_weights(NeweyWestCovariance(lags=0, half_life=24.0), 240)
+    lagged = sampling_weights(NeweyWestCovariance(lags=6, half_life=24.0), 240)
+    assert abs(plain.sum() - 1.0) < 1e-12
+    assert 0.8 < lagged.sum() < 1.0
+
+
+def test_an_estimator_that_is_no_quadratic_form_is_refused_by_the_correction():
+    for estimator in (
+        HorizonCovariance(volatility_half_life=12.0, correlation_half_life=24.0),
+        ShrunkCovariance(),
+    ):
+        with pytest.raises(ValueError, match="quadratic form"):
+            sampling_weights(estimator, 30)
+
+
+def test_a_period_without_a_sampling_covariance_is_given_the_others_weighted_mean():
+    estimator = ExponentialCovariance(half_life=2.0)
+    first, last = np.array([[1.0, 0.5], [0.5, 2.0]]), np.array([[3.0, -1.0], [-1.0, 6.0]])
+    bias, filled = _weighted_sampling_bias(estimator, [first, None, last])
+    k = sampling_weights(estimator, 3)
+    fill = (k[0] * first + k[2] * last) / (k[0] + k[2])
+    assert filled == 1
+    assert np.allclose(bias, k[0] * first + k[1] * fill + k[2] * last, rtol=1e-14, atol=0)
+
+
+def test_the_correction_is_off_by_default_and_the_covariance_is_as_estimated():
+    returns, chars, _, _ = _world(n_secs=60, n_periods=120, seed=41)
+    model = _fit(returns, chars)
+    notes = model.notes
+    assert not notes.sampling_correction
+    assert notes.weighted_sampling_variance == () and notes.corrected_variance == ()
+    assert notes.psd_repair is None and notes.weighted_noise_share == ()
+    assert np.array_equal(np.diag(model.covariance.matrix), np.array(notes.observed_variance))
+
+
+def test_the_correction_changes_the_factor_covariance_and_nothing_else():
+    returns, chars, _, _ = _world(n_secs=60, n_periods=120, seed=43)
+    off = _fit(returns, chars)
+    on = _fit(returns, chars, sampling_correction=True)
+    assert np.array_equal(off.notes.factor_returns.returns, on.notes.factor_returns.returns)
+    assert off.notes.observed_variance == on.notes.observed_variance
+    assert off.notes.sampling_variance == on.notes.sampling_variance
+    assert {c: e.specific.by_issuer[c] for c, e in off.exposures.items()} == {
+        c: e.specific.by_issuer[c] for c, e in on.exposures.items()
+    }
+    # Equal weights: the correction subtracts exactly what noise_share measures.
+    assert np.allclose(
+        on.notes.weighted_sampling_variance, on.notes.sampling_variance, rtol=1e-12, atol=0
+    )
+    assert not on.notes.psd_repair.repaired
+    assert np.allclose(
+        np.diag(on.covariance.matrix),
+        np.diag(off.covariance.matrix) - np.array(on.notes.weighted_sampling_variance),
+        rtol=1e-12, atol=1e-18,
+    )
+    assert np.allclose(np.diag(on.covariance.matrix), on.notes.corrected_variance, rtol=1e-12)
+
+
+def test_the_correction_removes_the_bias_noise_share_measures():
+    """Averaged over replications, (corrected - realized) / predicted is zero, where the
+    uncorrected diagonal's is one -- `test_noise_share_measures_the_bias_it_claims_to` on the
+    corrected matrix."""
+    before, after = [], []
+    for seed in range(12):
+        returns, chars, f_true, _ = _world(n_secs=60, n_periods=240, seed=500 + seed)
+        model = _fit(returns, chars, sampling_correction=True)
+        realized = np.var(f_true, axis=0, ddof=1)
+        predicted = np.array(model.notes.weighted_sampling_variance)
+        observed = np.array(model.notes.observed_variance)
+        corrected = np.diag(model.covariance.matrix)
+        before.append(float(np.mean((observed - realized) / predicted)))
+        after.append(float(np.mean((corrected - realized) / predicted)))
+    stderr = float(np.std(after, ddof=1) / np.sqrt(len(after)))
+    assert abs(float(np.mean(after))) < max(3.0 * stderr, 0.25)
+    assert abs(float(np.mean(before)) - 1.0) < max(3.0 * stderr, 0.25)
+
+
+def test_the_correction_weights_each_periods_noise_as_the_covariance_does():
+    """Noise that grows late in the sample: an exponential covariance, which believes the
+    recent periods, carries more of it than the equal-weighted mean does, and the correction
+    subtracts what it carries."""
+    returns, chars, _, _ = _world(n_secs=60, n_periods=240, seed=31)
+    rng = np.random.default_rng(3)
+    loud = returns.returns.copy()
+    loud[120:] += rng.normal(size=loud[120:].shape) * 0.18
+    returns = dataclasses.replace(returns, returns=loud)
+    recent = _fit(
+        returns, chars, sampling_correction=True,
+        covariance_estimator=ExponentialCovariance(half_life=20.0),
+    )
+    flat = _fit(returns, chars, sampling_correction=True)
+    for r, f in zip(recent.notes.weighted_sampling_variance, flat.notes.weighted_sampling_variance):
+        assert r > 1.5 * f
+
+
+def _silent_world(seed: int):
+    """A world whose last characteristic earns nothing: its factor return is zero in every
+    period, so all of its estimated variance is sampling error."""
+    returns, chars, f_true, spec_vol = _world(n_secs=40, n_periods=120, seed=seed, n_char=2)
+    rng = np.random.default_rng(seed + 1)
+    f = f_true.copy()
+    f[:, -1] = 0.0
+    design = np.concatenate([np.ones(chars.values.shape[:2] + (1,)), chars.values], axis=2)
+    values = np.einsum("tsk,tk->ts", design, f) + rng.normal(size=design.shape[:2]) * spec_vol
+    return dataclasses.replace(returns, returns=values), chars
+
+
+def test_a_factor_that_is_all_noise_is_repaired_where_the_subtraction_leaves_it_negative():
+    """The subtraction leaves an all-noise factor's variance about zero, below it about as
+    often as above. Where below, the repair binds, the covariance is positive semi-definite,
+    and the qualification names the factor."""
+    below = 0
+    for seed in range(10):
+        returns, chars = _silent_world(700 + seed)
+        model = _fit(returns, chars, sampling_correction=True)
+        notes = model.notes
+        if notes.corrected_variance[-1] > 0.0:
+            continue
+        below += 1
+        assert notes.psd_repair.repaired
+        assert np.linalg.eigvalsh(np.asarray(model.covariance.matrix)).min() > 0.0
+        assert any(
+            "left 1 variance(s) at or below zero before the repair: C1" in q
+            for q in model.qualifications()
+        )
+    assert below > 0
+
+
+def test_under_the_correction_the_loud_noise_qualification_quotes_the_share_subtracted():
+    returns, chars, _, _ = _world(n_secs=15, n_periods=120, seed=29, n_char=3)
+    model = _fit(returns, chars, min_securities=12, sampling_correction=True)
+    notes = model.notes
+    worst = max(range(len(notes.weighted_noise_share)),
+                key=lambda i: notes.weighted_noise_share[i])
+    assert any(
+        q.startswith(f"{notes.weighted_noise_share[worst]:.0%} of the estimated variance of ")
+        and q.endswith(", weighted as the covariance weights the periods; the factor "
+                       "covariance diagonal is corrected for it")
+        for q in model.qualifications()
+    )

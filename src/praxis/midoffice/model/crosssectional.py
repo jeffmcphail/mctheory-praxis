@@ -93,10 +93,16 @@ from typing import Mapping
 
 import numpy as np
 
-from ..risk.basis import FactorCovariance
+from ..risk.basis import FactorCovariance, PSDRepair, nearest_psd
 from ..risk.exposures import ExposureVector, SpecificRisk
 from .characteristics import CharacteristicPanel, _checked_membership
-from .covariance import CovarianceEstimate, CovarianceEstimator, SampleCovariance
+from .covariance import (
+    CovarianceEstimate,
+    CovarianceEstimator,
+    ExponentialCovariance,
+    NeweyWestCovariance,
+    SampleCovariance,
+)
 from .panel import FactorReturns, Frequency, ReturnPanel
 from .specificrisk import RESIDUAL_SPREADS, SpecificRiskModel, estimate_specific_risk_model
 from .timeseries import MIN_OBSERVATIONS, FactorModel
@@ -156,6 +162,15 @@ class CrossSectionalNotes:
     mean_r_squared: float = float("nan")
     observed_variance: tuple[float, ...] = ()
     sampling_variance: tuple[float, ...] = ()
+    # Under the sampling-error correction: the bias subtracted from the factor covariance -- the
+    # sampling covariance of the factor returns, weighted as the covariance carries each
+    # period's -- its diagonal annualised; the diagonal it left, before the PSD repair; what the
+    # repair changed; and how many periods had no sampling covariance of their own.
+    sampling_correction: bool = False
+    weighted_sampling_variance: tuple[float, ...] = ()
+    corrected_variance: tuple[float, ...] = ()
+    psd_repair: PSDRepair | None = None
+    sampling_filled: int = 0
     factor_names: tuple[str, ...] = ()
     covariance: CovarianceEstimate | None = None
     # Per factor, over the estimated periods: how many had at least one security in the
@@ -216,15 +231,29 @@ class CrossSectionalNotes:
         every forecast built on it, and inflates it most for the portfolios most exposed to
         that factor.
 
-        Not subtracted off. The naive correction -- observed minus sampling -- can drive a
-        variance negative, and silently flooring that at zero would turn a diagnostic into a
-        fabrication. Barra's own adjustment is more careful than a subtraction.
+        Not subtracted off by default. The naive correction -- observed minus sampling -- can
+        drive a variance negative, and silently flooring that at zero would turn a diagnostic
+        into a fabrication. Under `sampling_correction` the subtraction is made with the
+        sampling variance weighted as the covariance weights the periods
+        (`weighted_noise_share`), and the PSD repair it needs is reported, not silent.
         """
         if not self.observed_variance:
             return ()
         return tuple(
             float(s / o) if o > 0.0 else float("inf")
             for o, s in zip(self.observed_variance, self.sampling_variance)
+        )
+
+    @property
+    def weighted_noise_share(self) -> tuple[float, ...]:
+        """`noise_share` with the sampling variance weighted as the covariance estimator
+        carries each period's -- what the sampling-error correction subtracts. Empty unless the
+        correction was made."""
+        if not self.observed_variance or not self.weighted_sampling_variance:
+            return ()
+        return tuple(
+            float(s / o) if o > 0.0 else float("inf")
+            for o, s in zip(self.observed_variance, self.weighted_sampling_variance)
         )
 
     def qualifications(self) -> tuple[str, ...]:
@@ -331,7 +360,8 @@ class CrossSectionalNotes:
                 f"{self.winsorised} raw characteristic value(s) were winsorised before "
                 f"standardising"
             )
-        noise = self.noise_share
+        # Under the correction, the share it subtracted: weighted as the covariance is.
+        noise = self.weighted_noise_share or self.noise_share
         if noise:
             worst = max(range(len(noise)), key=lambda i: noise[i])
             if noise[worst] > 0.25:
@@ -342,9 +372,28 @@ class CrossSectionalNotes:
                 )
                 out.append(
                     f"{noise[worst]:.0%} of the estimated variance of {name} is the "
-                    f"sampling error of its own estimation; the factor covariance diagonal "
-                    f"is biased upward and is not corrected here"
+                    f"sampling error of its own estimation"
+                    + (", weighted as the covariance weights the periods"
+                       if self.weighted_noise_share else "")
+                    + "; the factor covariance diagonal "
+                    + ("is corrected for it" if self.sampling_correction
+                       else "is biased upward and is not corrected here")
                 )
+        if self.sampling_correction and self.psd_repair is not None:
+            negative = [
+                self.factor_names[i] if i < len(self.factor_names) else f"factor {i}"
+                for i, v in enumerate(self.corrected_variance) if v <= 0.0
+            ]
+            out.append(
+                "the factor covariance less the sampling covariance of the factor returns, "
+                "weighted as the covariance carries each period's: "
+                + self.psd_repair.describe()
+                + (f"; the subtraction left {len(negative)} variance(s) at or below zero "
+                   f"before the repair: {', '.join(negative)}" if negative else "")
+                + (f"; {self.sampling_filled} period(s) without a sampling covariance of "
+                   f"their own were given the others' weighted mean"
+                   if self.sampling_filled else "")
+            )
         if not self.standardised:
             out.append(
                 "characteristics were not standardised, so the factor returns are on "
@@ -662,6 +711,57 @@ def regression_universe(
     return tuple(code for code, inside in zip(design.securities, ever) if inside)
 
 
+def sampling_weights(estimator: CovarianceEstimator, n_periods: int) -> np.ndarray:
+    """How much of each period's estimation noise a covariance estimator carries into its
+    estimate.
+
+    The sample, exponential and Newey-West estimators are each a quadratic form in the returns,
+    C = R' K R, with the same K for every pair of factors. Noise independent across periods,
+    of covariance S_t in period t, then adds sum_t K_tt S_t to C's expectation, and K_tt is
+    the estimate of a series that is one in period t and zero in every other -- the
+    estimator's weighting, its centring and, under Newey-West, its lag terms all included.
+    Equal weights give 1/n each, the mean; exponential weights w, normalised, give
+    (w_t - w_t^2) / (1 - sum w^2); Newey-West's lag terms take a little off each, since
+    centring on the weighted mean makes a period's noise correlate slightly negatively with
+    its neighbours'. The two-half-life and the shrunk estimators are not quadratic forms, so
+    they have no such weights.
+    """
+    if not isinstance(
+        estimator, (SampleCovariance, ExponentialCovariance, NeweyWestCovariance)
+    ):
+        raise ValueError(
+            f"the sampling-error correction needs a covariance estimator that is a quadratic "
+            f"form in the returns -- sample, exponential or Newey-West -- not "
+            f"{type(estimator).__name__}"
+        )
+    unit = np.zeros((n_periods, 1))
+    weights = np.empty(n_periods)
+    for t in range(n_periods):
+        unit[t, 0] = 1.0
+        weights[t] = estimator.estimate(unit).matrix[0, 0]
+        unit[t, 0] = 0.0
+    return weights
+
+
+def _weighted_sampling_bias(
+    estimator: CovarianceEstimator, matrices: list[np.ndarray | None]
+) -> tuple[np.ndarray, int]:
+    """The periods' sampling covariances as the covariance estimator carries them
+    (`sampling_weights`): what the estimated factor returns' covariance holds of their
+    estimation errors. A period without one -- its design rank-deficient -- is given the
+    others' weighted mean; how many were is returned with it."""
+    weights = sampling_weights(estimator, len(matrices))
+    present = [k for k, m in enumerate(matrices) if m is not None]
+    if not present:
+        raise ValueError("no estimated period has a sampling covariance to correct with")
+    bias = np.einsum("t,tij->ij", weights[present], np.stack([matrices[k] for k in present]))
+    filled = len(matrices) - len(present)
+    if filled:
+        bias = bias * (weights.sum() / weights[present].sum())
+    # Each period's inverse came out of a factorisation, symmetric only to rounding.
+    return (bias + bias.T) / 2.0, filled
+
+
 def estimate_cross_sectional_model(
     returns: ReturnPanel,
     characteristics: CharacteristicPanel,
@@ -685,6 +785,7 @@ def estimate_cross_sectional_model(
     first_factor_id: int = 1,
     residual_spread: str = "mad",
     specific_history: str = "regression",
+    sampling_correction: bool = False,
 ) -> FactorModel:
     """Regress returns cross-sectionally on characteristics, period by period.
 
@@ -756,6 +857,15 @@ def estimate_cross_sectional_model(
     Factor returns still come from the regression alone, and the specific risk model's
     estimation -- the V fit, kappa, the blend's model error -- from its residuals alone; a
     security outside every regression with a history of its own is blended, not a fallback.
+
+    `sampling_correction` subtracts from the factor covariance the sampling covariance of the
+    estimated factor returns: each period's sigma^2 (X'WX)^-1 over the factors it estimated,
+    weighted as the covariance estimator carries that period's noise (`sampling_weights`),
+    before annualising. The estimated returns are the true ones plus each period's independent
+    estimation error, so their covariance is the factor covariance plus this. A factor whose
+    estimate is mostly noise can come out with a negative variance, so the corrected matrix
+    goes through `risk.basis.nearest_psd`, and the notes say whether and where the repair
+    bound. Off by default: the covariance as estimated.
     """
     if specific_history not in ("regression", "covered"):
         raise ValueError(
@@ -819,6 +929,8 @@ def estimate_cross_sectional_model(
     r_squareds: list[float] = []
     sampling = np.zeros(n_factors)
     sampling_periods = 0
+    # Each estimated period's full sampling covariance, under the sampling-error correction.
+    sampling_matrices: list[np.ndarray | None] = []
     periods_present = np.zeros(n_factors, dtype=int)
     periods_single = np.zeros(n_factors, dtype=int)
     periods_empty = np.zeros(n_factors, dtype=int)
@@ -915,6 +1027,7 @@ def estimate_cross_sectional_model(
 
         # Sampling variance of this period's factor returns: sigma^2 (X'WX)^-1.
         dof = n_t - rank
+        period_sampling = None
         if dof > 0 and rank == n_active:
             sigma2 = ss_res / dof
             try:
@@ -925,10 +1038,14 @@ def estimate_cross_sectional_model(
                 # A factor left out this period adds nothing: its zero was set, not estimated.
                 sampling[active] += sigma2 * np.diag(xtwx_inv)
                 sampling_periods += 1
+                if sampling_correction:
+                    period_sampling = np.zeros((n_factors, n_factors))
+                    period_sampling[np.ix_(active, active)] = sigma2 * xtwx_inv
 
         kept_dates.append(shared_dates[t])
         sizes.append(n_t)
         factor_rows.append(f_t)
+        sampling_matrices.append(period_sampling)
 
     if not factor_rows:
         raise ValueError(
@@ -953,6 +1070,16 @@ def estimate_cross_sectional_model(
     factor_ids = tuple(range(first_factor_id, first_factor_id + len(names)))
 
     observed = tuple(float(v) for v in np.diag(covariance_matrix))
+    weighted_sampling: tuple[float, ...] = ()
+    corrected: tuple[float, ...] = ()
+    psd_repair: PSDRepair | None = None
+    sampling_filled = 0
+    if sampling_correction:
+        bias, sampling_filled = _weighted_sampling_bias(estimator, sampling_matrices)
+        subtracted = (estimate.matrix - bias) * scale
+        covariance_matrix, psd_repair = nearest_psd(subtracted)
+        weighted_sampling = tuple(float(v) for v in np.diag(bias) * scale)
+        corrected = tuple(float(v) for v in np.diag(subtracted))
     mean_sampling = (
         tuple(float(v) for v in (sampling / sampling_periods) * scale)
         if sampling_periods
@@ -1124,6 +1251,11 @@ def estimate_cross_sectional_model(
         mean_r_squared=float(np.mean(r_squareds)) if r_squareds else float("nan"),
         observed_variance=observed,
         sampling_variance=mean_sampling,
+        sampling_correction=sampling_correction,
+        weighted_sampling_variance=weighted_sampling,
+        corrected_variance=corrected,
+        psd_repair=psd_repair,
+        sampling_filled=sampling_filled,
         factor_names=tuple(names),
         covariance=estimate,
         present_periods=tuple(int(v) for v in periods_present),

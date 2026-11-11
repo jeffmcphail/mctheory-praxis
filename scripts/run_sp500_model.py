@@ -64,6 +64,7 @@ from praxis.midoffice.refdata.industries import (  # noqa: E402
     build_scheme,
     combine,
     industry_exposures,
+    merge_industries,
 )
 from praxis.midoffice.refdata.polygon import (  # noqa: E402
     PolygonClient,
@@ -71,9 +72,10 @@ from praxis.midoffice.refdata.polygon import (  # noqa: E402
     read_api_key,
 )
 
-DEFAULT_PANEL = "data/external/polygon/sp500_securities_2022-01-03_2026-11-03_repaired.npz"
-"""The panel on securities, its share counts repaired by midoffice08's rulings: the run's panel
-when none is given."""
+DEFAULT_PANEL = "data/external/polygon/sp500_securities_2022-01-03_2026-11-03_listed.npz"
+"""The panel on securities: its share counts repaired by midoffice08's rulings, a sample its own
+weighted count confirms spared and every span ended where it leaves an exchange by midoffice09's.
+The run's panel when none is given."""
 
 UNBLENDED = {
     "SERDP": "its residual series is kept for the last window alone, so it has a value on the "
@@ -550,6 +552,15 @@ def main(argv: list[str] | None = None) -> int:
                              "blends are built from; by default a period is estimated only if "
                              "every risk index's blend in it has exactly the descriptors the "
                              "forecast's has")
+    parser.add_argument("--sampling-correction", action="store_true",
+                        help="subtract from the factor covariance the sampling covariance of "
+                             "the factor returns, weighted as the covariance carries each "
+                             "period's, and repair it to positive semi-definite where that is "
+                             "needed; by default the covariance as estimated")
+    parser.add_argument("--merge-industry", action="append", default=[], metavar="A=B",
+                        help="fold industry A into industry B once the scheme is built, its "
+                             "members labelled B; repeatable, and a chain resolves to its end "
+                             "(with --industries)")
     parser.add_argument("--specific-history", choices=("covered", "regression"),
                         default="covered",
                         help="whose residuals each security's own specific-risk history is "
@@ -814,6 +825,8 @@ def main(argv: list[str] | None = None) -> int:
     periods = None if args.mixed_blends else one_blend
 
     scheme = None
+    if args.merge_industry and not args.industries:
+        raise SystemExit("  --merge-industry needs --industries: there is no scheme to merge in")
     if args.industries:
         print("\nIndustries")
         codes: dict[str, str | None] = {}
@@ -855,6 +868,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {len(universe)} of {panel.n_securities} securities are in at least one "
               f"estimated period's regression{held}; every count below is over them")
         scheme = build_scheme(codes, min_members=args.min_industry, universe=universe)
+        if args.merge_industry:
+            merges: dict[str, str] = {}
+            for spec in args.merge_industry:
+                source, sep, target = spec.partition("=")
+                if not sep or not source.strip() or not target.strip():
+                    raise SystemExit(f"  --merge-industry takes A=B, got {spec!r}")
+                merges[source.strip()] = target.strip()
+            before = scheme.counts()
+            try:
+                scheme = merge_industries(scheme, merges)
+            except ValueError as error:
+                raise SystemExit(f"  --merge-industry: {error}") from None
+            after = scheme.counts()
+            for source, target in sorted(scheme.folded.items()):
+                print(f"  {source} ({before[source]}) folded into {target}, which holds "
+                      f"{after[target]}")
         print(f"  {scheme.describe()}")
         for name, count in sorted(scheme.counts().items(), key=lambda kv: -kv[1])[:8]:
             print(f"    {name:<24} {count:>4}")
@@ -888,6 +917,7 @@ def main(argv: list[str] | None = None) -> int:
         covariance_estimator=NeweyWestCovariance(
             lags=args.newey_west_lags, half_life=args.half_life
         ),
+        sampling_correction=args.sampling_correction,
     )
     notes = model.notes
     print(f"  {model.describe()}")
@@ -1169,6 +1199,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {model.factor_names[fid]:<22} {volatilities[i]:>10.2%} {average[i]:>+11.2%} "
               f"{share:>11.1%}   {notes.present_periods[i]:>6,} "
               f"{notes.single_member_periods[i]:>10,} {notes.empty_periods[i]:>6,}")
+    if notes.sampling_correction:
+        # What the correction took off each factor: its vol as estimated, the share of that
+        # variance the weighted sampling covariance is, what the subtraction left, and the vol
+        # the model carries after the PSD repair. The annual vol above is that last one.
+        print(f"\n  The sampling-error correction: the factor covariance less the sampling "
+              f"covariance of the factor returns, weighted as the covariance carries each "
+              f"period's; {notes.psd_repair.describe() if notes.psd_repair else 'no repair'}")
+        print(f"  {'factor':<22} {'as estimated':>13} {'weighted noise':>15} "
+              f"{'subtracted':>11} {'corrected':>10}")
+        weighted = notes.weighted_noise_share
+        for i, fid in enumerate(model.factor_ids):
+            left = notes.corrected_variance[i]
+            print(f"  {model.factor_names[fid]:<22} "
+                  f"{np.sqrt(notes.observed_variance[i]):>12.2%} {weighted[i]:>14.1%} "
+                  + (f"{np.sqrt(left):>10.2%}" if left > 0.0 else f"{'<= 0':>10}")
+                  + f" {volatilities[i]:>10.2%}")
 
     specific = np.array(
         [ev.specific.by_issuer[code] for code, ev in model.exposures.items()]

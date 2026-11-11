@@ -235,10 +235,11 @@ def search_first_count(
 
 @dataclass(frozen=True)
 class Repair:
-    """A sample the isolated-error rule removes (midoffice08, ruling 2): its two samples before
+    """A sample the isolated-error rule finds (midoffice08, ruling 2): its two samples before
     and its two after agree with each other within the tolerance, it differs from each of them
-    beyond it, and no split the gate applies falls between them. It is not carried; the count
-    before it carries through."""
+    beyond it, and no split the gate applies falls between them. It is not carried, and the count
+    before it carries through -- unless its own record's weighted count confirms it within the
+    tolerance: two fields of one record agreeing, it is spared (midoffice09, ruling 1)."""
 
     key: str
     """Its column's key."""
@@ -250,6 +251,10 @@ class Repair:
     count: float
     neighbours: tuple[tuple[dt.date, float], ...]
     """The two samples before it and the two after: date and count."""
+    weighted: float | None = None
+    """Its own record's weighted share count, where the record carries one."""
+    spared: bool = False
+    """Whether that weighted count confirms the sample, within the tolerance: not an error."""
 
 
 def isolated_errors(
@@ -257,9 +262,13 @@ def isolated_errors(
     samples: Mapping[str, Sequence[tuple[dt.date, str, float]]],
     splits: Sequence[SplitCheck],
     tolerance: float = TOLERANCE,
+    weighted: Mapping[tuple[str, dt.date], float] | None = None,
 ) -> list[Repair]:
-    """Every sample the isolated-error rule removes, per column over its keys' samples in date
-    order -- the stale ones, read past by the lag rule, are none of them.
+    """Every sample the isolated-error rule finds, per column over its keys' samples in date
+    order -- the stale ones, read past by the lag rule, are none of them. `weighted[(plan key,
+    day)]` is a sample's own record's weighted count: where it confirms the sample within the
+    tolerance, the sample is spared, two independent fields of one record agreeing -- the same
+    day's record, so nothing looks ahead (midoffice09, ruling 1). The rest are removed.
 
     One pass over the samples as they are, so the rule reads only its own case: where two
     samples in a row are wrong, or the samples alternate between two counts, as CEG's do, the
@@ -285,9 +294,75 @@ def isolated_errors(
                 continue
             day, ticker, count, key = sequence[k]
             if all(abs(count / value - 1.0) > tolerance for value in values):
+                own = (weighted or {}).get((key, day))
                 out.append(Repair(column.key, key, column.label, ticker, day, count,
-                                  tuple((d, c) for d, _, c, _ in around)))
+                                  tuple((d, c) for d, _, c, _ in around), own,
+                                  own is not None and abs(own / count - 1.0) <= tolerance))
     return out
+
+
+@dataclass(frozen=True)
+class Delisting:
+    """A span the reference records place off an exchange (midoffice09, ruling 2): from its
+    first sample whose record's `market` is not "stocks" -- OTC Link's, after a failure -- it is
+    not an instrument the model is for. The span ends on its last sample the records place on an
+    exchange, or goes whole if it has none; but it runs on through any day the index still held
+    the security, so no member-day changes, and that day is reported."""
+
+    span: Span
+    off_exchange: dt.date
+    """The span's first sample whose record places it off an exchange."""
+    market: str
+    exchange: str | None
+    """The record's `market` and `primary_exchange` there."""
+    last_listed: dt.date | None
+    """The span's last sample before it on an exchange; None: none in the span."""
+    kept_to: dt.date | None
+    """The span's new last day; None: the span goes."""
+    held: tuple[dt.date, ...] = ()
+    """Member-days after `last_listed`, which the span keeps: the trading days of the index's
+    runs of membership, where a calendar is given, else every day of them."""
+
+
+def listed_spans(
+    spans: Sequence[Span],
+    market_of: Callable[[str, dt.date], tuple[str, str | None] | None],
+    member_days: Mapping[str, Sequence[tuple[dt.date, dt.date]]],
+    calendar: Sequence[dt.date] | None = None,
+) -> tuple[list[Span], list[Delisting]]:
+    """The spans with each one's off-exchange days removed (`Delisting`). `market_of(ticker,
+    day)` is the cached record's `market` and `primary_exchange`, or None where there is no
+    record; a span with no sample off an exchange is kept as it is. `member_days[key]` is each
+    plan key's runs of membership, (first, last), and `calendar` the panel's trading days, which
+    a run's member-days are. A leaver that stays listed keeps its span."""
+    trading = None if calendar is None else frozenset(calendar)
+    out: list[Span] = []
+    ended: list[Delisting] = []
+    for span in spans:
+        markets = [(day, market_of(span.ticker, day)) for day in span.samples]
+        off = next(((day, m) for day, m in markets if m is not None and m[0] != "stocks"), None)
+        if off is None:
+            out.append(span)
+            continue
+        listed = [day for day, m in markets if day < off[0] and m is not None
+                  and m[0] == "stocks"]
+        last_listed = max(listed) if listed else None
+        held = sorted(
+            day for first, last in member_days.get(span.key, ())
+            for day in map(dt.date.fromordinal, range(first.toordinal(), last.toordinal() + 1))
+            if span.first <= day <= span.last
+            and (last_listed is None or day > last_listed)
+            and (trading is None or day in trading)
+        )
+        ends = [day for day in (last_listed, held[-1] if held else None) if day is not None]
+        kept_to = max(ends) if ends else None
+        ended.append(Delisting(span, off[0], off[1][0], off[1][1], last_listed, kept_to,
+                               tuple(held)))
+        if kept_to is not None:
+            out.append(Span(span.key, span.name, span.ticker, span.first, kept_to,
+                            span.member_days, tuple(d for d in span.samples if d <= kept_to),
+                            span.previous))
+    return out, ended
 
 
 @dataclass(frozen=True)
