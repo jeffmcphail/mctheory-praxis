@@ -26,7 +26,10 @@ from praxis.midoffice.model.covariance import (
 from praxis.midoffice.model.crosssectional import (
     MARKET_FACTOR,
     MIN_SECURITIES_PER_PERIOD,
+    _history_spread,
+    _leverages,
     _weighted_sampling_bias,
+    cross_sectional_models_as_of,
     estimate_cross_sectional_model,
     regression_design,
     regression_universe,
@@ -1622,9 +1625,71 @@ def test_the_correction_is_off_by_default_and_the_covariance_is_as_estimated():
     model = _fit(returns, chars)
     notes = model.notes
     assert not notes.sampling_correction
-    assert notes.weighted_sampling_variance == () and notes.corrected_variance == ()
-    assert notes.psd_repair is None and notes.weighted_noise_share == ()
+    assert notes.corrected_variance == () and notes.psd_repair is None
     assert np.array_equal(np.diag(model.covariance.matrix), np.array(notes.observed_variance))
+    # The weighted share is a diagnostic, computed with the correction off (10 ruling 2).
+    assert len(notes.weighted_noise_share) == len(model.factor_ids)
+
+
+def test_the_weighted_noise_share_is_the_same_whether_or_not_the_correction_is_made():
+    """The diagnostic is what the correction would subtract, to the bit, and computing it
+    changes nothing else."""
+    returns, chars, _, _ = _world(n_secs=60, n_periods=160, seed=45)
+    estimator = NeweyWestCovariance(lags=3, half_life=30.0)
+    off = _fit(returns, chars, covariance_estimator=estimator)
+    on = _fit(returns, chars, covariance_estimator=estimator, sampling_correction=True)
+    assert off.notes.weighted_sampling_variance == on.notes.weighted_sampling_variance
+    assert off.notes.weighted_noise_share == on.notes.weighted_noise_share
+    # Weighted toward the recent periods, so not the equal-weighted mean.
+    assert off.notes.weighted_sampling_variance != off.notes.sampling_variance
+    assert np.allclose(
+        np.diag(on.covariance.matrix) + np.array(on.notes.weighted_sampling_variance),
+        np.diag(off.covariance.matrix), rtol=1e-12, atol=0,
+    )
+
+
+def test_the_two_half_life_estimators_diagonal_has_sampling_weights_and_the_shrunk_one_none():
+    """Each variance the two-half-life estimator gives is its volatility estimator's, so its
+    diagonal has the weights that estimator's has, and a weighted share; its whole matrix still
+    has none, so the correction refuses it. The shrunk estimator's diagonal mixes the factors
+    with a data-dependent intensity: no weights, no weighted share, and the qualification falls
+    back on the equal-weighted one."""
+    horizon = HorizonCovariance(volatility_half_life=12.0, correlation_half_life=48.0)
+    assert np.array_equal(
+        sampling_weights(horizon, 30, diagonal=True),
+        sampling_weights(ExponentialCovariance(half_life=12.0), 30),
+    )
+    with pytest.raises(ValueError, match="quadratic form"):
+        sampling_weights(ShrunkCovariance(), 30, diagonal=True)
+    returns, chars, _, _ = _world(n_secs=15, n_periods=120, seed=29, n_char=3)
+    split = _fit(returns, chars, min_securities=12, covariance_estimator=horizon)
+    assert len(split.notes.weighted_noise_share) == len(split.factor_ids)
+    with pytest.raises(ValueError, match="quadratic form"):
+        _fit(returns, chars, min_securities=12, covariance_estimator=horizon,
+             sampling_correction=True)
+    shrunk = _fit(returns, chars, min_securities=12, covariance_estimator=ShrunkCovariance())
+    assert shrunk.notes.weighted_noise_share == ()
+    worst = max(shrunk.notes.noise_share)
+    assert any(
+        q.startswith(f"{worst:.0%} of the estimated variance of ")
+        and "weighted as the covariance" not in q
+        for q in shrunk.qualifications()
+    )
+
+
+def test_without_the_correction_the_loud_noise_qualification_quotes_the_weighted_share():
+    returns, chars, _, _ = _world(n_secs=15, n_periods=120, seed=29, n_char=3)
+    model = _fit(returns, chars, min_securities=12,
+                 covariance_estimator=ExponentialCovariance(half_life=30.0))
+    notes = model.notes
+    worst = max(notes.weighted_noise_share)
+    assert worst != max(notes.noise_share)
+    assert any(
+        q.startswith(f"{worst:.0%} of the estimated variance of ")
+        and q.endswith(", weighted as the covariance weights the periods; the factor "
+                       "covariance diagonal is biased upward and is not corrected here")
+        for q in model.qualifications()
+    )
 
 
 def test_the_correction_changes_the_factor_covariance_and_nothing_else():
@@ -1732,3 +1797,255 @@ def test_under_the_correction_the_loud_noise_qualification_quotes_the_share_subt
                        "covariance diagonal is corrected for it")
         for q in model.qualifications()
     )
+
+
+# ------------------------------------------------- the correction's specific side: leverage
+
+
+def _leveraged_world(n_periods: int = 3000, seed: int = 61):
+    """A world under the regression's own assumption: each name's specific variance inversely
+    proportional to its square-root-cap weight. Three industries of 8, 16 and 24 members and a
+    style, held fixed so every period's leverages are the same; six names never members, with
+    returns and characteristics, whose covered history is priced against the members' factor
+    returns."""
+    rng = np.random.default_rng(seed)
+    sizes = (8, 16, 24)
+    n_in, n_out = sum(sizes), 6
+    n = n_in + n_out
+    industry = np.concatenate([np.repeat(np.arange(3), sizes), rng.integers(0, 3, n_out)])
+    x = np.column_stack([np.eye(3)[industry], rng.normal(size=n)])
+    w = np.sqrt(np.exp(rng.normal(size=n)))
+    spec_var = 0.03**2 * w.mean() / w
+    dates = _dates(n_periods)
+    secs = tuple(f"S{i:03d}" for i in range(n))
+    chars = CharacteristicPanel(
+        dates, secs, ("A", "B", "C", "Style"),
+        np.broadcast_to(x, (n_periods, n, 4)).copy(), Frequency.MONTHLY,
+    )
+    f = rng.normal(size=(n_periods, 4)) * np.array([0.02, 0.02, 0.02, 0.01])
+    u = rng.normal(size=(n_periods, n)) * np.sqrt(spec_var)
+    returns = ReturnPanel(dates, secs, f @ x.T + u, Frequency.MONTHLY)
+    membership = np.zeros((n_periods, n), dtype=bool)
+    membership[:, :n_in] = True
+    weights = np.broadcast_to(w, (n_periods, n)).copy()
+    # The leverages, on the members' normalised weights, as the estimator scales them.
+    scale = n_in / w[:n_in].sum()
+    h, h_out = _leverages(
+        x[:n_in] * np.sqrt(w[:n_in] * scale)[:, None],
+        x[n_in:] * np.sqrt(w[n_in:] * scale)[:, None],
+    )
+    return returns, chars, weights, membership, spec_var, h, h_out, industry
+
+
+def _fit_leveraged(world, **kw):
+    returns, chars, weights, membership = world[:4]
+    return _fit(returns, chars, regression_weights=weights, membership=membership,
+                specific_history="covered", fit_market=False, **kw)
+
+
+def test_the_leverages_are_the_weighted_hat_matrix_diagonal_and_sum_to_the_rank():
+    rng = np.random.default_rng(5)
+    x = rng.normal(size=(30, 4))
+    w = np.exp(rng.normal(size=30))
+    outside = rng.normal(size=(3, 4))
+    w_out = np.exp(rng.normal(size=3))
+    h, h_out = _leverages(x * np.sqrt(w)[:, None], outside * np.sqrt(w_out)[:, None])
+    inverse = np.linalg.inv(x.T @ (w[:, None] * x))
+    assert np.allclose(h, w * np.einsum("ij,jk,ik->i", x, inverse, x), rtol=1e-12, atol=0)
+    assert np.allclose(h_out, w_out * np.einsum("ij,jk,ik->i", outside, inverse, outside),
+                       rtol=1e-12, atol=0)
+    assert abs(h.sum() - 4.0) < 1e-12
+
+
+def test_a_residual_lacks_its_leverage_of_its_specific_variance_and_the_correction_restores_it():
+    """Midoffice10 ruling 1's algebra. A member's residual variance is its specific variance
+    times (1 - h), which the uniform inflation n/(n - k) puts right only at the mean leverage;
+    a name outside the regression, priced against the members' factor returns, carries its
+    specific variance times (1 + h). Divided by sqrt(1 - h) and sqrt(1 + h), each comes out at
+    its specific variance -- the thin industry's members, short under the uniform inflation,
+    included."""
+    world = _leveraged_world()
+    spec_var, h, h_out, industry = world[4:]
+    n_in = h.size
+    off = _fit_leveraged(world)
+    on = _fit_leveraged(world, leverage_correction=True)
+
+    def ratios(model):
+        return np.array([
+            model.exposures[c].specific.by_issuer[c] ** 2 / spec_var[j]
+            for j, c in enumerate(world[0].securities)
+        ])
+
+    before, after = ratios(off), ratios(on)
+    expected_before = np.concatenate([(1.0 - h) * n_in / (n_in - 4.0), 1.0 + h_out])
+    noise = np.sqrt(2.0 / world[0].returns.shape[0])
+    assert np.abs(before - expected_before).max() < 5.0 * noise
+    assert np.abs(after - 1.0).max() < 5.0 * noise
+    thin = industry[:n_in] == 0
+    # Short by about its leverage less the mean one, before; right, after.
+    assert before[:n_in][thin].mean() < 1.0 - 4.0 * noise / np.sqrt(thin.sum())
+    assert abs(after[:n_in][thin].mean() - 1.0) < 3.0 * noise / np.sqrt(thin.sum())
+    assert before[n_in:].mean() > 1.0 + 4.0 * noise / np.sqrt(h_out.size)
+    assert abs(after[n_in:].mean() - 1.0) < 3.0 * noise / np.sqrt(h_out.size)
+
+
+def test_the_leverage_correction_changes_specific_risk_and_nothing_on_the_factor_side():
+    world = _leveraged_world(n_periods=200, seed=63)
+    off = _fit_leveraged(world)
+    on = _fit_leveraged(world, leverage_correction=True)
+    assert np.array_equal(off.notes.factor_returns.returns, on.notes.factor_returns.returns)
+    assert np.array_equal(off.covariance.matrix, on.covariance.matrix)
+    assert off.notes.mean_r_squared == on.notes.mean_r_squared
+    assert off.notes.sampling_variance == on.notes.sampling_variance
+    assert not off.notes.leverage_correction and on.notes.leverage_correction
+    assert on.notes.leverage_one == 0 and on.notes.leverage_unweighted == 0
+    specific = {c: (off.exposures[c].specific.by_issuer[c], on.exposures[c].specific.by_issuer[c])
+                for c in off.exposures}
+    assert all(a != b for a, b in specific.values())
+
+
+def test_the_leverage_correction_without_the_factor_side_is_named_as_counting_the_noise_twice():
+    world = _leveraged_world(n_periods=200, seed=65)
+    alone = _fit_leveraged(world, leverage_correction=True)
+    both = _fit_leveraged(world, leverage_correction=True, sampling_correction=True)
+    named = "without the factor side's subtraction"
+    assert any(named in q for q in alone.qualifications())
+    assert not any(named in q for q in both.qualifications())
+
+
+# ------------------------------------------------------------ the specific history's half-life
+
+
+def test_a_history_spread_is_the_sample_one_at_equal_weights_and_by_age_under_a_half_life():
+    rng = np.random.default_rng(71)
+    u = rng.normal(size=200)
+    u[[3, 50, 51]] = np.nan
+    present = ~np.isnan(u)
+    spread, n = _history_spread(u, None)
+    assert spread == float(np.std(u[present], ddof=1)) and n == int(present.sum())
+    spread, n = _history_spread(u, 40.0)
+    ages = 199 - np.flatnonzero(present)
+    w = 0.5 ** (ages / 40.0)
+    w = w / w.sum()
+    mean = w @ u[present]
+    assert spread == pytest.approx(np.sqrt(w @ (u[present] - mean) ** 2 / (1 - w @ w)), rel=1e-12)
+    assert n == pytest.approx(1.0 / (w @ w), rel=1e-12)
+    assert 2.0 * 40.0 / np.log(2.0) * 0.8 < n < 2.0 * 40.0 / np.log(2.0)
+    # A long enough half-life is equal weights.
+    assert _history_spread(u, 1e12)[0] == pytest.approx(_history_spread(u, None)[0], rel=1e-9)
+
+
+def test_a_history_half_life_follows_a_rise_in_specific_risk_and_trusts_the_history_less():
+    """Specific risk that doubles for the last quarter of the sample: a history discounted by
+    age forecasts nearer the new level than an equal-weighted one, and is worth fewer
+    observations, so the blend leans on the characteristics more."""
+    returns, chars, _, _ = _world(n_secs=60, n_periods=240, seed=73)
+    rng = np.random.default_rng(74)
+    louder = returns.returns.copy()
+    louder[180:] += rng.normal(size=louder[180:].shape) * 0.06 * np.sqrt(3.0)
+    returns = dataclasses.replace(returns, returns=louder)
+    flat = _fit(returns, chars, specific_risk="blend")
+    recent = _fit(returns, chars, specific_risk="blend", specific_half_life=20.0)
+    assert flat.notes.specific_half_life is None and flat.notes.history_effective == {}
+    assert recent.notes.specific_half_life == 20.0
+    late = 0.12      # the specific volatility of the last 60 periods
+
+    def spread(model):
+        return np.array([e.specific.by_issuer[c] for c, e in model.exposures.items()])
+
+    assert abs(np.median(spread(recent)) - late) < abs(np.median(spread(flat)) - late)
+    effective = np.array(list(recent.notes.history_effective.values()))
+    assert np.all(effective < 2.0 * 20.0 / np.log(2.0)) and np.all(effective > 20.0)
+    risk_model = recent.notes.specific_risk_model
+    assert risk_model.model_weight(float(np.median(effective))) > risk_model.model_weight(240)
+
+
+def test_no_history_half_life_is_the_default_and_a_non_positive_one_is_refused():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=60, seed=75)
+    default = _fit(returns, chars, specific_risk="blend")
+    explicit = _fit(returns, chars, specific_risk="blend", specific_half_life=None)
+    assert {c: e.specific.by_issuer[c] for c, e in default.exposures.items()} == {
+        c: e.specific.by_issuer[c] for c, e in explicit.exposures.items()
+    }
+    for bad in (0.0, -5.0):
+        with pytest.raises(ValueError, match="specific_half_life"):
+            _fit(returns, chars, specific_half_life=bad)
+
+
+# ------------------------------------------------------------------- the model as of a date
+
+
+def _as_of_options(weights, members, n_periods, caps):
+    periods = np.ones(n_periods, dtype=bool)
+    periods[5] = False
+    return dict(
+        regression_weights=weights, membership=members, capitalisations=caps,
+        periods=periods, lag=1, standardise=False, annualise=True, min_securities=10,
+        specific_risk="blend", specific_history="covered", sampling_correction=True,
+        leverage_correction=True, specific_half_life=12.0,
+        covariance_estimator=NeweyWestCovariance(lags=2, half_life=12.0),
+    )
+
+
+def _same_model(a, b):
+    assert np.array_equal(a.covariance.matrix, b.covariance.matrix)
+    assert a.exposures.keys() == b.exposures.keys()
+    for code in a.exposures:
+        assert a.exposures[code].exposures == b.exposures[code].exposures
+        assert a.exposures[code].specific.by_issuer == b.exposures[code].specific.by_issuer
+    assert np.array_equal(a.notes.factor_returns.returns, b.notes.factor_returns.returns)
+    assert a.notes.estimated_dates == b.notes.estimated_dates
+
+
+def test_a_model_as_of_a_date_is_the_estimator_on_the_panels_cut_there():
+    returns, chars, weights, members = _timed(n_periods=60)
+    caps = weights**2
+    options = _as_of_options(weights, members, 60, caps)
+    days = [returns.dates[40], returns.dates[59]]
+    models = dict(cross_sectional_models_as_of(returns, chars, days, **options))
+    for t in (40, 59):
+        cut = {k: (v[: t + 1] if k in ("regression_weights", "membership", "capitalisations",
+                                       "periods") else v) for k, v in options.items()}
+        direct = estimate_cross_sectional_model(
+            ReturnPanel(returns.dates[: t + 1], returns.securities, returns.returns[: t + 1],
+                        returns.frequency),
+            dataclasses.replace(chars, dates=chars.dates[: t + 1], values=chars.values[: t + 1]),
+            **cut,
+        )
+        _same_model(models[returns.dates[t]], direct)
+    # The last date's model is the full estimate.
+    _same_model(models[returns.dates[59]], estimate_cross_sectional_model(returns, chars,
+                                                                          **options))
+
+
+def test_nothing_after_a_date_moves_the_model_as_of_it():
+    """The point-in-time property: returns, characteristics, weights, membership and
+    capitalisations after the date all redrawn, and the model as of it identical to the bit --
+    its covariance, exposures, specific risks and factor returns."""
+    returns, chars, weights, members = _timed(n_periods=60)
+    caps = weights**2
+    t = 35
+    rng = np.random.default_rng(99)
+    later_returns = returns.returns.copy()
+    later_returns[t + 1:] = rng.normal(scale=0.2, size=later_returns[t + 1:].shape)
+    later_chars = chars.values.copy()
+    later_chars[t + 1:] = rng.normal(size=later_chars[t + 1:].shape)
+    later_weights = weights.copy()
+    later_weights[t + 1:] = rng.uniform(0.1, 9.0, size=later_weights[t + 1:].shape)
+    later_members = members.copy()
+    later_members[t + 1:] = rng.random(later_members[t + 1:].shape) < 0.5
+    day = [returns.dates[t]]
+    (_, before), = cross_sectional_models_as_of(
+        returns, chars, day, **_as_of_options(weights, members, 60, caps))
+    (_, after), = cross_sectional_models_as_of(
+        dataclasses.replace(returns, returns=later_returns),
+        dataclasses.replace(chars, values=later_chars),
+        day, **_as_of_options(later_weights, later_members, 60, later_weights**2))
+    _same_model(before, after)
+
+
+def test_a_model_as_of_a_date_forecasts_with_that_dates_exposures_alone():
+    returns, chars, weights, members = _timed()
+    with pytest.raises(ValueError, match="exposure_index"):
+        next(cross_sectional_models_as_of(returns, chars, [returns.dates[-1]],
+                                          exposure_index=-2))

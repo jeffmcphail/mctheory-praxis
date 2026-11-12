@@ -19,7 +19,6 @@ import numpy as np
 import pytest
 
 from praxis.midoffice.model.covariance import (
-    CovarianceEstimate,
     ExponentialCovariance,
     HorizonCovariance,
     NeweyWestCovariance,
@@ -380,6 +379,31 @@ def test_the_volatilities_come_from_the_short_window_exactly():
     )
 
 
+def test_with_newey_west_lags_equal_half_lives_reduce_to_newey_west():
+    """The split horizon under Newey-West, as USE4 corrects both: its special case is the
+    single-half-life Newey-West estimator."""
+    returns, _ = _structured()
+    split = HorizonCovariance(30.0, 30.0, newey_west_lags=4).estimate(returns)
+    single = NeweyWestCovariance(lags=4, half_life=30.0).estimate(returns)
+    assert np.allclose(split.matrix, single.matrix, rtol=1e-12, atol=0)
+    assert split.effective_observations == pytest.approx(single.effective_observations)
+    assert split.method == "Newey-West, 4 lag(s), split horizon"
+
+
+def test_with_newey_west_lags_each_horizon_is_its_newey_west_estimate():
+    returns, _ = _structured()
+    split = HorizonCovariance(12.0, 72.0, newey_west_lags=3).estimate(returns).matrix
+    long = NeweyWestCovariance(lags=3, half_life=72.0).estimate(returns).matrix
+    short = NeweyWestCovariance(lags=3, half_life=12.0).estimate(returns).matrix
+    assert np.allclose(np.diag(split), np.diag(short), rtol=1e-12, atol=0)
+    assert np.allclose(_correlation(split), _correlation(long), rtol=1e-12, atol=1e-15)
+    assert HorizonCovariance(12.0, 72.0, newey_west_lags=3).volatility_estimator() == (
+        NeweyWestCovariance(lags=3, half_life=12.0)
+    )
+    with pytest.raises(ValueError, match="newey_west_lags"):
+        HorizonCovariance(12.0, 72.0, newey_west_lags=-1)
+
+
 def test_the_split_gets_both_optima_where_neither_single_half_life_can():
     """Barra's rationale, verified rather than quoted.
 
@@ -495,7 +519,9 @@ def test_a_completed_regime_change_leaves_both_horizons_agreeing():
     assert not np.all(short > long)
 
 
-def test_a_non_positive_half_life_is_refused():
+def test_a_non_positive_half_life_is_refused_by_the_split_horizon():
+    # Named apart from the exponential estimator's test of the same refusal, which this one's
+    # old name shadowed, so that one never ran.
     with pytest.raises(ValueError, match="volatility_half_life must be positive"):
         HorizonCovariance(0.0, 36.0)
     with pytest.raises(ValueError, match="correlation_half_life must be positive"):

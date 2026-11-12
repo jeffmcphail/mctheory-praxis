@@ -250,6 +250,13 @@ three times the half life." The closed form for an unbounded exponentially weigh
 here reproduces that to three figures at every half-life tested, which is an independent check
 that `effective_observations` means what Barra means by it.
 
+`newey_west_lags` (midoffice11) estimates both matrices by Newey-West at their half-lives, as
+USE4 corrects both horizons for serial correlation; equal half-lives then reduce it to
+`NeweyWestCovariance`, which a test pins. Newey-West under exponential weights is not guaranteed
+PSD, and neither then is the recombination; the notes say when it is not. The S&P 500 run's
+`--correlation-half-life` takes it: correlations on that half-life, volatilities on
+`--half-life`'s, both at `--newey-west-lags`.
+
 ### Newey-West, and what Bartlett weighting costs
 
 The other two covariance corrections assume each period is an independent draw. Returns are
@@ -484,6 +491,29 @@ percent, and specific risk is the dominant term for a concentrated portfolio -- 
 forecast was understated exactly where it mattered most. The correction is applied period by
 period, because `n` varies.
 
+**The uniform inflation is the mean of a per-name one** (midoffice10 ruling 1, built in
+midoffice11). Under the regression's own assumption -- each name's residual variance inversely
+proportional to its weight -- a member's residual variance is its specific variance times
+`1 - h`, `h = w x' (X'WX)^-1 x` its leverage, and the leverages sum to the rank: `n / (n - k)`
+is the correction at the mean leverage. A name outside the regression, priced against the
+members' factor returns, carries the factor returns' noise instead: `1 + h`. A simulation of
+40,000 periods confirms both to sampling error (`claude/scratch/midoffice11/leverage_algebra`).
+`leverage_correction=True` (the run's `--leverage-correction`, off by default) divides each
+member's residual by `sqrt(1 - h)` in place of the uniform inflation, and each specific return
+outside the regression by `sqrt(1 + h)`.
+
+On the S&P 500 model the mean leverage is 0.050 (25 factors, about 502 members). Construction's
+eight members average 0.156, so under the sampling-error correction as built they are 11 percent
+short of their specific variance; Wholesale's and Finance & Real Estate's 5 percent. The largest
+leverages are the largest names, which dominate their industries' regression weight under
+square-root-cap weighting: TSLA 0.357, AAPL 0.319, NVDA 0.306, AMZN 0.229. The industry factor
+absorbs much of a mega cap's specific return, and the correction puts it back -- TSLA's specific
+risk 32.3% to 39.0%, NVDA's 24.0% to 27.9%, AAPL's 17.6% to 20.6%, the cap-weighted index's
+specific risk 3.22% to 3.59% -- while the median forecast falls 0.8 percent, the large
+industries' members having been over-corrected by the uniform inflation. Without the factor
+side's subtraction the noise is counted twice in an industry's own portfolio, and the
+qualifications say so.
+
 ### The estimation-noise diagnostic
 
 The sample covariance of estimated factor returns estimates the true factor covariance *plus*
@@ -524,7 +554,9 @@ subtraction, and says what the repair after it did (midoffice10):
   period t and zero elsewhere (`crosssectional.sampling_weights`). Newey-West at 10 lags and a
   90-day half-life carries 0.9625 of it: centring on the weighted mean makes a period's noise
   correlate slightly negatively with its neighbours'. The two-half-life and shrunk estimators are
-  not quadratic forms, and are refused.
+  not quadratic forms, and are refused. The two-half-life estimator's diagonal is one -- each
+  variance is its volatility estimator's -- so it has a weighted noise share, though not the
+  correction.
 - **The repair.** The subtracted matrix goes through `nearest_psd`. The notes keep its diagonal
   before the repair, and the qualifications name every factor it left at or below zero.
 - **Verified** over 12 replications: (corrected - realized) / predicted averages zero, where the
@@ -532,7 +564,9 @@ subtraction, and says what the repair after it did (midoffice10):
 
 `noise_share` divides the equal-weighted mean of the sampling variance by a variance weighted
 toward the recent periods; `weighted_noise_share` is the consistent ratio, what the correction
-subtracts. On the S&P 500 model they differ by about half again -- Wholesale 46.2% and 68.8%,
+subtracts. Both are always computed, the run's factor table reports them side by side, and the
+qualification quotes the weighted one (midoffice10 ruling 2). On the S&P 500 model they differ
+by about half again -- Wholesale 46.2% and 68.8%,
 Size Nonlinearity 46.6% and 67.4% -- because every factor's sampling variance in 2026 is 1.3 to
 2.0 times its 2023-2026 mean, the cross-sections steady at about 500: residual dispersion rose,
 and a 90-day half-life sits on 2026.
@@ -706,6 +740,14 @@ characteristics' weight falls from a median 16.4% to 2.9%; 108 of 551 forecasts 
 largest is Signature Bank's, from 58% to 396%: its history after its failure is a stock trading
 at fractions of a cent. The history is still equally weighted over the window, so a joiner's
 oldest volatility counts as much as its newest.
+
+`specific_half_life` (the run's `--specific-half-life`, midoffice11; None by default, equal
+weights, 09 ruling 3) weights each return by its age back from the forecast date, `0.5 ** (age /
+half_life)`, with the reliability-weighted variance -- the ddof-1 one at equal weights -- and
+tells the blend the history's effective number of observations, Kish's `(sum w)^2 / sum w^2`, in
+place of its count. A long history under a half-life `H` is worth about `2.885 H` observations,
+so the characteristics' weight rises as the history is discounted: at the S&P 500 run's spread,
+2.9% at an equal-weighted 938 periods, about 13% at `H = 63`.
 
 ## Descriptors: building the exposures instead of assuming them
 
@@ -1092,6 +1134,88 @@ returns, and each security's history built from every specific return it has. Th
 rulings move the model little -- 533 member-days change their count, and mean R-squared moves
 from 0.293189 to 0.293204 -- and covered histories move no factor return at all: specific risk
 is 15.58 / 24.79 / 40.56% at p10 / median / p90.
+
+## Out-of-sample bias statistics
+
+`model.bias` and the S&P 500 run's `--bias` (midoffice11) test the forecasts against what
+followed. Each forecast is made at a date's close from data through that date alone, taken to
+a daily scale, and set against the next trading day's total return: `z = realised / forecast`.
+The bias statistic is the standard deviation of z -- one if the forecasts are right, its 95%
+band about `1 +/- sqrt(2/T)` -- over the whole test, over every 12-month window with the
+windows' mean absolute deviation from one (MRAD), and over every 21st forecast's 21 days after
+it, bought and held, as a check.
+
+**Refitted daily.** `crosssectional.cross_sectional_models_as_of` is the whole estimator on
+both panels cut at each date -- every return, characteristic, weight, membership,
+capitalisation and period after it removed -- so each forecast rests on the factor returns
+through its date, the covariance from them, the specific risk model's fit and every history it
+blends, and the date's own exposures. A refit takes about a second; 686 of them, from the first
+date whose covariance has a year (252) of estimated periods, 2024-02-08, to 2026-11-02, take
+about eight minutes. A test pins the point-in-time property: redraw everything after a date
+and the model as of it is unchanged to the bit.
+
+**The industry scheme is held fixed over the sample**, as Barra fixes a model's industry
+factors: built once over the full sample's regression universe. **The guard**: on five dates
+-- the first, the last and three between -- the run rebuilds the estimator's inputs from the
+panel cut at the date through its own pipeline (`model_inputs`, the scheme held), and they
+equal the full run's through that date to the bit -- returns, exposures, weights,
+capitalisations, periods -- and so does the model made from them. It passed for the defaults
+and for floor 15 (2024-02-08, 2024-10-14, 2025-06-23, 2026-02-27, 2026-11-02); the run stops
+if it does not.
+
+**The portfolios**, each formed at its forecast date from that date's members with a forecast
+and a next-day return, and held to the next: the index cap-weighted and equally weighted; the
+size pair, the smallest 85 and the largest 50, equally weighted; each of the 20 industries'
+members, cap-weighted; 100 random long-only portfolios of 30 members and 100 long-short of 30 a
+side, seeded; the minimum-variance portfolio, long-only by non-negative least squares -- exact,
+its KKT conditions met to 1e-12 -- and unconstrained; every member singly; and the factor
+covariance's eigenportfolios against the next period's estimated factor returns, which carry
+the noise and so cannot judge a correction for it.
+
+**The defaults' statistics sit above one at the daily horizon, and that is the horizon.** The
+index 1.096, the equally weighted 1.072, the smallest 85 1.123, the largest 50 1.080, against a
+band of +/-0.054; the 21-day check 0.952, 0.895, 0.884, 1.019. The covariance is Newey-West, a
+long-run variance per day: daily factor returns mean-revert, so at 10 lags it holds the index's
+factor variance at 0.805 of the one-day variance, which predicts a daily statistic of 1.114 by
+itself. The realised index return's own 21-day variance was 0.65 of 21 times its daily one.
+The rest is regime: the index's statistic by half-year runs from 0.76 (2025H2) to 1.53 (2025H1,
+the April tariff shock), its MRAD 0.169. Run with no Newey-West lags the broad portfolios sit
+on one at the daily horizon (1.024, 0.996, 0.997, 1.004) and at 0.76 to 0.92 over 21 days: the
+mirror image.
+
+**The lag terms are most of the eigenvalue bias.** The defaults' eigenportfolios against the
+next period's factor returns run 1.10 at the largest eigenvalue to 2.2 at the smallest, at both
+horizons -- the pattern Barra's eigenfactor adjustment corrects -- and the minimum-variance
+portfolio is under-forecast, 1.36 long-only and 1.58 unconstrained (1.06 and 1.27 at 21 days).
+Without the lags the smallest eigenportfolios read 1.25 and the unconstrained portfolio 1.24
+(1.07 at 21 days). Ten lags of autocovariance on a 90-day half-life over 25 factors push the
+small eigenvalues down, and the realised returns in those directions do not follow at any
+horizon: that is estimation error, not a long-run effect.
+
+**The candidates, one change each against the defaults** (midoffice11's retro has the tables):
+
+- **Floor 15 by the Pearson rule hurts.** Construction folded whole into Retail realises a
+  third more than forecast (1.066 to 1.319): its homebuilders' shared move becomes specific
+  risk, taken as independent across names. The folds' targets worsen too (Retail 1.119 to
+  1.165, SIC62 1.066 to 1.196); Finance & Real Estate and Wholesale improve.
+- **The sampling-error correction** makes the optimiser's portfolio worse at both horizons --
+  unconstrained 1.578 to 1.925, 1.27 to 1.55 at 21 days, forecast 5.9% a year and realised
+  11.5% -- its clipped eigenportfolios realising the noise. It centres the industry portfolios
+  at 21 days (their mean 0.970 to 1.017; with its specific side 1.004), and nowhere else. Its
+  specific side, alone or with it, moves little.
+- **A specific-risk history half-life helps, the shorter the better of 63, 126 and 252.** At 63
+  the members' median goes from 1.075 to 1.042, their mean absolute deviation from one 0.133 to
+  0.098, the share above even the kurtosis-widened band 36% to 20%; the long-short random
+  portfolios 1.076 to 1.021. It follows the rise in residual dispersion through 2025 and 2026.
+  The factor-dominated portfolios do not move.
+- **The covariance's half-life:** 45 is worse nearly everywhere; 180 trades responsiveness (the
+  index's MRAD 0.169 to 0.213) for less estimation error (the unconstrained portfolio 1.462).
+  **The two-half-life estimator** (volatilities 90, correlations 504, both Newey-West) is the
+  best of the three: the minimum-variance portfolios 1.275 and 1.430, the smallest
+  eigenportfolios 1.86, the random long-only portfolios 1.025 with 28% above the band where the
+  defaults had 70%, at a cost of the index's MRAD 0.169 to 0.190.
+- **Together**, the 63-day history and the two half-lives add: members 1.034, random long-only
+  1.017 and long-short 1.016, the industries' mean absolute deviation from one 0.066.
 
 ## Status
 

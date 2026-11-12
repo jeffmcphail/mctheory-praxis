@@ -284,7 +284,9 @@ class SpecificRiskModel:
         `v_hist = inf` and so the pure model; a security with a long history gets
         `v_hist -> 0` and so its own sample estimate.  `history` maps a security to its
         `(sample standard deviation, number of observations)`; anything absent from it is
-        treated as having no history at all.
+        treated as having no history at all.  The number may be fractional: a history weighted
+        toward its recent returns is worth its effective number of observations, Kish's
+        (sum w)^2 / sum w^2, and n is that.
         """
         history = history or {}
         base = self.kappa_constant * self.forecast_level
@@ -300,7 +302,7 @@ class SpecificRiskModel:
             entry = history.get(code)
             relative = model_relative
             if entry is not None and base > 0.0:
-                sample_sd, n_observations = float(entry[0]), int(entry[1])
+                sample_sd, n_observations = float(entry[0]), float(entry[1])
                 if n_observations > 1 and sample_sd > 0.0:
                     history_relative = sample_sd / base - 1.0
                     v_history = 1.0 / (2.0 * (n_observations - 1))
@@ -312,9 +314,10 @@ class SpecificRiskModel:
             out[code] = max(float(value), floor)
         return out
 
-    def model_weight(self, n_observations: int) -> float:
+    def model_weight(self, n_observations: float) -> float:
         """How much of a blended forecast comes from the characteristics, at this much
-        history. One at no history, falling toward zero as the sample estimate sharpens."""
+        history -- a count, or a weighted history's effective number of observations. One at no
+        history, falling toward zero as the sample estimate sharpens."""
         if n_observations <= 1:
             return 1.0
         v_model = (

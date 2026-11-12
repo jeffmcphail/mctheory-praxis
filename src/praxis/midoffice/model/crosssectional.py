@@ -87,9 +87,10 @@ What this module does not do, and a real Barra model does:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import bisect
+from dataclasses import dataclass, field, replace
 from datetime import date
-from typing import Mapping
+from typing import Iterable, Iterator
 
 import numpy as np
 
@@ -100,6 +101,7 @@ from .covariance import (
     CovarianceEstimate,
     CovarianceEstimator,
     ExponentialCovariance,
+    HorizonCovariance,
     NeweyWestCovariance,
     SampleCovariance,
 )
@@ -162,15 +164,23 @@ class CrossSectionalNotes:
     mean_r_squared: float = float("nan")
     observed_variance: tuple[float, ...] = ()
     sampling_variance: tuple[float, ...] = ()
-    # Under the sampling-error correction: the bias subtracted from the factor covariance -- the
-    # sampling covariance of the factor returns, weighted as the covariance carries each
-    # period's -- its diagonal annualised; the diagonal it left, before the PSD repair; what the
-    # repair changed; and how many periods had no sampling covariance of their own.
+    # The sampling covariance of the factor returns, weighted as the covariance carries each
+    # period's: its diagonal annualised, always (`weighted_noise_share`); and how many periods
+    # had no sampling covariance of their own. Under the sampling-error correction, the bias
+    # subtracted from the factor covariance: the diagonal it left, before the PSD repair, and
+    # what the repair changed.
     sampling_correction: bool = False
     weighted_sampling_variance: tuple[float, ...] = ()
     corrected_variance: tuple[float, ...] = ()
     psd_repair: PSDRepair | None = None
     sampling_filled: int = 0
+    # The correction's specific side: each residual over sqrt(1 - h), each specific return
+    # outside the regression over sqrt(1 + h). How many member-periods sat at a leverage of
+    # one, their residual left as it is, and how many outside returns had no weight to price a
+    # leverage by, left as measured.
+    leverage_correction: bool = False
+    leverage_one: int = 0
+    leverage_unweighted: int = 0
     factor_names: tuple[str, ...] = ()
     covariance: CovarianceEstimate | None = None
     # Per factor, over the estimated periods: how many had at least one security in the
@@ -199,6 +209,10 @@ class CrossSectionalNotes:
     blended_outside: tuple[str, ...] = ()
     # For each security with a forecast, how many specific returns its own history holds.
     history_lengths: dict[str, int] = field(default_factory=dict, repr=False, compare=False)
+    # The history's half-life, None for equal weights; and under one, the effective number of
+    # observations each history rests on, which the blend weighs it by.
+    specific_half_life: float | None = None
+    history_effective: dict[str, float] = field(default_factory=dict, repr=False, compare=False)
     # The estimated factor returns, period by period: what the covariance was estimated from.
     factor_returns: FactorReturns | None = field(default=None, repr=False, compare=False)
 
@@ -235,7 +249,8 @@ class CrossSectionalNotes:
         drive a variance negative, and silently flooring that at zero would turn a diagnostic
         into a fabrication. Under `sampling_correction` the subtraction is made with the
         sampling variance weighted as the covariance weights the periods
-        (`weighted_noise_share`), and the PSD repair it needs is reported, not silent.
+        (`weighted_noise_share`, always computed beside this one), and the PSD repair it needs
+        is reported, not silent.
         """
         if not self.observed_variance:
             return ()
@@ -247,8 +262,11 @@ class CrossSectionalNotes:
     @property
     def weighted_noise_share(self) -> tuple[float, ...]:
         """`noise_share` with the sampling variance weighted as the covariance estimator
-        carries each period's -- what the sampling-error correction subtracts. Empty unless the
-        correction was made."""
+        carries each period's -- what the sampling-error correction subtracts, and the
+        consistent ratio: the covariance as estimated weights recent periods, and so does this.
+        Computed whether or not the correction is made. Empty only where the covariance's
+        diagonal is no quadratic form in the returns -- the shrunk estimator -- or no period
+        had a sampling covariance."""
         if not self.observed_variance or not self.weighted_sampling_variance:
             return ()
         return tuple(
@@ -393,6 +411,23 @@ class CrossSectionalNotes:
                 + (f"; {self.sampling_filled} period(s) without a sampling covariance of "
                    f"their own were given the others' weighted mean"
                    if self.sampling_filled else "")
+            )
+        if self.leverage_correction and not self.sampling_correction:
+            out.append(
+                "each residual is divided by sqrt(1 - h), its leverage, without the factor "
+                "side's subtraction: the noise the members' specific returns put into the "
+                "factor returns stays in the covariance and is restored to specific risk as "
+                "well, so a portfolio of one industry carries it twice"
+            )
+        if self.leverage_one:
+            out.append(
+                f"{self.leverage_one} member-period(s) had a leverage of one -- a factor with "
+                f"one member -- and their residual, zero, is left as it is"
+            )
+        if self.leverage_unweighted:
+            out.append(
+                f"{self.leverage_unweighted} specific return(s) outside the regressions had no "
+                f"regression weight to price a leverage by, and are left as measured"
             )
         if not self.standardised:
             out.append(
@@ -711,7 +746,12 @@ def regression_universe(
     return tuple(code for code, inside in zip(design.securities, ever) if inside)
 
 
-def sampling_weights(estimator: CovarianceEstimator, n_periods: int) -> np.ndarray:
+_QUADRATIC_FORMS = (SampleCovariance, ExponentialCovariance, NeweyWestCovariance)
+
+
+def sampling_weights(
+    estimator: CovarianceEstimator, n_periods: int, *, diagonal: bool = False
+) -> np.ndarray:
     """How much of each period's estimation noise a covariance estimator carries into its
     estimate.
 
@@ -725,10 +765,14 @@ def sampling_weights(estimator: CovarianceEstimator, n_periods: int) -> np.ndarr
     centring on the weighted mean makes a period's noise correlate slightly negatively with
     its neighbours'. The two-half-life and the shrunk estimators are not quadratic forms, so
     they have no such weights.
+
+    `diagonal` asks only for the weights of the diagonal, which is all `weighted_noise_share`
+    needs. The two-half-life estimator then has them too: each variance it gives is its
+    volatility estimator's, a quadratic form, and only its correlations are not.
     """
-    if not isinstance(
-        estimator, (SampleCovariance, ExponentialCovariance, NeweyWestCovariance)
-    ):
+    if diagonal and isinstance(estimator, HorizonCovariance):
+        estimator = estimator.volatility_estimator()
+    if not isinstance(estimator, _QUADRATIC_FORMS):
         raise ValueError(
             f"the sampling-error correction needs a covariance estimator that is a quadratic "
             f"form in the returns -- sample, exponential or Newey-West -- not "
@@ -744,13 +788,17 @@ def sampling_weights(estimator: CovarianceEstimator, n_periods: int) -> np.ndarr
 
 
 def _weighted_sampling_bias(
-    estimator: CovarianceEstimator, matrices: list[np.ndarray | None]
+    estimator: CovarianceEstimator,
+    matrices: list[np.ndarray | None],
+    *,
+    diagonal: bool = False,
 ) -> tuple[np.ndarray, int]:
     """The periods' sampling covariances as the covariance estimator carries them
     (`sampling_weights`): what the estimated factor returns' covariance holds of their
     estimation errors. A period without one -- its design rank-deficient -- is given the
-    others' weighted mean; how many were is returned with it."""
-    weights = sampling_weights(estimator, len(matrices))
+    others' weighted mean; how many were is returned with it. Under `diagonal` only the
+    diagonal of the result is the estimator's, and a two-half-life estimator is taken."""
+    weights = sampling_weights(estimator, len(matrices), diagonal=diagonal)
     present = [k for k, m in enumerate(matrices) if m is not None]
     if not present:
         raise ValueError("no estimated period has a sampling covariance to correct with")
@@ -760,6 +808,48 @@ def _weighted_sampling_bias(
         bias = bias * (weights.sum() / weights[present].sum())
     # Each period's inverse came out of a factorisation, symmetric only to rounding.
     return (bias + bias.T) / 2.0, filled
+
+
+def _leverages(
+    design: np.ndarray, outside: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """The leverages of a weighted regression's members, and of names outside it.
+
+    `design` is the members' weighted design, each row sqrt(w) x. A member's leverage is
+    h = w x' (X'WX)^-1 x, the diagonal of the weighted hat matrix, and the leverages sum to the
+    rank. `outside` holds names outside the regression, each row sqrt(w) x with w on the
+    members' scale, and their h is the same form. Through the singular value decomposition, with
+    `numpy.linalg.lstsq`'s cut-off, so a rank-deficient design is read as the fit reads it.
+    """
+    u, s, vt = np.linalg.svd(design, full_matrices=False)
+    keep = s > s.max() * max(design.shape) * np.finfo(float).eps
+    h = np.sum(u[:, keep] ** 2, axis=1)
+    if outside is None:
+        return h, None
+    return h, np.sum((outside @ vt[keep].T / s[keep]) ** 2, axis=1)
+
+
+def _history_spread(u: np.ndarray, half_life: float | None) -> tuple[float, float]:
+    """A security's specific-return history, nan where it has none: its standard deviation,
+    and how many observations that rests on.
+
+    Equal weights, the default: the ddof-1 standard deviation and the count. Under a
+    half-life, each return weighted 0.5 ** (age / half_life), its age in periods counted back
+    from the panel's last row -- the forecast date -- with the reliability-weighted variance,
+    which is the ddof-1 one at equal weights, and Kish's effective number of observations,
+    (sum w)^2 / sum w^2: what a blend weight should be told the history is worth.
+    """
+    present = ~np.isnan(u)
+    values = u[present]
+    if half_life is None:
+        return float(np.std(values, ddof=1)), int(values.size)
+    ages = (u.size - 1 - np.flatnonzero(present)).astype(float)
+    w = 0.5 ** (ages / half_life)
+    w = w / w.sum()
+    sum_squares = float(w @ w)
+    mean = float(w @ values)
+    variance = float(w @ (values - mean) ** 2) / (1.0 - sum_squares)
+    return float(np.sqrt(variance)), 1.0 / sum_squares
 
 
 def estimate_cross_sectional_model(
@@ -786,6 +876,8 @@ def estimate_cross_sectional_model(
     residual_spread: str = "mad",
     specific_history: str = "regression",
     sampling_correction: bool = False,
+    leverage_correction: bool = False,
+    specific_half_life: float | None = None,
 ) -> FactorModel:
     """Regress returns cross-sectionally on characteristics, period by period.
 
@@ -866,7 +958,31 @@ def estimate_cross_sectional_model(
     estimate is mostly noise can come out with a negative variance, so the corrected matrix
     goes through `risk.basis.nearest_psd`, and the notes say whether and where the repair
     bound. Off by default: the covariance as estimated.
+
+    `leverage_correction` is the correction's specific side. Under the regression's own
+    assumption -- each name's residual variance inversely proportional to its weight -- the
+    noise in period t's factor returns is the members' specific returns, (X'WX)^-1 X'W u, and
+    their residuals lack exactly that part: a member's residual variance is its specific
+    variance times (1 - h), h = w x' (X'WX)^-1 x its leverage. The covariance as estimated
+    carries that part as factor noise, so for a single member the two errors cancel; for an
+    industry's own portfolio they do not, and subtracting the noise from the covariance leaves
+    each member short by its leverage. On, each member's residual is divided by sqrt(1 - h), in
+    place of the uniform inflation sqrt(n_t / (n_t - rank)) -- the same correction at the mean
+    leverage -- and under "covered" histories each specific return outside the regression,
+    which carries the noise instead, by sqrt(1 + h), its weight on the members' scale. Factor
+    returns, R-squared and the sampling covariance are untouched. Off by default.
+
+    `specific_half_life` weights each security's own history -- the standard deviation
+    `historical` takes and `blend` weighs -- by the age of each return, 0.5 ** (age /
+    half_life) in periods back from the last date, and tells the blend the history's effective
+    number of observations, (sum w)^2 / sum w^2, in place of its count: the weight a history
+    gets falls as it is discounted. None, the default, weights every return equally.
     """
+    if specific_half_life is not None and not specific_half_life > 0.0:
+        raise ValueError(
+            f"specific_half_life must be positive, or None for equal weights; got "
+            f"{specific_half_life!r}"
+        )
     if specific_history not in ("regression", "covered"):
         raise ValueError(
             f"specific_history must be 'regression' or 'covered', got {specific_history!r}"
@@ -929,7 +1045,8 @@ def estimate_cross_sectional_model(
     r_squareds: list[float] = []
     sampling = np.zeros(n_factors)
     sampling_periods = 0
-    # Each estimated period's full sampling covariance, under the sampling-error correction.
+    # Each estimated period's full sampling covariance: the weighted noise share reads its
+    # diagonal, and the sampling-error correction all of it.
     sampling_matrices: list[np.ndarray | None] = []
     periods_present = np.zeros(n_factors, dtype=int)
     periods_single = np.zeros(n_factors, dtype=int)
@@ -945,6 +1062,10 @@ def estimate_cross_sectional_model(
         covered = np.full((n_periods_in, n_secs), np.nan)
         reachable = np.isfinite(r_block) & np.isfinite(x_block).all(axis=2)
     outside_residuals = 0
+    # Under the leverage correction: member-periods at a leverage of one, and specific returns
+    # outside the regressions with no weight to price a leverage by.
+    leverage_one = 0
+    leverage_unweighted = 0
     # The first `lag` dates have nothing earlier to read: they are not periods, thin or not.
     for t in range(lag, n_periods_in):
         usable = in_regression[t]
@@ -998,6 +1119,9 @@ def estimate_cross_sectional_model(
 
         fitted = x_t @ f_t
         u_t = r_t - fitted
+        outside = None
+        if covered is not None:
+            outside = reachable[t] & ~usable
         # Inflate by the degrees of freedom this period's fit consumed. Residuals from a
         # fitted regression are systematically too small -- the fit absorbed `rank` of the
         # n_t observations -- so their variance understates specific variance by
@@ -1007,12 +1131,46 @@ def estimate_cross_sectional_model(
         # exactly where it matters most. n_t varies by period, so the correction has to be
         # applied here rather than once at the end.
         dof_inflation = np.sqrt(n_t / (n_t - rank)) if n_t > rank else 1.0
-        residuals[t, usable] = u_t * dof_inflation
+        h_out = weighted_out = None
+        if leverage_correction:
+            # The specific side's half of the sampling-error correction (midoffice10 ruling 1).
+            # Under the regression's own assumption a member's residual variance is its
+            # specific variance times (1 - h), h its leverage, and the leverages sum to the
+            # rank: the uniform inflation above is this at the mean leverage. Each residual is
+            # put right by its own instead -- a thin industry's members have the most.
+            rows = None
+            if outside is not None and outside.any():
+                if w_block is None:
+                    w_out = np.ones(int(np.count_nonzero(outside)))
+                else:
+                    w_out = w_block[t, outside] * (n_t / w_block[t, usable].sum())
+                weighted_out = np.isfinite(w_out) & (w_out > 0.0)
+                rows = x_block[t][outside][:, active] * np.sqrt(
+                    np.where(weighted_out, w_out, 0.0)
+                )[:, None]
+            h, h_out = _leverages(design, rows)
+            at_one = h >= 1.0 - 1e-9
+            leverage_one += int(np.count_nonzero(at_one))
+            # At a leverage of one -- a factor with one member -- the residual is zero, its
+            # specific variance not identified: left as it is.
+            residuals[t, usable] = np.where(
+                at_one, u_t, u_t / np.sqrt(np.where(at_one, 1.0, 1.0 - h))
+            )
+        else:
+            residuals[t, usable] = u_t * dof_inflation
         if covered is not None:
             covered[t, usable] = residuals[t, usable]
-            outside = reachable[t] & ~usable
             if outside.any():
-                covered[t, outside] = r_block[t, outside] - x_block[t][outside, :] @ f_t
+                specific_t = r_block[t, outside] - x_block[t][outside, :] @ f_t
+                if h_out is not None:
+                    # Outside the regression the specific return carries the factor returns'
+                    # noise instead: variance its specific variance times (1 + h). A name
+                    # without a weight has no leverage, and is left as measured.
+                    specific_t = np.where(
+                        weighted_out, specific_t / np.sqrt(1.0 + h_out), specific_t
+                    )
+                    leverage_unweighted += int(np.count_nonzero(~weighted_out))
+                covered[t, outside] = specific_t
                 outside_residuals += int(np.count_nonzero(outside))
 
         # Weighted R-squared about the weighted mean, which is the right benchmark when
@@ -1038,9 +1196,8 @@ def estimate_cross_sectional_model(
                 # A factor left out this period adds nothing: its zero was set, not estimated.
                 sampling[active] += sigma2 * np.diag(xtwx_inv)
                 sampling_periods += 1
-                if sampling_correction:
-                    period_sampling = np.zeros((n_factors, n_factors))
-                    period_sampling[np.ix_(active, active)] = sigma2 * xtwx_inv
+                period_sampling = np.zeros((n_factors, n_factors))
+                period_sampling[np.ix_(active, active)] = sigma2 * xtwx_inv
 
         kept_dates.append(shared_dates[t])
         sizes.append(n_t)
@@ -1074,11 +1231,24 @@ def estimate_cross_sectional_model(
     corrected: tuple[float, ...] = ()
     psd_repair: PSDRepair | None = None
     sampling_filled = 0
+    # The weighted sampling variance, always: what the covariance as estimated holds of the
+    # noise, and what the correction would subtract. A covariance whose diagonal is no
+    # quadratic form in the returns -- the shrunk one -- has none.
+    bias: np.ndarray | None = None
+    try:
+        bias, sampling_filled = _weighted_sampling_bias(
+            estimator, sampling_matrices, diagonal=True
+        )
+    except ValueError:
+        pass
+    else:
+        weighted_sampling = tuple(float(v) for v in np.diag(bias) * scale)
     if sampling_correction:
-        bias, sampling_filled = _weighted_sampling_bias(estimator, sampling_matrices)
+        if bias is None or not isinstance(estimator, _QUADRATIC_FORMS):
+            # Refused here, by name, unless the whole matrix is a quadratic form.
+            bias, sampling_filled = _weighted_sampling_bias(estimator, sampling_matrices)
         subtracted = (estimate.matrix - bias) * scale
         covariance_matrix, psd_repair = nearest_psd(subtracted)
-        weighted_sampling = tuple(float(v) for v in np.diag(bias) * scale)
         corrected = tuple(float(v) for v in np.diag(subtracted))
     mean_sampling = (
         tuple(float(v) for v in (sampling / sampling_periods) * scale)
@@ -1113,6 +1283,8 @@ def estimate_cross_sectional_model(
     blended_outside: tuple[str, ...] = ()
     # A security's own history: its residuals in the regressions, or every specific return.
     own = residuals if covered is None else covered
+    # Under a history half-life, the effective number of observations each history rests on.
+    effective: dict[str, float] = {}
     if specific_risk != "historical":
         cap_block = None
         if capitalisations is not None:
@@ -1155,15 +1327,15 @@ def estimate_cross_sectional_model(
         fallback_rows = {c: row for c, row in exposure_rows.items() if c not in universe}
         exposure_rows = {c: row for c, row in exposure_rows.items() if c in universe}
         if specific_risk == "blend":
-            history: dict[str, tuple[float, int]] = {}
+            history: dict[str, tuple[float, float]] = {}
             for j, code in enumerate(shared_securities):
                 u = own[:, j]
                 present = ~np.isnan(u)
                 if int(present.sum()) >= 2:
-                    history[code] = (
-                        float(np.std(u[present], ddof=1)) * vol_scale,
-                        int(present.sum()),
-                    )
+                    spread, observations = _history_spread(u, specific_half_life)
+                    history[code] = (spread * vol_scale, observations)
+                    if specific_half_life is not None:
+                        effective[code] = float(observations)
             # Outside the universe with a history of its own: blended, its history measured,
             # only the characteristic forecast extrapolated to it.
             outside_rows = {c: row for c, row in fallback_rows.items()
@@ -1199,7 +1371,10 @@ def estimate_cross_sectional_model(
                 short_history.append(code)
                 continue
             # Already degrees-of-freedom corrected period by period, above.
-            specific = float(np.std(u[present], ddof=1)) * vol_scale
+            spread, observations = _history_spread(u, specific_half_life)
+            specific = spread * vol_scale
+            if specific_half_life is not None:
+                effective[code] = float(observations)
         else:
             # A security with no residual history at all still gets a forecast here, which
             # is the point of modelling specific risk rather than measuring it.
@@ -1256,6 +1431,9 @@ def estimate_cross_sectional_model(
         corrected_variance=corrected,
         psd_repair=psd_repair,
         sampling_filled=sampling_filled,
+        leverage_correction=leverage_correction,
+        leverage_one=leverage_one,
+        leverage_unweighted=leverage_unweighted,
         factor_names=tuple(names),
         covariance=estimate,
         present_periods=tuple(int(v) for v in periods_present),
@@ -1273,6 +1451,8 @@ def estimate_cross_sectional_model(
             code: int(np.count_nonzero(~np.isnan(own[:, shared_securities.index(code)])))
             for code in exposures
         },
+        specific_half_life=specific_half_life,
+        history_effective={code: n for code, n in effective.items() if code in exposures},
         factor_returns=factors,
     )
 
@@ -1285,3 +1465,64 @@ def estimate_cross_sectional_model(
         r_squared={},
         notes=notes,
     )
+
+
+# The options on the return panel's dates, and the one on the characteristic panel's.
+_DATED_ON_RETURNS = ("regression_weights", "membership", "capitalisations", "periods")
+_DATED_ON_CHARACTERISTICS = ("standardise_weights",)
+
+
+def cross_sectional_models_as_of(
+    returns: ReturnPanel,
+    characteristics: CharacteristicPanel,
+    as_of: Iterable[date],
+    **options,
+) -> Iterator[tuple[date, FactorModel]]:
+    """The model as of each date in `as_of`, refitted on data through that date alone.
+
+    Each is `estimate_cross_sectional_model` on both panels cut at the date -- every return and
+    characteristic after it removed, and every dated option with them: the regression weights,
+    the membership, the capitalisations and the periods on the return panel's dates, the
+    standardisation weights on the characteristic panel's. So the forecast made at a date's
+    close rests on what was known at it: the factor returns through it, the covariance
+    estimated from them, the specific risk model's fit and every history it blends, and the
+    exposures as of the date, the last the cut panels hold.
+
+    What carries no date is held as given -- an industry scheme already built into the
+    characteristics, the periods a caller marked -- and is the caller's to hold or not, as
+    Barra holds a model's industry factors fixed. A refit is the whole estimator, about a second
+    on the S&P 500 run, so every date can have its own. `exposure_index` must be left at the
+    last date: a model as of a date forecasts with that date's exposures.
+    """
+    if options.get("exposure_index", -1) != -1:
+        raise ValueError(
+            "a model as of a date forecasts with that date's exposures, the last its cut panels "
+            "hold; leave exposure_index at -1"
+        )
+    for day in as_of:
+        return_rows = bisect.bisect_right(returns.dates, day)
+        char_rows = bisect.bisect_right(characteristics.dates, day)
+        if return_rows == 0 or char_rows == 0:
+            raise ValueError(f"neither panel may be empty on or before {day}")
+        cut = dict(options)
+        for key in _DATED_ON_RETURNS:
+            if cut.get(key) is not None:
+                cut[key] = np.asarray(cut[key])[:return_rows]
+        for key in _DATED_ON_CHARACTERISTICS:
+            if cut.get(key) is not None:
+                cut[key] = np.asarray(cut[key])[:char_rows]
+        model = estimate_cross_sectional_model(
+            ReturnPanel(
+                returns.dates[:return_rows],
+                returns.securities,
+                returns.returns[:return_rows],
+                returns.frequency,
+            ),
+            replace(
+                characteristics,
+                dates=characteristics.dates[:char_rows],
+                values=characteristics.values[:char_rows],
+            ),
+            **cut,
+        )
+        yield day, model

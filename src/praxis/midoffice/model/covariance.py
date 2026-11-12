@@ -234,16 +234,39 @@ class HorizonCovariance:
     Equal half-lives reduce this exactly to `ExponentialCovariance`, which
     `test_equal_half_lives_reduce_to_the_single_half_life_estimator` pins -- an estimator
     whose general case does not contain its special case is usually wrong in both.
+
+    `newey_west_lags`, given, estimates both matrices by `NeweyWestCovariance` with that many
+    lags at their half-lives, as USE4 corrects both horizons for serial correlation; equal
+    half-lives then reduce it to `NeweyWestCovariance`. None, the default, is BIM301's plain
+    exponential weighting. Newey-West under exponential weights is not guaranteed positive
+    semi-definite, and neither then is the recombination: the notes say when it is not.
     """
 
     volatility_half_life: float
     correlation_half_life: float
+    newey_west_lags: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("volatility_half_life", "correlation_half_life"):
             value = getattr(self, name)
             if value <= 0.0:
                 raise ValueError(f"{name} must be positive, got {value!r}")
+        if self.newey_west_lags is not None and self.newey_west_lags < 0:
+            raise ValueError(
+                f"newey_west_lags must be non-negative, or None for no Newey-West; got "
+                f"{self.newey_west_lags!r}"
+            )
+
+    def _estimator(self, half_life: float):
+        if self.newey_west_lags is None:
+            return ExponentialCovariance(half_life)
+        return NeweyWestCovariance(lags=self.newey_west_lags, half_life=half_life)
+
+    def volatility_estimator(self) -> "ExponentialCovariance | NeweyWestCovariance":
+        """The estimator the diagonal comes from: each variance is its estimate, the
+        correlations aside. So the diagonal is a quadratic form in the returns even though the
+        matrix is not."""
+        return self._estimator(self.volatility_half_life)
 
     @classmethod
     def bim301_long(cls, periods_per_year: float = 12.0) -> "HorizonCovariance":
@@ -273,10 +296,16 @@ class HorizonCovariance:
             raise ValueError(f"a covariance needs at least two periods, got {n}")
         ages = np.arange(n - 1, -1, -1, dtype=float)
 
-        corr_decay = 0.5 ** (1.0 / self.correlation_half_life)
-        vol_decay = 0.5 ** (1.0 / self.volatility_half_life)
-        corr_matrix, corr_effective = _weighted_covariance(returns, corr_decay**ages)
-        vol_matrix, vol_effective = _weighted_covariance(returns, vol_decay**ages)
+        if self.newey_west_lags is None:
+            corr_decay = 0.5 ** (1.0 / self.correlation_half_life)
+            vol_decay = 0.5 ** (1.0 / self.volatility_half_life)
+            corr_matrix, corr_effective = _weighted_covariance(returns, corr_decay**ages)
+            vol_matrix, vol_effective = _weighted_covariance(returns, vol_decay**ages)
+        else:
+            long = self._estimator(self.correlation_half_life).estimate(returns)
+            short = self._estimator(self.volatility_half_life).estimate(returns)
+            corr_matrix, corr_effective = long.matrix, long.effective_observations
+            vol_matrix = short.matrix
 
         # Correlations from the long estimate, volatilities from the short one.
         long_sd = np.sqrt(np.clip(np.diag(corr_matrix), 0.0, None))
@@ -304,10 +333,20 @@ class HorizonCovariance:
                 f"{n} period(s) leaves {corr_effective:.1f} effective observation(s), so "
                 f"more than half the history is being discarded by the weighting"
             )
+        method = "exponential, split horizon"
+        if self.newey_west_lags is not None:
+            method = f"Newey-West, {self.newey_west_lags} lag(s), split horizon"
+            smallest = float(np.linalg.eigvalsh((matrix + matrix.T) / 2.0).min())
+            if smallest < 0.0:
+                notes.append(
+                    f"the split-horizon Newey-West matrix has a negative eigenvalue "
+                    f"({smallest:.2e}), so some portfolio has a negative variance forecast until "
+                    f"psd_relative_floor repairs it"
+                )
         return CovarianceEstimate(
             matrix=matrix,
             effective_observations=corr_effective,
-            method="exponential, split horizon",
+            method=method,
             n_periods=n,
             half_life=self.correlation_half_life,
             volatility_half_life=self.volatility_half_life,

@@ -1,8 +1,8 @@
 # Mid-office state
 
-**Updated:** 2026-11-10, at the end of midoffice10 (midoffice09's rulings; the noise share
-measured: the sampling-error correction, the thin industries, Size Nonlinearity). Brought up to
-date at the end of every piece, in the same commit as its retro (Rule 43). Not a history: the state a new session needs to carry on. The detail is in the
+**Updated:** 2026-11-12, at the end of midoffice11 (midoffice10's rulings; the out-of-sample
+bias statistics, the defaults and ten candidates). Brought up to date at the end of every
+piece, in the same commit as its retro (Rule 43). Not a history: the state a new session needs to carry on. The detail is in the
 retros named below.
 
 ---
@@ -10,7 +10,7 @@ retros named below.
 ## Start here
 
 1. Read `claude/CLAUDE_CODE_RULES.md` (Rule 43 above all), then this file, then the latest retro:
-   `claude/retros/RETRO_midoffice10_noise_share.md`.
+   `claude/retros/RETRO_midoffice11_bias_statistics.md`.
 2. **How the work runs.**
    - **The brief.** Each piece, `midofficeNN`, is a brief written in Chat and pasted into the Code
      session. Code transcribes it verbatim to `claude/handoffs/BRIEF_midofficeNN_<slug>.md`; its
@@ -30,8 +30,8 @@ retros named below.
    - Scratch goes to `claude/scratch/midofficeNN/` (gitignored), its outputs copied into the retro.
    - Python is ASCII and keeps the file's line endings (most `.py` here are CRLF in the working
      copy; the `claude/` briefs and retros LF).
-   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,311 passed
-     and 1 skipped at midoffice10. That file looks for `../core_repo/src`, which isn't on this
+   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,338 passed
+     and 1 skipped at midoffice11. That file looks for `../core_repo/src`, which isn't on this
      machine.
 4. **Working notes, from the pieces so far.**
    - A bash heredoc has failed in this harness on some apostrophes (06, 07, 08), though not
@@ -42,6 +42,14 @@ retros named below.
    - An `.npz` member is decompressed afresh on every access: read each array once into a dict.
    - The Write tool writes LF; `Path.write_text` without `newline=""` writes CRLF on Windows.
    - Git Bash's process substitution, `diff <(...) file`, fails silently here: diff two files.
+   - **Memory gates parallel runs (11).** This machine has 25.8 GB usable and sits above 20 GB in
+     use, so parallel runs are gated on available memory. A full run peaks near 1.2 GB, a `--bias`
+     run too; eleven at once (about 13 GB) tripped Claude Code's memory guard. That guard stops
+     `run_in_background` shells when memory runs low, and on Windows it stops only the shell and
+     leaves the Python running. Long runs go in a runner script started in its own minimized
+     console (`Start-Process -WindowStyle Minimized`), one at a time, each started only while 3
+     GB is available, resumable from its results files, watched by a light background check of
+     those files (`claude/scratch/midoffice11/runner.py`).
 
 ---
 
@@ -89,32 +97,37 @@ layer (c92d343 to e859b4e, 2026-11-01).
   the three-step comparison.
 - fccc480: **midoffice09** -- the count rulings, total returns by default, residuals for every
   covered name.
-- Next: **midoffice10**. Jeff commits it after fccc480 (`git log --oneline -3`).
+- 4f27f23: **midoffice10** -- PCG spared, spans ended off an exchange, the noise share measured.
+- Next: **midoffice11**. Jeff commits it after 4f27f23 (`git log --oneline -3`).
 
-**The current piece: midoffice10, COMPLETE (2026-11-10).**
+**The current piece: midoffice11, COMPLETE (2026-11-12).**
 
-- **midoffice09's rulings, each measured.** The panel is rebuilt as `_listed`, the run's default.
-  - **PCG spared:** its record's weighted count confirms its sample (1.000); 63 member-days.
-  - **Spans end off an exchange:** the records' `market` shows only SBNY and FRCB on OTC Link.
-    SBNY's span from 2023-03-28 goes; FRCB's is kept to 2023-05-03, its one member-day on OTC
-    Link; 1,002 priced cells, no member-day. Through the lag, FRCB's 2023-05-04 return leaves
-    one regression.
-  - **The model:** mean R-squared 0.293204 to 0.293203; SBNY's 396% forecast goes.
-- **The noise share, measured; no default changed.**
-  - **The correction** (`--sampling-correction`): weighted as the covariance carries each
-    period's noise. The weighted noise share is about 1.45 times the run's equal-weighted one,
-    since 2026's residual dispersion is high: Wholesale 69%, Size Nonlinearity 67%. The
-    subtraction leaves 9 of 25 eigenvalues negative -- the estimator's own sampling error,
-    simulated -- and the repair makes them near riskless. Broad portfolios move about 1%, the
-    thin industries' 9% to 18%.
-  - **The thin industries** (`--merge-industry A=B`): folded by correlation, Construction and
-    Wholesale into Retail and Finance & Real Estate into SIC62. Each costs about a noise
-    regressor's R-squared. Floors of 15, 20 and 25: mean R-squared 0.2861, 0.2769, 0.2628.
-  - **Size Nonlinearity:** corrected, 2.32% to 1.71%; without it R-squared loses 0.0036, and no
-    reference portfolio moves more than 0.07 of a point.
-- **Waiting on Jeff:** five decisions, in the retro. My choices: the correction left off; the
-  weighted share as the diagnostic; floor 15; Size Nonlinearity kept; FRCB's one return as
-  built.
+- **midoffice10's rulings, each measured.**
+  - **The correction's specific side** (`--leverage-correction`, off): the algebra holds, and
+    the estimator's uniform inflation n/(n - k) is it at the mean leverage, 0.050. Construction's
+    members average 0.156; the largest leverages are the mega caps (TSLA 0.357, AAPL 0.319, NVDA
+    0.306), whose specific risk it raises 16 to 21%.
+  - **The weighted noise share** is always computed, reported beside the equal-weighted one,
+    and quoted by the qualification (Wholesale's 69%).
+  - The two unused imports removed; a test that never ran (a duplicate name) now runs.
+- **The out-of-sample bias statistics** (`--bias`, about ten minutes): 686 forecasts from
+  2024-02-08, each the estimator refitted on data through its date alone, the scheme held; the
+  guard (the inputs rebuilt from the panel cut at five dates, to the bit) passed.
+  - **The defaults read 1.07 to 1.12 for broad portfolios at the daily horizon,** and that is
+    Newey-West's long horizon: daily returns mean-revert, 10 lags hold the index's factor
+    variance at 0.805 of its one-day variance (1.114 predicted); the 21-day check reads 0.88 to
+    1.02, and without lags the daily reads 1.00 to 1.02. The members read 1.075 at the median,
+    the largest names worst.
+  - **The lag terms are most of the eigenvalue bias:** the smallest eigenportfolios read 2.2 with
+    them, 1.25 without; the unconstrained minimum-variance portfolio 1.58 and 1.24.
+  - **Floor 15 hurts** (Construction's portfolio 1.07 to 1.32); **the correction** hurts the
+    optimiser's portfolio at both horizons (1.58 to 1.93) and centres the industries only at 21
+    days; **a 63-day history half-life** helps every specific-side measure (members 1.075 to
+    1.042); **the two-half-life covariance** (90 / 504) is the best covariance candidate; the two
+    together add up.
+- **Waiting on Jeff:** the decisions in the retro. My choices: the 63-day history and the two
+  half-lives as the defaults; the correction and its specific side left off; no fold; the
+  eigenvalue adjustment next, measured together with the Newey-West lag count.
 
 ---
 
@@ -174,13 +187,28 @@ in `docs/FACTOR_MODEL.md`.
   market factor beside them. Newey-West takes 10 lags at half-life 90. (666599b; docs) On the
   panel on securities, each security's SIC code is its own latest record's. (08)
 - **Noise shares** get one model-wide answer after the rebuild, never a deletion per factor (04
-  ruling 1). Measured in 10, the answer is Jeff's to choose. The run reports the equal-weighted
-  share, Construction 38.2%, Wholesale 46.2%, Finance & Real Estate 31.0%, Size Nonlinearity
-  46.6%. Weighted as the covariance is they are 48.6%, 68.8%, 46.5% and 67.4%.
+  ruling 1). Both are always computed and the run's factor table reports them side by side --
+  equal-weighted (Construction 38.2%, Wholesale 46.2%, Finance & Real Estate 31.0%, Size
+  Nonlinearity 46.6%) and weighted as the covariance weights the periods (48.6%, 68.8%, 46.5%,
+  67.4%) -- and the qualification quotes the weighted one. (10 ruling 2; built in 11)
 - **The sampling-error correction** is an option, off. It needs a covariance estimator that is
-  a quadratic form -- sample, exponential or Newey-West -- and refuses the others. (10)
+  a quadratic form -- sample, exponential or Newey-West -- and refuses the others; the
+  two-half-life estimator's diagonal is one, so it has a weighted share but not the correction.
+  The eigenvalue adjustment waited for the bias statistics. (10; 10 ruling 1)
+- **The correction's specific side** (`leverage_correction`, `--leverage-correction`) is an
+  option, off: each member's residual over sqrt(1 - h) in place of the uniform inflation, each
+  specific return outside the regression over sqrt(1 + h). (10 ruling 1; built in 11)
 - **An industry fold** (`merge_industries`, `--merge-industry A=B`) is an option, none by
-  default; folds are recorded in `folded`, apart from the grouping's `merged`. (10)
+  default; folds are recorded in `folded`, apart from the grouping's `merged`. No fold for now;
+  floor 15 by the Pearson rule was the candidate the bias statistics judged. (10; 10 ruling 3)
+- **Size Nonlinearity** stays (04 rulings 1-2; 10 ruling 4). **FRCB's 2023-05-04 return** is
+  dropped, an OTC price after the index let it go (10 ruling 5).
+- **The bias statistics' method** (11's brief): each forecast the estimator refitted on data
+  through its date alone, daily (`cross_sectional_models_as_of`); the industry scheme held fixed,
+  as Barra fixes a model's industry factors; the first forecast once the covariance has 252
+  estimated periods; the guard on a handful of dates (`--bias-guard`, five); each forecast at a
+  daily scale against the next day's total return, the 21-day horizon non-overlapping as a
+  check.
 - **A security's own specific-risk history** is every specific return it has, member or not:
   in each estimated period, the return of every security with a return and a complete
   characteristic row less its exposures times the members' factor returns, with no
@@ -373,6 +401,15 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   covariance is, and repaired; its table and the repair are reported. Off by default.
 - `--merge-industry A=B`, repeatable: fold industry A into B once the scheme is built. None by
   default.
+- `--leverage-correction`: the correction's specific side. Off by default.
+- `--specific-half-life H`: each specific-risk history weighted by a half-life of H trading days,
+  the blend told its effective number of observations. Equal weights by default.
+- `--correlation-half-life H`: the two-half-life factor covariance, correlations on H,
+  volatilities on `--half-life`, both Newey-West at `--newey-west-lags`. One half-life by
+  default.
+- `--bias`: the out-of-sample bias statistics after the report, about ten minutes alone on this
+  machine; `--bias-out PATH` keeps every forecast and outcome in an `.npz`; `--bias-guard N`
+  (default 5, 0 skips) is the guard's date count, about four minutes at five.
 - On the panel on securities, `--membership` is its own, checked against the newest snapshot's
   hash, and `--industries` reads its own SIC codes and needs no key.
 - The old panel carries price returns and adjusted volumes alone. Its `--industries` reads the
@@ -415,8 +452,12 @@ The old panel, `--returns price --specific-history regression`: 0.298076, 451 (4
   - no weight;
   - no return;
   - an exposure missing, by the first factor without one.
-- **The factor table's noise share, and its exactly-1 and none columns:** thin and one-member
-  factors.
+- **The factor table's noise shares, equal-weighted and weighted, and its exactly-1 and none
+  columns:** thin and one-member factors, and how much of the current regime's variance is noise.
+- **Under `--bias`, its guard** (the run stops if the inputs rebuilt from the panel cut at a date
+  are not the full run's through it) and **its statistics**: the portfolios' table at both
+  horizons, the industries against their weighted noise shares, the random portfolios, every
+  member singly, the eigenportfolios.
 - **Specific risk:**
   - the percentiles;
   - the shares of V-squared;
@@ -459,20 +500,20 @@ The old panel, `--returns price --specific-history regression`: 0.298076, 451 (4
 
 ## What is next
 
-1. **Jeff's rulings on midoffice10** (its retro, "Decisions left for Jeff"):
-   - **The sampling-error correction:** leave it an option, off (my choice); make it the default
-     as built; or commission it with an eigenvalue adjustment, so the subtraction cannot make a
-     direction riskless.
-   - **The noise-share diagnostic:** report the weighted share in the run's factor table, beside
-     or instead of the equal-weighted one.
-   - **The thin industries:** floor 15 by the Pearson rule (my choice) -- Construction and
-     Wholesale into Retail, Finance & Real Estate into SIC62 -- or none, a higher floor, or
-     another rule.
-   - **Size Nonlinearity:** keep, as ruled (my choice), or leave out.
-   - **FRCB's 2023-05-04 return:** keep the span ending on its last member-day (as built), or
-     run spans one trading day past it so the lag keeps that return.
-2. **Then, per midoffice09's brief:** out-of-sample bias statistics. They should judge the folds
-   and the history weighting.
+1. **Jeff's rulings on midoffice11** (its retro, "Decisions left for Jeff"):
+   - **The specific-risk history:** a 63-day half-life as the default (my choice), 126, or equal
+     weights; or shorter ones measured first.
+   - **The factor covariance:** the two-half-life estimator, volatilities 90 and correlations
+     504, as the default (my choice), or the single half-life 90.
+   - **The horizon:** keep Newey-West's long horizon, its daily forecasts about 10% short for
+     factor risk, as the model's horizon (my choice), or not.
+   - **The eigenvalue adjustment:** commission it next (my choice), measured together with the
+     Newey-West lag count, since the lag terms are most of the eigenvalue bias.
+   - **The correction and its specific side:** left options, off (my choice).
+   - **The thin industries:** no fold (my choice); Construction is two industries if a scheme
+     change is wanted.
+2. **The bias statistics are standing:** every later candidate is judged by `--bias` against
+   the defaults, run one at a time through a runner like midoffice11's.
 
 **Open, not queued:**
 
@@ -480,11 +521,12 @@ The old panel, `--returns price --specific-history regression`: 0.298076, 451 (4
 - VLVR runs the market model a second time;
 - the span-plus-look-back cut;
 - `tests/test_market_data.py`'s missing `../core_repo/src`;
-- two ruff findings that predate the mid-office pieces' code, each checked at HEAD:
-  - `run_sp500_model.py` imports `HorizonCovariance` unused;
-  - `crosssectional.py` imports `Mapping` unused;
-
-  (`test_crosssectional.py`'s import order went with midoffice10's rewrite of that import);
+- six ruff findings at HEAD in files no mid-office piece has touched since --
+  `characteristics.py` (an E501, an unused `Sequence`), `exposure_basis.py` (an unused
+  `Mapping`, two N806 `T`), `timeseries.py` (an unused `Sequence`); checked in 11
+  (`ruff_head_untouched.txt`);
+- shorter specific-risk half-lives than 63, and whether the latest half's slight over-forecast
+  at 63 grows (11);
 - the sampling covariance is the classical `sigma^2 (X'WX)^-1`; a heteroskedasticity-robust
   sandwich would say whether it misstates a thin industry's noise (10);
 - a member floor is not a noise floor: SIC20, with 21 members, is 55% noise, weighted (10);

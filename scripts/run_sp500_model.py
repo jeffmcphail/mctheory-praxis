@@ -30,18 +30,21 @@ import argparse
 import dataclasses
 import datetime as dt
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from praxis.midoffice.model.bias import RiskForecast, bias_statistics, evaluate  # noqa: E402
 from praxis.midoffice.model.characteristics import CharacteristicPanel  # noqa: E402
 from praxis.midoffice.model.covariance import (  # noqa: E402
     HorizonCovariance,
     NeweyWestCovariance,
 )
 from praxis.midoffice.model.crosssectional import (  # noqa: E402
+    cross_sectional_models_as_of,
     estimate_cross_sectional_model,
     regression_design,
     regression_universe,
@@ -489,6 +492,515 @@ def unreproduced_changes(
     return out
 
 
+@dataclasses.dataclass(frozen=True)
+class ModelInputs:
+    """What the run builds from a panel for the estimator, and what its report reads on the
+    way: the descriptors and their standardisation, the risk indices, the periods one blend per
+    factor allows, and the industries, built and then folded."""
+
+    descriptors: CharacteristicPanel
+    skipped: dict
+    caps: np.ndarray
+    standardised: CharacteristicPanel
+    weights: np.ndarray | None
+    return_panel: ReturnPanel
+    unblended: dict
+    blendable: CharacteristicPanel
+    styles: CharacteristicPanel
+    unlike: dict
+    periods: np.ndarray | None
+    universe: tuple[str, ...] | None
+    built_scheme: object | None
+    scheme: object | None
+    indices: CharacteristicPanel
+
+
+def parse_merges(specs: list[str]) -> dict[str, str]:
+    """--merge-industry's A=B pairs."""
+    merges: dict[str, str] = {}
+    for spec in specs:
+        source, sep, target = spec.partition("=")
+        if not sep or not source.strip() or not target.strip():
+            raise SystemExit(f"  --merge-industry takes A=B, got {spec!r}")
+        merges[source.strip()] = target.strip()
+    return merges
+
+
+def industry_codes(
+    panel: SecurityPanel, extras: dict, args
+) -> tuple[dict[str, str | None], list[str]]:
+    """Each security's SIC code, and the tickers whose code was carried from an earlier date.
+
+    On securities, each security's own latest record with a code, under its own tickers inside
+    its spans: a ticker's record can be another security's. On tickers, the reference cache's,
+    which needs `.env`'s key."""
+    if extras["on_securities"]:
+        return dict(extras["sic_codes"]), []
+    try:
+        client = PolygonClient(api_key=read_api_key(args.env), cache_dir=Path(args.cache))
+    except PolygonError as error:
+        raise SystemExit(f"  industries need the reference cache: {error}") from None
+    codes: dict[str, str | None] = {}
+    carried: list[str] = []
+    for ticker in panel.securities:
+        code, on = client.sic_code_any(ticker, panel.dates[-1])
+        codes[ticker] = code
+        if code and on != panel.dates[-1]:
+            carried.append(ticker)
+    return codes, carried
+
+
+def model_inputs(
+    panel: SecurityPanel,
+    market: np.ndarray,
+    membership: np.ndarray | None,
+    args,
+    *,
+    codes: dict[str, str | None] | None = None,
+    merges: dict[str, str] | None = None,
+    scheme=None,
+) -> ModelInputs:
+    """Everything from the panel to the estimator's inputs, as the run computes it.
+
+    With `codes`, the industries: a scheme built over the regression universe and folded by
+    `merges` -- or, given, `scheme` held in its place and folded the same way. One definition
+    for the run and for its bias statistics' guard, which rebuilds these from the panel cut at a
+    date with the full run's scheme held, and checks they are the full run's through that date.
+    """
+    # None leaves the window to the library.
+    beta_months = (
+        args.beta_window if args.beta_days is None
+        else args.beta_days / TRADING_DAYS_PER_MONTH
+    )
+    descriptors, skipped = compute_descriptors(
+        panel,
+        market_returns=market,
+        beta_window_months=beta_months,
+        membership=membership,
+        min_coverage=args.min_coverage,
+        rstr_skip=args.rstr_skip,
+        beta_half_life=args.beta_half_life,
+    )
+    caps = panel.market_capitalisation()
+    # Over the estimation universe: the members set each day's clip bounds, cap-weighted mean
+    # and equal-weighted dispersion, and every other security with a value is put on their
+    # scale. Barra's estimation universe against its coverage universe -- an ex-member still
+    # gets an exposure, but no say in what an exposure of one means.
+    standardised = descriptors.standardise(caps, membership=membership)
+    # "Regression Weighting Scheme: Square root of capitalisation" appears on every model
+    # sheet in the Equity Risk Model Reference Guide. Equal weighting lets the smallest,
+    # noisiest names set the factor returns -- there are far more of them, and in a
+    # cap-weighted world almost none of the money. Needed before the risk indices, because
+    # Size Nonlinearity is orthogonalised against Size by them, and before the industries,
+    # because which securities a regression sees depends on them.
+    weights = None if args.equal_weight else np.sqrt(np.where(caps > 0.0, caps, np.nan))
+    return_panel = ReturnPanel(panel.dates, panel.securities, panel.returns(), Frequency.DAILY)
+
+    unblended = dict(UNBLENDED)
+    if args.size_nonlinearity == "use4":
+        unblended["LCAPCB"] = ("USE3's raw cube; Size Nonlinearity is built from the Size "
+                               "exposure instead, USE4's way")
+    if args.size_nonlinearity == "none":
+        unblended["LCAPCB"] = ("USE3's raw cube; Size Nonlinearity is not in the model "
+                               "(--size-nonlinearity none)")
+    blendable = without(standardised, unblended)
+    available = [
+        name
+        for name in ("Volatility", "Momentum", "Size", "Size Nonlinearity",
+                     "Trading Activity")
+        if any(m in blendable.names for m in index_descriptors(name, args.size_nonlinearity))
+    ]
+    styles = build_risk_indices(
+        blendable, cap_weights=caps, indices=available, membership=membership,
+        size_nonlinearity=args.size_nonlinearity, regression_weights=weights,
+    )
+
+    # One definition per factor across the sample. blend_to_index averages whichever of an
+    # index's descriptors a security has, so a blend changes composition where one starts or
+    # stops having values, and a factor estimated on one blend and forecast on another is two
+    # factors under one name. So a period is estimated only if every index's blend in it, over
+    # the securities its regression holds, has exactly the descriptors the forecast's has.
+    # Worked out before the industries, whose universe is the estimated periods'.
+    design = regression_design(
+        return_panel, styles, regression_weights=weights, membership=membership
+    )
+    forecast_row = len(panel.dates) - 1
+    complete = np.isfinite(styles.values[forecast_row]).all(axis=1)[None, :]
+    period_rows = np.arange(design.lag, len(panel.dates))
+    unlike: dict[int, list[str]] = {}
+    for name in styles.names:
+        read = blend_composition(
+            blendable, name, period_rows - design.lag, design.in_regression[period_rows],
+            size_nonlinearity=args.size_nonlinearity,
+        )
+        wanted = blend_composition(
+            blendable, name, [forecast_row], complete, size_nonlinearity=args.size_nonlinearity
+        )
+        for k, t in enumerate(period_rows):
+            have = [d for d, present in read.items() if present[k]]
+            missing = [d for d, present in wanted.items() if present[0] and not read[d][k]]
+            extra = [d for d in have if not wanted[d][0]]
+            if missing or extra:
+                unlike.setdefault(int(t), []).append(
+                    f"{name} from {', '.join(have) or 'nothing'}"
+                    + (f", without {', '.join(missing)}" if missing else "")
+                    + (f", with {', '.join(extra)} the forecast's lacks" if extra else "")
+                )
+    one_blend = np.array([t >= design.lag and t not in unlike for t in range(len(panel.dates))])
+    periods = None if args.mixed_blends else one_blend
+
+    universe = built = folded = None
+    indices = styles
+    if codes is not None:
+        # Counted over the securities in at least one estimated period's regression, not
+        # over the panel. A member that never enters a regression contributes nothing to its
+        # factor, and counting them let a four-member Unclassified -- one member present in
+        # most periods -- past a floor of five.
+        universe = regression_universe(
+            return_panel, styles, regression_weights=weights, membership=membership,
+            periods=periods,
+        )
+        built = scheme if scheme is not None else build_scheme(
+            codes, min_members=args.min_industry, universe=universe
+        )
+        folded = built
+        if merges:
+            try:
+                folded = merge_industries(built, merges)
+            except ValueError as error:
+                raise SystemExit(f"  --merge-industry: {error}") from None
+        indices = combine(
+            styles,
+            industry_exposures(
+                folded, panel.dates, panel.securities, frequency=Frequency.DAILY
+            ),
+        )
+    return ModelInputs(
+        descriptors=descriptors,
+        skipped=skipped,
+        caps=caps,
+        standardised=standardised,
+        weights=weights,
+        return_panel=return_panel,
+        unblended=unblended,
+        blendable=blendable,
+        styles=styles,
+        unlike=unlike,
+        periods=periods,
+        universe=universe,
+        built_scheme=built,
+        scheme=folded,
+        indices=indices,
+    )
+
+
+BIAS_YEAR = 252
+"""The estimated periods the covariance has before the first forecast: a year of factor
+returns."""
+
+BIAS_MIN_FORECASTS = 63
+"""A member singly is tested only on a quarter's forecasts or more."""
+
+
+def cut_panel(panel: SecurityPanel, rows: int) -> SecurityPanel:
+    """The panel through its first `rows` dates, every dated array cut there."""
+    cut = {
+        name: (None if getattr(panel, name) is None else getattr(panel, name)[:rows])
+        for name in ("prices", "unadjusted_prices", "volumes", "shares_outstanding", "highs",
+                     "lows")
+    }
+    return dataclasses.replace(panel, dates=panel.dates[:rows], **cut)
+
+
+def _same(a, b) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    a, b = np.asarray(a), np.asarray(b)
+    return a.shape == b.shape and np.array_equal(a, b, equal_nan=a.dtype.kind == "f")
+
+
+def _models_differ(a, b) -> list[str]:
+    """What two models' forecasts differ in, to the bit."""
+    out = []
+    if not _same(a.covariance.matrix, b.covariance.matrix):
+        out.append("covariance")
+    if a.exposures.keys() != b.exposures.keys() or any(
+        a.exposures[c].exposures != b.exposures[c].exposures for c in a.exposures
+    ):
+        out.append("exposures")
+    elif any(a.exposures[c].specific.by_issuer != b.exposures[c].specific.by_issuer
+             for c in a.exposures):
+        out.append("specific risk")
+    if not _same(a.notes.factor_returns.returns, b.notes.factor_returns.returns):
+        out.append("factor returns")
+    return out
+
+
+def bias_section(args, panel, market, membership, codes, merges, inputs, model, options) -> None:
+    """The out-of-sample bias statistics (midoffice11): the model refitted as of each trading
+    day, each forecast against the next day's return, over the standard portfolios."""
+    notes = model.notes
+    dates = panel.dates
+    at = {d: i for i, d in enumerate(dates)}
+    estimated_rows = [at[d] for d in notes.estimated_dates]
+    if len(estimated_rows) <= BIAS_YEAR:
+        raise SystemExit(f"  --bias needs more than a year ({BIAS_YEAR}) of estimated periods; "
+                         f"this run has {len(estimated_rows)}")
+    rows = list(range(estimated_rows[BIAS_YEAR - 1], len(dates) - 1))
+    held = inputs.built_scheme
+    print("\nOut-of-sample bias statistics")
+    print(f"  {len(rows)} forecasts, as of each trading day from {dates[rows[0]]} -- the first "
+          f"whose covariance has a year ({BIAS_YEAR}) of estimated periods -- to "
+          f"{dates[rows[-1]]}: each the whole estimator refitted on data through its date "
+          f"alone, daily -- the factor returns, the covariance, the specific risk model's fit "
+          f"and every history it blends, the exposures as of the date")
+    if held is not None:
+        folds = ", ".join(f"{a} into {b}" for a, b in sorted(inputs.scheme.folded.items()))
+        print(f"  the industry scheme is held fixed over the sample, as Barra fixes a model's "
+              f"industry factors: built once over the full sample's regression universe, "
+              f"{len(held.industries)} industries"
+              + (f", folded as given ({folds})" if merges else ""))
+    print(f"  each forecast taken to a daily scale (annual / {notes.frequency.periods_per_year:g})"
+          f" against the next trading day's {args.returns} return; the bias statistic is the "
+          f"standard deviation of realised / forecast, one if the forecasts are right, its 95% "
+          f"band about 1 +/- sqrt(2/T); over the whole test, over every 12-month ({BIAS_YEAR}-"
+          f"forecast) window with the windows' mean absolute deviation from one (MRAD), and "
+          f"every 21st forecast over the 21 days after it, bought and held")
+
+    # The guard: the forecast as of a date, rebuilt from the panel cut at that date through
+    # the run's own pipeline, the scheme held, is the full run's -- its inputs bit for bit
+    # through the date, and the model from them.
+    if args.bias_guard > 0:
+        picks = sorted(set(np.linspace(0, len(rows) - 1, args.bias_guard).round().astype(int)))
+        failures: list[str] = []
+        checked: list[str] = []
+        for i in picks:
+            t = rows[i]
+            cut = cut_panel(panel, t + 1)
+            cut_members = None if membership is None else membership[: t + 1]
+            rebuilt = model_inputs(cut, market[: t + 1], cut_members, args, codes=codes,
+                                   merges=merges, scheme=held)
+            pairs = {
+                "returns": (rebuilt.return_panel.returns, inputs.return_panel.returns[: t + 1]),
+                "exposures": (rebuilt.indices.values, inputs.indices.values[: t + 1]),
+                "weights": (rebuilt.weights,
+                            None if inputs.weights is None else inputs.weights[: t + 1]),
+                "capitalisations": (rebuilt.caps, inputs.caps[: t + 1]),
+                "periods": (rebuilt.periods,
+                            None if inputs.periods is None else inputs.periods[: t + 1]),
+            }
+            differ = [name for name, (a, b) in pairs.items() if not _same(a, b)]
+            if rebuilt.indices.names != inputs.indices.names:
+                differ.append("factor names")
+            (_, as_of), = cross_sectional_models_as_of(
+                inputs.return_panel, inputs.indices, [dates[t]], **options
+            )
+            direct = estimate_cross_sectional_model(
+                rebuilt.return_panel, rebuilt.indices,
+                **dict(options, capitalisations=rebuilt.caps, regression_weights=rebuilt.weights,
+                       membership=cut_members, periods=rebuilt.periods),
+            )
+            differ += [f"the model's {name}" for name in _models_differ(as_of, direct)]
+            checked.append(str(dates[t]))
+            if differ:
+                failures.append(f"{dates[t]}: {', '.join(differ)}")
+        if failures:
+            raise SystemExit("  the run stops: the forecast as of a date, rebuilt from the panel "
+                             "cut at it with the scheme held, is not the full run's -- "
+                             + "; ".join(failures))
+        print(f"  guard: as of {', '.join(checked)}, the model's inputs rebuilt from the panel "
+              f"cut at the date, the scheme held, equal the full run's through it to the bit -- "
+              f"returns, exposures, weights, capitalisations, periods -- and so do the forecasts "
+              f"made from them: covariance, exposures, specific risk, factor returns")
+
+    securities = panel.securities
+    groups = {} if held is None else {
+        name: np.array([held.assignment.get(code) == name for code in securities])
+        for name in held.industries
+    }
+    factor_rows = np.full((len(dates), len(model.factor_ids)), np.nan)
+    factor_rows[estimated_rows] = notes.factor_returns.returns
+    began = time.monotonic()
+
+    def progress(done: int, total: int) -> None:
+        if done % 50 == 0 or done == total:
+            elapsed = time.monotonic() - began
+            print(f"  [bias] {done} of {total} forecasts, {elapsed / 60:.1f} min, about "
+                  f"{(total - done) * elapsed / done / 60:.1f} min left", file=sys.stderr,
+                  flush=True)
+
+    models = cross_sectional_models_as_of(
+        inputs.return_panel, inputs.indices, [dates[t] for t in rows], **options
+    )
+    run = evaluate(
+        ((t, RiskForecast.from_model(m, securities)) for t, (_, m) in zip(rows, models)),
+        dates=dates, securities=securities, returns=inputs.return_panel.returns,
+        membership=(np.ones((len(dates), len(securities)), dtype=bool) if membership is None
+                    else membership),
+        capitalisations=inputs.caps, groups=groups, factor_returns=factor_rows,
+        progress=progress, total=len(rows),
+    )
+    minutes = (time.monotonic() - began) / 60
+    run_caps = inputs.caps[[at[d] for d in run.dates]]
+    print(f"  {len(run.dates)} refits in {minutes:.1f} min; the factor covariance as the engine "
+          f"uses it, repaired to positive semi-definite at the configured floor, on "
+          f"{int(run.repaired.sum())} of the {len(run.dates)} dates; {run.dropped} member-day(s) "
+          f"with a forecast and no next-day return left out of every portfolio formed that day")
+
+    def cells(stats, horizon):
+        rolled = stats.rolling
+        return (f"{stats.n:>5} {stats.statistic:>7.3f} {stats.verdict:>5}  "
+                f"{stats.low:.3f}-{stats.high:.3f}  {stats.mrad:>6.3f} "
+                f"{(rolled.min() if rolled.size else float('nan')):>6.3f} "
+                f"{(rolled.max() if rolled.size else float('nan')):>6.3f}   "
+                f"{horizon.n:>4} {horizon.statistic:>6.3f} {horizon.verdict:>5}")
+
+    header = (f"  {'':<34} {'T':>5} {'bias':>7} {'':>5}  {'95% band':>11}  {'MRAD':>6} "
+              f"{'min':>6} {'max':>6}   {'21-day: T':>9} {'bias':>6}")
+    print("\n  Portfolios, each formed at its forecast date and held to the next")
+    print(header)
+    for name in run.names[:4] + ("minimum variance, long-only",
+                                 "minimum variance, unconstrained"):
+        print(f"  {name:<34} " + cells(run.statistics(name), run.statistics(name, horizon=True)))
+    for label in ("long-only", "unconstrained"):
+        name = f"minimum variance, {label}"
+        row = run.names.index(name)
+        realised_vol = float(np.nanstd(run.realised[row], ddof=1) * np.sqrt(BIAS_YEAR))
+        forecast_vol = float(np.nanmedian(run.forecast[row]) * np.sqrt(BIAS_YEAR))
+        size = run.min_variance_held[label]
+        worst = float(run.min_variance_violation[label].max())
+        print(f"    {name}: {int(np.median(size))} names held at the median ({size.min()} to "
+              f"{size.max()}); forecast {forecast_vol:.2%} a year at the median, realised "
+              f"{realised_vol:.2%}; its KKT conditions met to {worst:.1e}")
+
+    if groups:
+        names = [model.factor_names[fid] for fid in model.factor_ids]
+        counts = held.counts()
+        print(f"\n  Each industry's members, cap-weighted -- the scheme's {len(groups)} as built "
+              f"-- against its factor's noise share in the full run (equal / weighted)")
+        print(f"  {'industry':<24} {'members':>7} {'T':>5} {'bias':>7} {'':>5}  {'MRAD':>6}   "
+              f"{'21-day':>6}   {'noise share':>14}")
+        biases, shares = [], []
+        for group in groups:
+            stats = run.statistics(f"industry: {group}")
+            horizon = run.statistics(f"industry: {group}", horizon=True)
+            if group in names:
+                k = names.index(group)
+                share = (f"{notes.noise_share[k]:>6.1%} / {notes.weighted_noise_share[k]:.1%}"
+                         if notes.weighted_noise_share else f"{notes.noise_share[k]:>6.1%}")
+                if notes.weighted_noise_share:
+                    biases.append(stats.statistic)
+                    shares.append(notes.weighted_noise_share[k])
+            else:
+                share = f"in {inputs.scheme.folded.get(group, '?')}"
+            print(f"  {group:<24} {counts.get(group, 0):>7} {stats.n:>5} {stats.statistic:>7.3f} "
+                  f"{stats.verdict:>5}  {stats.mrad:>6.3f}   {horizon.statistic:>6.3f}   "
+                  f"{share:>14}")
+        if len(biases) > 2:
+            print(f"  across the {len(biases)} with a factor of their own, the bias statistic's "
+                  f"correlation with the weighted noise share: "
+                  f"{float(np.corrcoef(biases, shares)[0, 1]):+.3f}")
+
+    for family in ("long-only", "long-short"):
+        stats = [run.statistics(n) for n in run.names if n.startswith(f"random {family} ")]
+        values = np.array([s.statistic for s in stats])
+        below = np.mean([s.verdict == "over" for s in stats])
+        above = np.mean([s.verdict == "under" for s in stats])
+        print(f"\n  Random portfolios, {family}, seed {run.random_seed}: {len(stats)} of 30 members"
+              + (" a side" if family == "long-short" else "")
+              + f", weights drawn once per member -- bias median {np.median(values):.3f}, "
+              f"p5 {np.percentile(values, 5):.3f}, p95 {np.percentile(values, 95):.3f}; below the "
+              f"band {below:.0%}, above it {above:.0%}; MRAD median "
+              f"{np.median([s.mrad for s in stats]):.3f}")
+
+    member_stats = []
+    for j, code in enumerate(securities):
+        stats = bias_statistics(run.member_forecast[:, j], run.member_realised[:, j])
+        if stats.n >= BIAS_MIN_FORECASTS:
+            member_stats.append((code, stats))
+    if not member_stats:
+        print(f"\n  Every member singly: none has {BIAS_MIN_FORECASTS} forecasts")
+        member_stats = None
+    if member_stats is not None:
+        _report_members(run, member_stats, securities, run_caps)
+    _report_eigenportfolios(run)
+    if args.bias_out:
+        _save_bias(args.bias_out, run, run_caps)
+
+
+def _report_members(run, member_stats, securities, caps) -> None:
+    """Every member singly: the distribution of their statistics, the shares outside the band,
+    by size, and the 21-day check."""
+    values = np.array([s.statistic for _, s in member_stats])
+    below = np.mean([s.verdict == "over" for _, s in member_stats])
+    above = np.mean([s.verdict == "under" for _, s in member_stats])
+    fat_below = np.mean([s.statistic < s.fat_band[0] for _, s in member_stats])
+    fat_above = np.mean([s.statistic > s.fat_band[1] for _, s in member_stats])
+    print(f"\n  Every member singly: {len(member_stats)} securities with {BIAS_MIN_FORECASTS} "
+          f"forecasts or more -- bias p5 {np.percentile(values, 5):.3f}, p25 "
+          f"{np.percentile(values, 25):.3f}, median {np.median(values):.3f}, p75 "
+          f"{np.percentile(values, 75):.3f}, p95 {np.percentile(values, 95):.3f}")
+    kurtosis = float(np.median([s.kurtosis for _, s in member_stats]))
+    print(f"    below its band (over-forecast) {below:.1%}, above it (under-forecast) {above:.1%}, "
+          f"against 2.5% each for right forecasts of normal returns; with each member's band "
+          f"widened for its own kurtosis (median {kurtosis:.1f}), {fat_below:.1%} and "
+          f"{fat_above:.1%}")
+    held = np.isfinite(run.member_forecast)
+    # Over the days each was held; a security never held has no mean, and is not ranked.
+    mean_caps = np.nansum(np.where(held, caps, 0.0), axis=0) / np.maximum(held.sum(axis=0), 1)
+    position = {code: j for j, code in enumerate(securities)}
+    ranked = sorted(member_stats, key=lambda item: -mean_caps[position[item[0]]])
+    quintiles = np.array_split(np.arange(len(ranked)), 5)
+    print("    median by capitalisation quintile over the test, largest first: "
+          + ", ".join(f"{np.median([ranked[i][1].statistic for i in q]):.3f}" for q in quintiles
+                      if q.size))
+    horizon_values = [
+        bias_statistics(run.member_horizon_forecast[:, j], run.member_horizon_realised[:, j])
+        for j in range(len(securities))
+    ]
+    horizon_values = np.array([s.statistic for s in horizon_values if s.n >= 12])
+    if horizon_values.size:
+        print(f"    21-day, non-overlapping, members with 12 outcomes or more: median "
+              f"{np.median(horizon_values):.3f}")
+
+
+def _report_eigenportfolios(run) -> None:
+    print("\n  The factor covariance's eigenportfolios against the next period's estimated factor "
+          "returns, by rank, 1 the largest eigenvalue")
+    print(f"  {'rank':>4} {'vol, median':>12} {'T':>5} {'bias':>7} {'':>5}  {'MRAD':>6}   "
+          f"{'21-day':>6}")
+    for k in range(run.eigen_forecast.shape[0]):
+        stats = bias_statistics(run.eigen_forecast[k], run.eigen_realised[k])
+        horizon = bias_statistics(run.eigen_horizon_forecast[k], run.eigen_horizon_realised[k])
+        vol = float(np.median(run.eigen_forecast[k]) * np.sqrt(BIAS_YEAR))
+        print(f"  {k + 1:>4} {vol:>12.2%} {stats.n:>5} {stats.statistic:>7.3f} "
+              f"{stats.verdict:>5}  {stats.mrad:>6.3f}   {horizon.statistic:>6.3f}")
+
+
+def _save_bias(path, run, caps) -> None:
+    """Every forecast and outcome, for comparing runs."""
+    np.savez_compressed(
+        path,
+        dates=np.array([str(d) for d in run.dates]),
+        horizon_dates=np.array([str(d) for d in run.horizon_dates]),
+        names=np.array(run.names),
+        securities=np.array(run.securities),
+        forecast=run.forecast, realised=run.realised,
+        horizon_forecast=run.horizon_forecast, horizon_realised=run.horizon_realised,
+        member_forecast=run.member_forecast, member_realised=run.member_realised,
+        member_horizon_forecast=run.member_horizon_forecast,
+        member_horizon_realised=run.member_horizon_realised,
+        eigen_forecast=run.eigen_forecast, eigen_realised=run.eigen_realised,
+        eigen_horizon_forecast=run.eigen_horizon_forecast,
+        eigen_horizon_realised=run.eigen_horizon_realised,
+        repaired=run.repaired,
+        held_long_only=run.min_variance_held["long-only"],
+        held_unconstrained=run.min_variance_held["unconstrained"],
+        caps=caps,
+    )
+    print(f"  every forecast and outcome written to {path}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("panel", nargs="?", default=DEFAULT_PANEL,
@@ -557,6 +1069,11 @@ def main(argv: list[str] | None = None) -> int:
                              "the factor returns, weighted as the covariance carries each "
                              "period's, and repair it to positive semi-definite where that is "
                              "needed; by default the covariance as estimated")
+    parser.add_argument("--leverage-correction", action="store_true",
+                        help="the correction's specific side: each member's residual divided by "
+                             "sqrt(1 - h), its leverage, in place of the uniform degrees-of-"
+                             "freedom inflation, and each specific return outside the "
+                             "regressions by sqrt(1 + h); by default the uniform inflation")
     parser.add_argument("--merge-industry", action="append", default=[], metavar="A=B",
                         help="fold industry A into industry B once the scheme is built, its "
                              "members labelled B; repeatable, and a chain resolves to its end "
@@ -568,6 +1085,26 @@ def main(argv: list[str] | None = None) -> int:
                              "default), or its residuals in the regressions alone; factor "
                              "returns and the specific risk model's fit keep to the "
                              "regressions either way")
+    parser.add_argument("--specific-half-life", type=float, default=None,
+                        help="weight each security's specific-risk history by this half-life "
+                             "in trading days, the blend told its effective number of "
+                             "observations; by default every specific return weighs the same")
+    parser.add_argument("--correlation-half-life", type=float, default=None,
+                        help="the two-half-life factor covariance: correlations on this "
+                             "half-life in trading days, volatilities on --half-life's, both "
+                             "Newey-West with --newey-west-lags; by default one half-life")
+    parser.add_argument("--bias", action="store_true",
+                        help="the out-of-sample bias statistics: the model refitted as of each "
+                             "trading day from its first with a year of factor returns, each "
+                             "forecast against the next day's return, over the index, the size "
+                             "pair, the industries, random and minimum-variance portfolios, "
+                             "every member singly and the eigenportfolios; about 15 minutes")
+    parser.add_argument("--bias-out", default=None, metavar="PATH",
+                        help="with --bias, every forecast and outcome to this .npz")
+    parser.add_argument("--bias-guard", type=int, default=5, metavar="N",
+                        help="with --bias, how many forecast dates the guard rebuilds the "
+                             "model's inputs on from the panel cut at the date, the scheme "
+                             "held (default 5: the first, the last and three between; 0 skips)")
     args = parser.parse_args(argv)
     # None leaves the window to the library.
     beta_months = (
@@ -656,18 +1193,27 @@ def main(argv: list[str] | None = None) -> int:
                           f"days' cross-sections")
             print(f"  - {when} {ticker} {claim}: {effect}")
 
+    # The industries' codes and folds are read first, so a bad --merge-industry stops the run
+    # before the descriptors are computed rather than after.
+    if args.merge_industry and not args.industries:
+        raise SystemExit("  --merge-industry needs --industries: there is no scheme to merge in")
+    merges = parse_merges(args.merge_industry)
+    codes: dict[str, str | None] | None = None
+    carried: list[str] = []
+    if args.industries:
+        codes, carried = industry_codes(panel, extras, args)
+    inputs = model_inputs(panel, market, membership, args, codes=codes, merges=merges)
+    descriptors, standardised, caps = inputs.descriptors, inputs.standardised, inputs.caps
+    weights, return_panel = inputs.weights, inputs.return_panel
+    blendable, unblended = inputs.blendable, inputs.unblended
+    use4_size = args.size_nonlinearity == "use4"
+    style_names, unlike, periods = inputs.styles.names, inputs.unlike, inputs.periods
+    scheme, indices = inputs.scheme, inputs.indices
+    forecast_row = len(panel.dates) - 1
+
     print("\nDescriptors")
-    descriptors, skipped = compute_descriptors(
-        panel,
-        market_returns=market,
-        beta_window_months=beta_months,
-        membership=membership,
-        min_coverage=args.min_coverage,
-        rstr_skip=args.rstr_skip,
-        beta_half_life=args.beta_half_life,
-    )
     print(f"  computed {len(descriptors.names)}: {', '.join(descriptors.names)}")
-    for name, reason in sorted(skipped.items()):
+    for name, reason in sorted(inputs.skipped.items()):
         print(f"  - {name}: {reason}")
     if args.rstr_skip:
         print(f"  RSTR sums its twelve-month window less the last {args.rstr_skip} trading "
@@ -717,12 +1263,6 @@ def main(argv: list[str] | None = None) -> int:
         for i in range(0, len(cells), 5):
             print(f"    {'  '.join(cells[i:i + 5])}")
 
-    caps = panel.market_capitalisation()
-    # Over the estimation universe: the members set each day's clip bounds, cap-weighted mean
-    # and equal-weighted dispersion, and every other security with a value is put on their
-    # scale. Barra's estimation universe against its coverage universe -- an ex-member still
-    # gets an exposure, but no say in what an exposure of one means.
-    standardised = descriptors.standardise(caps, membership=membership)
     if standardised.winsorised:
         print(f"  {standardised.winsorised:,} raw values winsorised before standardising")
     if membership is not None:
@@ -748,37 +1288,8 @@ def main(argv: list[str] | None = None) -> int:
     for row in thin:
         print(f"  {row['name']:<10} {'-':>6} {row['periods']:>8,}   too few usable periods")
 
-    # "Regression Weighting Scheme: Square root of capitalisation" appears on every model
-    # sheet in the Equity Risk Model Reference Guide. Equal weighting lets the smallest,
-    # noisiest names set the factor returns -- there are far more of them, and in a
-    # cap-weighted world almost none of the money. Needed before the risk indices, because
-    # Size Nonlinearity is orthogonalised against Size by them, and before the industries,
-    # because which securities a regression sees depends on them.
-    weights = None if args.equal_weight else np.sqrt(np.where(caps > 0.0, caps, np.nan))
-    return_panel = ReturnPanel(panel.dates, panel.securities, returns, Frequency.DAILY)
-
     print("\nRisk indices")
-    unblended = dict(UNBLENDED)
-    use4_size = args.size_nonlinearity == "use4"
-    if use4_size:
-        unblended["LCAPCB"] = ("USE3's raw cube; Size Nonlinearity is built from the Size "
-                               "exposure instead, USE4's way")
-    if args.size_nonlinearity == "none":
-        unblended["LCAPCB"] = ("USE3's raw cube; Size Nonlinearity is not in the model "
-                               "(--size-nonlinearity none)")
-    blendable = without(standardised, unblended)
-    available = [
-        name
-        for name in ("Volatility", "Momentum", "Size", "Size Nonlinearity",
-                     "Trading Activity")
-        if any(m in blendable.names for m in index_descriptors(name, args.size_nonlinearity))
-    ]
-    indices = build_risk_indices(
-        blendable, cap_weights=caps, indices=available, membership=membership,
-        size_nonlinearity=args.size_nonlinearity, regression_weights=weights,
-    )
-    style_names = indices.names
-    for name in indices.names:
+    for name in style_names:
         if name == "Size Nonlinearity" and use4_size:
             print(f"  {name:<20} the Size exposure cubed, standardised and clipped at +/-4, "
                   f"orthogonalised against Size with the regression weights, standardised "
@@ -790,97 +1301,23 @@ def main(argv: list[str] | None = None) -> int:
         if name in standardised.names:
             print(f"  - {name} is in no blend: {reason}")
 
-    # One definition per factor across the sample. blend_to_index averages whichever of an
-    # index's descriptors a security has, so a blend changes composition where one starts or
-    # stops having values, and a factor estimated on one blend and forecast on another is two
-    # factors under one name. So a period is estimated only if every index's blend in it, over
-    # the securities its regression holds, has exactly the descriptors the forecast's has.
-    # Worked out before the industries, whose universe is the estimated periods'.
-    design = regression_design(
-        return_panel, indices, regression_weights=weights, membership=membership
-    )
-    forecast_row = len(panel.dates) - 1
-    complete = np.isfinite(indices.values[forecast_row]).all(axis=1)[None, :]
-    period_rows = np.arange(design.lag, len(panel.dates))
-    unlike: dict[int, list[str]] = {}
-    for name in style_names:
-        read = blend_composition(
-            blendable, name, period_rows - design.lag, design.in_regression[period_rows],
-            size_nonlinearity=args.size_nonlinearity,
-        )
-        wanted = blend_composition(
-            blendable, name, [forecast_row], complete, size_nonlinearity=args.size_nonlinearity
-        )
-        for k, t in enumerate(period_rows):
-            have = [d for d, present in read.items() if present[k]]
-            missing = [d for d, present in wanted.items() if present[0] and not read[d][k]]
-            extra = [d for d in have if not wanted[d][0]]
-            if missing or extra:
-                unlike.setdefault(int(t), []).append(
-                    f"{name} from {', '.join(have) or 'nothing'}"
-                    + (f", without {', '.join(missing)}" if missing else "")
-                    + (f", with {', '.join(extra)} the forecast's lacks" if extra else "")
-                )
-    one_blend = np.array([t >= design.lag and t not in unlike for t in range(len(panel.dates))])
-    periods = None if args.mixed_blends else one_blend
-
-    scheme = None
-    if args.merge_industry and not args.industries:
-        raise SystemExit("  --merge-industry needs --industries: there is no scheme to merge in")
     if args.industries:
         print("\nIndustries")
-        codes: dict[str, str | None] = {}
         if on_securities:
-            # Each security's own latest record with a code, under its own tickers inside its
-            # spans: a ticker's record can be another security's.
-            codes = dict(extras["sic_codes"])
             missing = sorted(code for code, sic in codes.items() if not sic)
             print(f"  each security's SIC code from its own latest record with one: "
                   f"{len(codes) - len(missing)} of {len(codes)}"
                   + (f"; none for {', '.join(missing)}" if missing else ""))
-        else:
-            try:
-                client = PolygonClient(
-                    api_key=read_api_key(args.env), cache_dir=Path(args.cache)
-                )
-            except PolygonError as error:
-                raise SystemExit(f"  industries need the reference cache: {error}") from None
-            carried: list[str] = []
-            for ticker in panel.securities:
-                code, on = client.sic_code_any(ticker, panel.dates[-1])
-                codes[ticker] = code
-                if code and on != panel.dates[-1]:
-                    carried.append(ticker)
-            if carried:
-                # A company acquired mid-window has no record at the end of it, but its
-                # industry while it traded is exactly what the regression needs.
-                print(f"  {len(carried)} classification(s) carried from an earlier date "
-                      f"(delisted inside the window): {', '.join(sorted(carried)[:5])}")
-        # Counted over the securities in at least one estimated period's regression, not
-        # over the panel. A member that never enters a regression contributes nothing to its
-        # factor, and counting them let a four-member Unclassified -- one member present in
-        # most periods -- past a floor of five.
-        universe = regression_universe(
-            return_panel, indices, regression_weights=weights, membership=membership,
-            periods=periods,
-        )
+        elif carried:
+            # A company acquired mid-window has no record at the end of it, but its industry
+            # while it traded is exactly what the regression needs.
+            print(f"  {len(carried)} classification(s) carried from an earlier date "
+                  f"(delisted inside the window): {', '.join(sorted(carried)[:5])}")
         held = "" if membership is None else " while an index member"
-        print(f"  {len(universe)} of {panel.n_securities} securities are in at least one "
+        print(f"  {len(inputs.universe)} of {panel.n_securities} securities are in at least one "
               f"estimated period's regression{held}; every count below is over them")
-        scheme = build_scheme(codes, min_members=args.min_industry, universe=universe)
-        if args.merge_industry:
-            merges: dict[str, str] = {}
-            for spec in args.merge_industry:
-                source, sep, target = spec.partition("=")
-                if not sep or not source.strip() or not target.strip():
-                    raise SystemExit(f"  --merge-industry takes A=B, got {spec!r}")
-                merges[source.strip()] = target.strip()
-            before = scheme.counts()
-            try:
-                scheme = merge_industries(scheme, merges)
-            except ValueError as error:
-                raise SystemExit(f"  --merge-industry: {error}") from None
-            after = scheme.counts()
+        if merges:
+            before, after = inputs.built_scheme.counts(), scheme.counts()
             for source, target in sorted(scheme.folded.items()):
                 print(f"  {source} ({before[source]}) folded into {target}, which holds "
                       f"{after[target]}")
@@ -889,19 +1326,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {name:<24} {count:>4}")
         for note in scheme.qualifications():
             print(f"  - {note}")
-        indices = combine(
-            indices,
-            industry_exposures(
-                scheme, panel.dates, panel.securities, frequency=Frequency.DAILY
-            ),
-        )
 
     print("\nModel")
     print(f"  regression weights: "
           f"{'equal' if args.equal_weight else 'square root of capitalisation'}")
-    model = estimate_cross_sectional_model(
-        return_panel,
-        indices,
+    # One half-life for the whole matrix, Newey-West; or, with --correlation-half-life, the
+    # two-half-life estimator: correlations on that one, volatilities on --half-life's, both
+    # Newey-West, as USE4 corrects both horizons.
+    if args.correlation_half_life is None:
+        estimator = NeweyWestCovariance(lags=args.newey_west_lags, half_life=args.half_life)
+    else:
+        estimator = HorizonCovariance(
+            volatility_half_life=args.half_life,
+            correlation_half_life=args.correlation_half_life,
+            newey_west_lags=args.newey_west_lags,
+        )
+    options = dict(
         standardise=False,
         annualise=True,
         specific_risk="blend",
@@ -914,11 +1354,12 @@ def main(argv: list[str] | None = None) -> int:
         # Industries sum to one per security, which IS the unit column. Fitting a market
         # factor alongside them makes the design exactly singular, not nearly so.
         fit_market=scheme is None,
-        covariance_estimator=NeweyWestCovariance(
-            lags=args.newey_west_lags, half_life=args.half_life
-        ),
+        covariance_estimator=estimator,
         sampling_correction=args.sampling_correction,
+        leverage_correction=args.leverage_correction,
+        specific_half_life=args.specific_half_life,
     )
+    model = estimate_cross_sectional_model(return_panel, indices, **options)
     notes = model.notes
     print(f"  {model.describe()}")
     # Barra's convention, and the descriptor screen's: everything that defines period t's
@@ -927,6 +1368,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  each period regresses day t's returns on the exposures, weights and membership "
           f"of {'day t' if notes.lag == 0 else f'{notes.lag} trading day(s) earlier'}; the "
           f"forecast exposures are {panel.dates[-1]}'s")
+    if notes.leverage_correction:
+        print("  each member's residual divided by sqrt(1 - h), its own leverage, in place of "
+              "the uniform degrees-of-freedom inflation, and each specific return outside the "
+              "regressions by sqrt(1 + h): the sampling-error correction's specific side")
     print(f"  mean cross-sectional R-squared {notes.mean_r_squared:.3f}")
     print(f"  {len(notes.rank_deficient_periods)} collinear period(s) of {notes.n_periods} "
           f"estimated; {sum(notes.empty_periods)} factor-period(s) left out for having no "
@@ -1185,19 +1630,28 @@ def main(argv: list[str] | None = None) -> int:
     # read 5.7 percent with one member present in every period. The exactly-1 column can.
     print(f"\n  Over the {notes.n_periods} estimated periods. noise share is blind to a "
           f"one-member factor; the exactly-1 column is not.")
+    # Two noise shares (midoffice10 ruling 2). Equal: the mean sampling variance over the
+    # variance as estimated. Weighted: the sampling variance weighted as the covariance weights
+    # the periods -- the consistent ratio, and what the correction would subtract; in a regime
+    # noisier than the sample's average it is the larger.
+    print("  noise share, equal: the mean sampling variance over the variance as estimated; "
+          "weighted: each period's weighted as the covariance weights its return")
     # The mean is each factor's plain average return over the periods, annualised. Under
     # same-day exposures Size's was inflated: today's cap holds today's return.
-    print(f"  {'':<22} {'':>11} {'':>12} {'':>12}   periods with a member present")
-    print(f"  {'factor':<22} {'annual vol':>11} {'annual mean':>12} {'noise share':>12}   "
-          f"{'>=1':>6} {'exactly 1':>10} {'none':>6}")
+    print(f"  {'':<22} {'':>11} {'':>12} {'noise share':>19}   periods with a member present")
+    print(f"  {'factor':<22} {'annual vol':>11} {'annual mean':>12} {'equal':>8} "
+          f"{'weighted':>10}   {'>=1':>6} {'exactly 1':>10} {'none':>6}")
     volatilities = np.sqrt(np.diag(model.covariance.matrix))
     average = (
         notes.factor_returns.returns.mean(axis=0) * return_panel.frequency.periods_per_year
     )
     for i, fid in enumerate(model.factor_ids):
         share = notes.noise_share[i] if notes.noise_share else float("nan")
+        weighted_share = (
+            notes.weighted_noise_share[i] if notes.weighted_noise_share else float("nan")
+        )
         print(f"  {model.factor_names[fid]:<22} {volatilities[i]:>10.2%} {average[i]:>+11.2%} "
-              f"{share:>11.1%}   {notes.present_periods[i]:>6,} "
+              f"{share:>8.1%} {weighted_share:>10.1%}   {notes.present_periods[i]:>6,} "
               f"{notes.single_member_periods[i]:>10,} {notes.empty_periods[i]:>6,}")
     if notes.sampling_correction:
         # What the correction took off each factor: its vol as estimated, the share of that
@@ -1251,14 +1705,25 @@ def main(argv: list[str] | None = None) -> int:
         else:
             history = held_in.sum(axis=0)
             typical = int(np.median(history[history > 1]))
-        print(f"  {'':<17} the characteristics' weight in a blended forecast, at the median "
-              f"history of {typical} periods: {risk_model.model_weight(typical):.2%}")
+        if notes.specific_half_life is not None and notes.history_effective:
+            # A weighted history is worth its effective number of observations, and the blend
+            # is told that.
+            effective = float(np.median(list(notes.history_effective.values())))
+            print(f"  {'':<17} each history weighted by a half-life of "
+                  f"{notes.specific_half_life:g} trading days; the characteristics' weight in a "
+                  f"blended forecast, at the median effective history of {effective:.1f} "
+                  f"observations of {typical}: {risk_model.model_weight(effective):.2%}")
+        else:
+            print(f"  {'':<17} the characteristics' weight in a blended forecast, at the "
+                  f"median history of {typical} periods: {risk_model.model_weight(typical):.2%}")
 
     qualifications = model.qualifications()
     if qualifications:
         print("\nQualifications")
         for note in qualifications:
             print(f"  - {note}")
+    if args.bias:
+        bias_section(args, panel, market, membership, codes, merges, inputs, model, options)
     return 0
 
 
