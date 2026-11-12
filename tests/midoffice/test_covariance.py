@@ -441,6 +441,40 @@ def test_variance_ratio_volatilities_take_the_level_short_and_the_serial_correla
         same.volatility_estimator()
 
 
+def test_correlation_lags_give_the_correlations_their_own_and_the_volatilities_keep_theirs():
+    """The lags on the volatilities alone (midoffice13): the correlations the long window's
+    one-period ones, the volatilities still Newey-West -- or, with variance-ratio volatilities,
+    the ratio still at the volatilities' lags on its own window."""
+    returns, _ = _structured()
+    split = HorizonCovariance(12.0, 72.0, newey_west_lags=3, correlation_lags=0).estimate(returns)
+    volatilities = NeweyWestCovariance(lags=3, half_life=12.0).estimate(returns).matrix
+    correlations = ExponentialCovariance(72.0).estimate(returns).matrix
+    assert np.allclose(np.diag(split.matrix), np.diag(volatilities), rtol=1e-12, atol=0)
+    assert np.allclose(_correlation(split.matrix), _correlation(correlations), rtol=1e-12,
+                       atol=1e-15)
+    assert split.method == "Newey-West, 3 lag(s), split horizon, the correlations at 0 lag(s)"
+    # Their own lags given as the volatilities' are the plain split, to the bit.
+    assert np.array_equal(
+        HorizonCovariance(12.0, 72.0, newey_west_lags=3, correlation_lags=3)
+        .estimate(returns).matrix,
+        HorizonCovariance(12.0, 72.0, newey_west_lags=3).estimate(returns).matrix,
+    )
+    ratio = HorizonCovariance(12.0, 72.0, newey_west_lags=3, correlation_lags=0,
+                              ratio_half_life=72.0).estimate(returns).matrix
+    level = np.diag(ExponentialCovariance(12.0).estimate(returns).matrix)
+    lagged = np.diag(NeweyWestCovariance(lags=3, half_life=72.0).estimate(returns).matrix)
+    one_period = np.diag(ExponentialCovariance(72.0).estimate(returns).matrix)
+    assert np.allclose(np.diag(ratio), level * lagged / one_period, rtol=1e-12, atol=0)
+    assert np.allclose(_correlation(ratio), _correlation(correlations), rtol=1e-12, atol=1e-15)
+    # The diagonal is still the volatility estimator's, a quadratic form.
+    assert HorizonCovariance(12.0, 72.0, newey_west_lags=3, correlation_lags=0)\
+        .volatility_estimator() == NeweyWestCovariance(lags=3, half_life=12.0)
+    with pytest.raises(ValueError, match="needs newey_west_lags"):
+        HorizonCovariance(12.0, 72.0, correlation_lags=0)
+    with pytest.raises(ValueError, match="correlation_lags must be non-negative"):
+        HorizonCovariance(12.0, 72.0, newey_west_lags=3, correlation_lags=-1)
+
+
 def test_variance_ratio_volatilities_carry_less_of_the_lags_noise():
     """Why the variant: twenty lags of autocovariance on a 90-day half-life are mostly noise.
     Over AR(1) factors its variances scatter about the Bartlett target at under seven tenths

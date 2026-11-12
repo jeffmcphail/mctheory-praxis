@@ -219,13 +219,38 @@ class RiskForecast:
     specific: np.ndarray
     periods_per_year: float
     repair: PSDRepair = field(default_factory=lambda: PSDRepair(False, 0, 0.0, 0.0))
+    # The eigenportfolios to test, annualised eigenvalues and eigenvectors as columns, where they
+    # are not the covariance's own sorted afresh: under the eigenfactor risk adjustment the
+    # unadjusted covariance's, in its order, so rank k is one eigenfactor at every scale.
+    eigenbasis: tuple[np.ndarray, np.ndarray] | None = field(default=None, compare=False)
 
     @classmethod
-    def from_model(cls, model, securities: Sequence[str]) -> "RiskForecast":
-        """A `FactorModel`'s forecast on `securities`, in its factor order."""
+    def from_model(
+        cls, model, securities: Sequence[str], *, eigen_scale: float | None = None
+    ) -> "RiskForecast":
+        """A `FactorModel`'s forecast on `securities`, in its factor order. `eigen_scale` reads
+        it at another eigenfactor adjustment scale a than the model's own, from the
+        simulation its notes carry (`eigen.EigenBias`), one simulation serving every a; at 0,
+        the covariance unadjusted."""
         notes = model.notes
         periods = notes.frequency.periods_per_year if notes.annualised else 1.0
-        covariance, repair = nearest_psd(np.asarray(model.covariance.matrix, dtype=float))
+        scale = notes.frequency.variance_scale if notes.annualised else 1.0
+        eigen = getattr(notes, "eigen", None)
+        own = getattr(notes, "eigen_adjustment", None)
+        if eigen_scale is None or eigen_scale == (own or 0.0):
+            matrix = model.covariance.matrix
+            a = own
+        else:
+            if eigen is None:
+                raise ValueError("the model carries no eigenfactor simulation to read another "
+                                 "scale from; fit it with eigen_adjustment set")
+            matrix = eigen.adjusted(eigen_scale) * scale
+            a = eigen_scale
+        eigenbasis = None
+        if eigen is not None and a:
+            values, vectors = eigen.basis(a)
+            eigenbasis = (values * scale, vectors)
+        covariance, repair = nearest_psd(np.asarray(matrix, dtype=float))
         ids = list(model.factor_ids)
         exposures = np.full((len(securities), len(ids)), np.nan)
         specific = np.full(len(securities), np.nan)
@@ -235,7 +260,7 @@ class RiskForecast:
                 continue
             exposures[j] = [vector.exposures.get(fid, 0.0) for fid in ids]
             specific[j] = vector.specific.by_issuer[code]
-        return cls(covariance, exposures, specific, float(periods), repair)
+        return cls(covariance, exposures, specific, float(periods), repair, eigenbasis)
 
     @property
     def has_forecast(self) -> np.ndarray:
@@ -432,28 +457,8 @@ def _random_weights(keys, sizes, eligible_idx, count, long_short):
     return weights
 
 
-def evaluate(
-    forecasts: Iterable[tuple[int, RiskForecast]],
-    *,
-    dates: Sequence[date],
-    securities: Sequence[str],
-    returns: np.ndarray,
-    membership: np.ndarray,
-    capitalisations: np.ndarray,
-    groups: Mapping[str, np.ndarray],
-    factor_returns: np.ndarray,
-    smallest: int = 85,
-    largest: int = 50,
-    random_portfolios: int = 100,
-    random_names: int = 30,
-    seed: int = 11,
-    horizons: Sequence[int] = (21,),
-    progress: Callable[[int, int], None] | None = None,
-    total: int | None = None,
-) -> BiasRun:
-    """Every forecast in `forecasts` -- (row, forecast as of that row) on the panel's rows --
-    against the next row's outcome, and over each of `horizons` (in periods), for a standard
-    set of portfolios.
+class BiasTest:
+    """The out-of-sample test, one forecast at a time (`evaluate` runs it over an iterable).
 
     `returns`, `membership` and `capitalisations` are dates by securities on the panel's rows;
     `factor_returns` dates by factors on the same rows, nan where the period was not estimated.
@@ -468,58 +473,94 @@ def evaluate(
     - `random_portfolios` long-only portfolios of `random_names` members and as many long-short
       ones of `random_names` a side, each member's key and weight drawn once from `seed`, so a
       portfolio keeps its names from day to day but for the index's changes;
-    - every member singly, and the covariance's eigenportfolios against the factor returns.
+    - every member singly, and the covariance's eigenportfolios against the factor returns --
+      or the forecast's own `eigenbasis` where it carries one.
 
     Every forecast date is also tested over each horizon h past one period -- every portfolio
     and member bought at its forecast date and held h periods, the eigenportfolios against the
     sum of the h periods' factor returns -- the windows overlapping; every h-th from the first
-    is the windows apart (`BiasRun.statistics`).
+    is the windows apart (`BiasRun.statistics`). Several tests built alike draw the same random
+    portfolios, so forecasts of the same dates -- one simulation's eigenfactor adjustments at
+    several scales, say -- can be tested side by side in one pass.
     """
-    securities = tuple(securities)
-    n_secs = len(securities)
-    horizons = tuple(sorted({int(h) for h in horizons if int(h) > 1}))
-    n_factors = factor_returns.shape[1]
-    rng = np.random.default_rng(seed)
-    long_keys, long_sizes = rng.random((random_portfolios, n_secs)), rng.random(
-        (random_portfolios, n_secs)
-    )
-    short_keys, short_sizes = rng.random((random_portfolios, n_secs)), rng.random(
-        (random_portfolios, n_secs)
-    )
-    group_names = list(groups)
-    names = (
-        ["the index, cap-weighted", "the index, equally weighted",
-         f"smallest {smallest}, equally weighted", f"largest {largest}, equally weighted"]
-        + [f"industry: {g}" for g in group_names]
-        + ["minimum variance, long-only", "minimum variance, unconstrained"]
-        + [f"random long-only {i}" for i in range(random_portfolios)]
-        + [f"random long-short {i}" for i in range(random_portfolios)]
-    )
-    rows_seen: list[int] = []
-    out_forecast: list[np.ndarray] = []
-    out_realised: list[np.ndarray] = []
-    member_forecast: list[np.ndarray] = []
-    member_realised: list[np.ndarray] = []
-    eigen_forecast: list[np.ndarray] = []
-    eigen_realised: list[np.ndarray] = []
-    h_realised: dict[int, list[np.ndarray]] = {h: [] for h in horizons}
-    mh_realised: dict[int, list[np.ndarray]] = {h: [] for h in horizons}
-    eh_realised: dict[int, list[np.ndarray]] = {h: [] for h in horizons}
-    repaired: list[bool] = []
-    held = {"long-only": [], "unconstrained": []}
-    violation = {"long-only": [], "unconstrained": []}
-    dropped = 0
-    first_row: int | None = None
-    last_row = len(dates) - 1
-    for count, (t, forecast) in enumerate(forecasts):
-        if first_row is None:
-            first_row = t
-        if t >= last_row:
+
+    def __init__(
+        self,
+        *,
+        dates: Sequence[date],
+        securities: Sequence[str],
+        returns: np.ndarray,
+        membership: np.ndarray,
+        capitalisations: np.ndarray,
+        groups: Mapping[str, np.ndarray],
+        factor_returns: np.ndarray,
+        smallest: int = 85,
+        largest: int = 50,
+        random_portfolios: int = 100,
+        random_names: int = 30,
+        seed: int = 11,
+        horizons: Sequence[int] = (21,),
+    ) -> None:
+        self.dates = dates
+        self.securities = tuple(securities)
+        self.returns = returns
+        self.membership = membership
+        self.capitalisations = capitalisations
+        self.groups = groups
+        self.factor_returns = factor_returns
+        self.smallest = smallest
+        self.largest = largest
+        self.random_portfolios = random_portfolios
+        self.random_names = random_names
+        self.seed = seed
+        n_secs = len(self.securities)
+        self.n_secs = n_secs
+        self.horizons = tuple(sorted({int(h) for h in horizons if int(h) > 1}))
+        self.n_factors = factor_returns.shape[1]
+        rng = np.random.default_rng(seed)
+        self.long_keys, self.long_sizes = rng.random((random_portfolios, n_secs)), rng.random(
+            (random_portfolios, n_secs)
+        )
+        self.short_keys, self.short_sizes = rng.random((random_portfolios, n_secs)), rng.random(
+            (random_portfolios, n_secs)
+        )
+        self.group_names = list(groups)
+        self.names = (
+            ["the index, cap-weighted", "the index, equally weighted",
+             f"smallest {smallest}, equally weighted", f"largest {largest}, equally weighted"]
+            + [f"industry: {g}" for g in self.group_names]
+            + ["minimum variance, long-only", "minimum variance, unconstrained"]
+            + [f"random long-only {i}" for i in range(random_portfolios)]
+            + [f"random long-short {i}" for i in range(random_portfolios)]
+        )
+        self.rows_seen: list[int] = []
+        self.out_forecast: list[np.ndarray] = []
+        self.out_realised: list[np.ndarray] = []
+        self.member_forecast: list[np.ndarray] = []
+        self.member_realised: list[np.ndarray] = []
+        self.eigen_forecast: list[np.ndarray] = []
+        self.eigen_realised: list[np.ndarray] = []
+        self.h_realised: dict[int, list[np.ndarray]] = {h: [] for h in self.horizons}
+        self.mh_realised: dict[int, list[np.ndarray]] = {h: [] for h in self.horizons}
+        self.eh_realised: dict[int, list[np.ndarray]] = {h: [] for h in self.horizons}
+        self.repaired: list[bool] = []
+        self.held = {"long-only": [], "unconstrained": []}
+        self.violation = {"long-only": [], "unconstrained": []}
+        self.dropped = 0
+        self.first_row: int | None = None
+        self.last_row = len(dates) - 1
+
+    def add(self, t: int, forecast: RiskForecast) -> None:
+        """The forecast as of row t against what followed it."""
+        names, n_secs, returns = self.names, self.n_secs, self.returns
+        if self.first_row is None:
+            self.first_row = t
+        if t >= self.last_row:
             raise ValueError(f"the forecast as of row {t} has no next period to realise in")
         nxt = returns[t + 1]
-        caps = capitalisations[t]
-        known = membership[t] & forecast.has_forecast
-        dropped += int(np.count_nonzero(known & ~np.isfinite(nxt)))
+        caps = self.capitalisations[t]
+        known = self.membership[t] & forecast.has_forecast
+        self.dropped += int(np.count_nonzero(known & ~np.isfinite(nxt)))
         eligible = known & np.isfinite(nxt) & np.isfinite(caps) & (caps > 0.0)
         idx = np.flatnonzero(eligible)
         weights = np.zeros((len(names), n_secs))
@@ -527,75 +568,99 @@ def evaluate(
         weights[0] = cap_w / cap_w.sum()
         weights[1, idx] = 1.0 / idx.size
         by_cap = idx[np.argsort(caps[idx], kind="stable")]
-        weights[2, by_cap[:smallest]] = 1.0 / min(smallest, by_cap.size)
-        weights[3, by_cap[-largest:]] = 1.0 / min(largest, by_cap.size)
-        for g, group in enumerate(group_names):
-            mask = eligible & groups[group]
+        weights[2, by_cap[: self.smallest]] = 1.0 / min(self.smallest, by_cap.size)
+        weights[3, by_cap[-self.largest :]] = 1.0 / min(self.largest, by_cap.size)
+        for g, group in enumerate(self.group_names):
+            mask = eligible & self.groups[group]
             if mask.any():
                 weights[4 + g] = np.where(mask, caps, 0.0) / caps[mask].sum()
-        base = 4 + len(group_names)
+        base = 4 + len(self.group_names)
         for k, label in enumerate(("long-only", "unconstrained")):
             portfolio = minimum_variance(forecast, eligible, long_only=label == "long-only")
             weights[base + k] = portfolio.weights
-            held[label].append(portfolio.held)
-            violation[label].append(portfolio.violation)
+            self.held[label].append(portfolio.held)
+            self.violation[label].append(portfolio.violation)
         start = base + 2
-        weights[start : start + random_portfolios] = _random_weights(
-            long_keys, long_sizes, idx, random_names, False
+        weights[start : start + self.random_portfolios] = _random_weights(
+            self.long_keys, self.long_sizes, idx, self.random_names, False
         )
-        weights[start + random_portfolios :] = _random_weights(
-            short_keys, short_sizes, idx, random_names, True
+        weights[start + self.random_portfolios :] = _random_weights(
+            self.short_keys, self.short_sizes, idx, self.random_names, True
         )
         live = np.abs(weights).sum(axis=1) > 0.0
         variance = np.full(len(names), np.nan)
         variance[live] = forecast.variances(weights[live])
         scale = forecast.periods_per_year
-        out_forecast.append(np.sqrt(variance / scale))
-        out_realised.append(np.where(live, weights @ np.nan_to_num(nxt, nan=0.0), np.nan))
+        self.out_forecast.append(np.sqrt(variance / scale))
+        self.out_realised.append(np.where(live, weights @ np.nan_to_num(nxt, nan=0.0), np.nan))
         own = np.sqrt(forecast.security_variances() / scale)
-        member_forecast.append(np.where(eligible, own, np.nan))
-        member_realised.append(np.where(eligible, nxt, np.nan))
-        values, vectors = eigenportfolios(forecast.covariance)
-        eigen_forecast.append(np.sqrt(np.clip(values, 0.0, None) / scale))
-        eigen_realised.append(vectors.T @ factor_returns[t + 1])
-        repaired.append(forecast.repair.repaired)
-        for h in horizons:
-            if t + h > last_row:
-                h_realised[h].append(np.full(len(names), np.nan))
-                mh_realised[h].append(np.full(n_secs, np.nan))
-                eh_realised[h].append(np.full(n_factors, np.nan))
+        self.member_forecast.append(np.where(eligible, own, np.nan))
+        self.member_realised.append(np.where(eligible, nxt, np.nan))
+        if forecast.eigenbasis is None:
+            values, vectors = eigenportfolios(forecast.covariance)
+        else:
+            values, vectors = forecast.eigenbasis
+        self.eigen_forecast.append(np.sqrt(np.clip(values, 0.0, None) / scale))
+        self.eigen_realised.append(vectors.T @ self.factor_returns[t + 1])
+        self.repaired.append(forecast.repair.repaired)
+        for h in self.horizons:
+            if t + h > self.last_row:
+                self.h_realised[h].append(np.full(len(names), np.nan))
+                self.mh_realised[h].append(np.full(n_secs, np.nan))
+                self.eh_realised[h].append(np.full(self.n_factors, np.nan))
                 continue
             block = returns[t + 1 : t + 1 + h]
-            h_realised[h].append(np.where(live, buy_and_hold(block, weights), np.nan))
+            self.h_realised[h].append(np.where(live, buy_and_hold(block, weights), np.nan))
             growth = np.prod(1.0 + np.nan_to_num(block, nan=0.0), axis=0) - 1.0
-            mh_realised[h].append(np.where(eligible, growth, np.nan))
-            eh_realised[h].append(vectors.T @ np.nansum(factor_returns[t + 1 : t + 1 + h],
-                                                        axis=0))
-        rows_seen.append(t)
+            self.mh_realised[h].append(np.where(eligible, growth, np.nan))
+            self.eh_realised[h].append(
+                vectors.T @ np.nansum(self.factor_returns[t + 1 : t + 1 + h], axis=0)
+            )
+        self.rows_seen.append(t)
+
+    def result(self) -> BiasRun:
+        """Every forecast and outcome added so far."""
+        names, n_factors, n_secs, horizons = self.names, self.n_factors, self.n_secs, self.horizons
+
+        def stack(items, width):
+            return np.array(items).T if items else np.empty((width, 0))
+
+        return BiasRun(
+            dates=tuple(self.dates[t] for t in self.rows_seen),
+            names=tuple(names),
+            forecast=stack(self.out_forecast, len(names)),
+            realised=stack(self.out_realised, len(names)),
+            member_forecast=np.array(self.member_forecast),
+            member_realised=np.array(self.member_realised),
+            eigen_forecast=stack(self.eigen_forecast, n_factors),
+            eigen_realised=stack(self.eigen_realised, n_factors),
+            horizons=horizons,
+            horizon_realised={h: stack(self.h_realised[h], len(names)) for h in horizons},
+            member_horizon_realised={h: np.array(self.mh_realised[h]).reshape(-1, n_secs)
+                                     for h in horizons},
+            eigen_horizon_realised={h: stack(self.eh_realised[h], n_factors) for h in horizons},
+            repaired=np.array(self.repaired, dtype=bool),
+            min_variance_held={k: np.array(v) for k, v in self.held.items()},
+            min_variance_violation={k: np.array(v) for k, v in self.violation.items()},
+            dropped=self.dropped,
+            securities=self.securities,
+            random_seed=self.seed,
+        )
+
+
+def evaluate(
+    forecasts: Iterable[tuple[int, RiskForecast]],
+    *,
+    progress: Callable[[int, int], None] | None = None,
+    total: int | None = None,
+    **test,
+) -> BiasRun:
+    """Every forecast in `forecasts` -- (row, forecast as of that row) on the panel's rows --
+    against the next row's outcome, and over each of `horizons` (in periods), for a standard
+    set of portfolios: a `BiasTest` built from the rest of the arguments, run over them."""
+    run = BiasTest(**test)
+    for count, (t, forecast) in enumerate(forecasts):
+        run.add(t, forecast)
         if progress is not None:
             progress(count + 1, total or 0)
-
-    def stack(items, width):
-        return np.array(items).T if items else np.empty((width, 0))
-
-    return BiasRun(
-        dates=tuple(dates[t] for t in rows_seen),
-        names=tuple(names),
-        forecast=stack(out_forecast, len(names)),
-        realised=stack(out_realised, len(names)),
-        member_forecast=np.array(member_forecast),
-        member_realised=np.array(member_realised),
-        eigen_forecast=stack(eigen_forecast, n_factors),
-        eigen_realised=stack(eigen_realised, n_factors),
-        horizons=horizons,
-        horizon_realised={h: stack(h_realised[h], len(names)) for h in horizons},
-        member_horizon_realised={h: np.array(mh_realised[h]).reshape(-1, n_secs)
-                                 for h in horizons},
-        eigen_horizon_realised={h: stack(eh_realised[h], n_factors) for h in horizons},
-        repaired=np.array(repaired, dtype=bool),
-        min_variance_held={k: np.array(v) for k, v in held.items()},
-        min_variance_violation={k: np.array(v) for k, v in violation.items()},
-        dropped=dropped,
-        securities=securities,
-        random_seed=seed,
-    )
+    return run.result()

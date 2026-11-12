@@ -7,6 +7,7 @@ factor's inverse.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import date, timedelta
 
 import numpy as np
@@ -14,6 +15,7 @@ import pytest
 from scipy.optimize import minimize
 
 from praxis.midoffice.model.bias import (
+    BiasTest,
     RiskForecast,
     bias_band,
     bias_statistic,
@@ -269,3 +271,86 @@ def test_a_member_with_no_next_return_is_left_out_of_that_days_portfolios_and_co
     assert np.isnan(run.member_forecast[10, 5]) and np.isfinite(run.member_forecast[11, 5])
     with pytest.raises(ValueError, match="no next period"):
         _run(tuple(world), [59])
+
+
+# ------------------------------------------------- one pass, several tests (midoffice13)
+
+
+def test_tests_built_alike_draw_the_same_portfolios_and_evaluate_is_one_test_run():
+    world = _known_world(n_dates=60, n_secs=40, seed=19)
+    forecast, dates, securities, returns, membership, caps, groups, f = world
+    setup = dict(dates=dates, securities=securities, returns=returns, membership=membership,
+                 capitalisations=caps, groups=groups, factor_returns=f, smallest=20, largest=20,
+                 random_portfolios=20, random_names=15, horizons=(5,))
+    one, two = BiasTest(**setup), BiasTest(**setup)
+    for t in range(0, 59):
+        one.add(t, forecast)
+        two.add(t, forecast)
+    a, b = one.result(), two.result()
+    whole = evaluate(((t, forecast) for t in range(0, 59)), **setup)
+    for run in (b, whole):
+        assert np.array_equal(run.forecast, a.forecast, equal_nan=True)
+        assert np.array_equal(run.realised, a.realised, equal_nan=True)
+        assert np.array_equal(run.horizon_realised[5], a.horizon_realised[5], equal_nan=True)
+        assert run.names == a.names
+
+
+def test_a_test_reads_the_eigenportfolios_from_a_forecasts_own_eigenbasis():
+    """Under the eigenfactor adjustment a forecast carries the unadjusted covariance's
+    eigenbasis, so rank k is one eigenfactor at every scale: its forecast from the basis's
+    eigenvalue, its outcome from the basis's vector; the portfolios still read the covariance."""
+    world = _known_world(n_dates=80, n_secs=40, seed=21)
+    forecast = world[0]
+    values, vectors = eigenportfolios(forecast.covariance)
+    scaled = dataclasses.replace(forecast, eigenbasis=(values * 4.0, vectors))
+    plain = _run(world, range(0, 79), horizons=(5,))
+    run = _run((scaled, *world[1:]), range(0, 79), horizons=(5,))
+    assert np.allclose(run.eigen_forecast, 2.0 * plain.eigen_forecast, rtol=1e-12)
+    assert np.allclose(run.eigen_realised, plain.eigen_realised, rtol=1e-12)
+    assert np.allclose(run.eigen_horizon_realised[5], plain.eigen_horizon_realised[5],
+                       rtol=1e-12, equal_nan=True)
+    assert np.array_equal(run.forecast, plain.forecast, equal_nan=True)
+
+
+def _small_model(eigen_adjustment=None):
+    from praxis.midoffice.model.characteristics import CharacteristicPanel
+    from praxis.midoffice.model.covariance import ExponentialCovariance
+    from praxis.midoffice.model.crosssectional import estimate_cross_sectional_model
+    from praxis.midoffice.model.panel import Frequency, ReturnPanel
+
+    rng = np.random.default_rng(23)
+    n_periods, n_secs = 120, 40
+    dates = tuple(date(2020, 1, 1) + timedelta(days=i) for i in range(n_periods))
+    secs = tuple(f"S{j:02d}" for j in range(n_secs))
+    chars = CharacteristicPanel(dates, secs, ("C0", "C1", "C2"),
+                                rng.normal(size=(n_periods, n_secs, 3)), Frequency.DAILY)
+    returns = ReturnPanel(dates, secs, rng.normal(scale=0.01, size=(n_periods, n_secs)),
+                          Frequency.DAILY)
+    model = estimate_cross_sectional_model(
+        returns, chars, covariance_estimator=ExponentialCovariance(30.0), min_securities=10,
+        eigen_adjustment=eigen_adjustment, eigen_draws=50,
+    )
+    return model, secs
+
+
+def test_a_forecast_at_another_eigen_scale_reads_the_models_simulation():
+    model, secs = _small_model(eigen_adjustment=0.0)
+    eigen = model.notes.eigen
+    plain = RiskForecast.from_model(model, secs)
+    assert plain.eigenbasis is None
+    scaled = RiskForecast.from_model(model, secs, eigen_scale=2.0)
+    assert np.allclose(scaled.covariance, eigen.adjusted(2.0) * 252.0, rtol=1e-12)
+    values, vectors = scaled.eigenbasis
+    assert np.allclose(values, eigen.basis(2.0)[0] * 252.0) and vectors is eigen.vectors
+    assert np.array_equal(scaled.exposures, plain.exposures, equal_nan=True)
+    assert np.array_equal(scaled.specific, plain.specific, equal_nan=True)
+    # At the model's own scale, the model's covariance itself.
+    same = RiskForecast.from_model(model, secs, eigen_scale=0.0)
+    assert np.array_equal(same.covariance, plain.covariance) and same.eigenbasis is None
+    # A model adjusted itself carries its own basis.
+    adjusted, _ = _small_model(eigen_adjustment=2.0)
+    own = RiskForecast.from_model(adjusted, secs)
+    assert np.allclose(own.covariance, scaled.covariance, rtol=1e-12)
+    assert np.allclose(own.eigenbasis[0], values)
+    with pytest.raises(ValueError, match="no eigenfactor simulation"):
+        RiskForecast.from_model(_small_model()[0], secs, eigen_scale=1.0)

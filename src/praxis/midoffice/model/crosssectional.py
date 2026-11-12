@@ -105,6 +105,7 @@ from .covariance import (
     NeweyWestCovariance,
     SampleCovariance,
 )
+from .eigen import EIGEN_DRAWS, EIGEN_SEED, EigenBias, eigen_bias
 from .panel import FactorReturns, Frequency, ReturnPanel
 from .specificrisk import RESIDUAL_SPREADS, SpecificRiskModel, estimate_specific_risk_model
 from .timeseries import MIN_OBSERVATIONS, FactorModel
@@ -181,6 +182,10 @@ class CrossSectionalNotes:
     leverage_correction: bool = False
     leverage_one: int = 0
     leverage_unweighted: int = 0
+    # The eigenfactor risk adjustment: its scale a, None when off and 0 when the bias was
+    # simulated and nothing scaled; and the simulation, on the covariance before annualising.
+    eigen_adjustment: float | None = None
+    eigen: EigenBias | None = field(default=None, repr=False, compare=False)
     factor_names: tuple[str, ...] = ()
     covariance: CovarianceEstimate | None = None
     # Per factor, over the estimated periods: how many had at least one security in the
@@ -411,6 +416,15 @@ class CrossSectionalNotes:
                 + (f"; {self.sampling_filled} period(s) without a sampling covariance of "
                    f"their own were given the others' weighted mean"
                    if self.sampling_filled else "")
+            )
+        if self.eigen is not None and self.eigen_adjustment:
+            gamma = self.eigen.scales(self.eigen_adjustment)
+            out.append(
+                f"the factor covariance's eigenvalues are scaled by the eigenfactor risk "
+                f"adjustment, a = {self.eigen_adjustment:g}, from {self.eigen.draws} simulated "
+                f"histories: each eigenfactor's volatility multiplied by "
+                f"{float(gamma.min()):.3f} to {float(gamma.max()):.3f}, the smallest "
+                f"eigenvalue's by {float(gamma[-1]):.3f}"
             )
         if self.leverage_correction and not self.sampling_correction:
             out.append(
@@ -878,6 +892,9 @@ def estimate_cross_sectional_model(
     sampling_correction: bool = False,
     leverage_correction: bool = False,
     specific_half_life: float | None = None,
+    eigen_adjustment: float | None = None,
+    eigen_draws: int = EIGEN_DRAWS,
+    eigen_seed: int = EIGEN_SEED,
 ) -> FactorModel:
     """Regress returns cross-sectionally on characteristics, period by period.
 
@@ -977,7 +994,27 @@ def estimate_cross_sectional_model(
     half_life) in periods back from the last date, and tells the blend the history's effective
     number of observations, (sum w)^2 / sum w^2, in place of its count: the weight a history
     gets falls as it is discounted. None, the default, weights every return equally.
+
+    `eigen_adjustment` is the eigenfactor risk adjustment's scale a (`eigen.eigen_bias`): the
+    factor covariance's eigenvalues scaled by (a (lambda - 1) + 1)^2, lambda by rank from
+    `eigen_draws` histories simulated from the covariance over its own number of periods and
+    re-estimated by `covariance_estimator`, seeded by `eigen_seed`. At 0 the bias is simulated
+    and nothing scaled -- the covariance is unchanged to the bit, and the notes carry the
+    simulation for any other a. The noise shares stay the estimate's. It and the sampling-error
+    correction are alternative remedies for estimation error, and are not combined. None, the
+    default, is no simulation.
     """
+    if eigen_adjustment is not None:
+        if not eigen_adjustment >= 0.0:
+            raise ValueError(
+                f"eigen_adjustment must be non-negative, or None for no adjustment; got "
+                f"{eigen_adjustment!r}"
+            )
+        if sampling_correction:
+            raise ValueError(
+                "the eigenfactor risk adjustment and the sampling-error correction are "
+                "alternative remedies for the covariance's estimation error; use one"
+            )
     if specific_half_life is not None and not specific_half_life > 0.0:
         raise ValueError(
             f"specific_half_life must be positive, or None for equal weights; got "
@@ -1250,6 +1287,16 @@ def estimate_cross_sectional_model(
         subtracted = (estimate.matrix - bias) * scale
         covariance_matrix, psd_repair = nearest_psd(subtracted)
         corrected = tuple(float(v) for v in np.diag(subtracted))
+    # The eigenfactor risk adjustment, on the estimate before annualising: its bias by
+    # simulation, through the estimator itself, and the eigenvalues scaled unless a is 0.
+    eigen: EigenBias | None = None
+    if eigen_adjustment is not None:
+        eigen = eigen_bias(
+            estimate.matrix, estimator, factors.returns.shape[0], draws=eigen_draws,
+            seed=eigen_seed,
+        )
+        if eigen_adjustment > 0.0:
+            covariance_matrix = eigen.adjusted(eigen_adjustment) * scale
     mean_sampling = (
         tuple(float(v) for v in (sampling / sampling_periods) * scale)
         if sampling_periods
@@ -1434,6 +1481,8 @@ def estimate_cross_sectional_model(
         leverage_correction=leverage_correction,
         leverage_one=leverage_one,
         leverage_unweighted=leverage_unweighted,
+        eigen_adjustment=eigen_adjustment,
+        eigen=eigen,
         factor_names=tuple(names),
         covariance=estimate,
         present_periods=tuple(int(v) for v in periods_present),

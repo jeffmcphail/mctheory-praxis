@@ -39,9 +39,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from praxis.midoffice.model.bias import (  # noqa: E402
     OVERLAP_DRAWS,
+    BiasTest,
     RiskForecast,
     bias_statistics,
-    evaluate,
 )
 from praxis.midoffice.model.characteristics import CharacteristicPanel  # noqa: E402
 from praxis.midoffice.model.covariance import (  # noqa: E402
@@ -65,6 +65,7 @@ from praxis.midoffice.model.descriptors import (  # noqa: E402
     market_model_window,
     risk_index_members,
 )
+from praxis.midoffice.model.eigen import EIGEN_DRAWS  # noqa: E402
 from praxis.midoffice.model.panel import Frequency, ReturnPanel  # noqa: E402
 from praxis.midoffice.model.specificrisk import RESIDUAL_SPREADS  # noqa: E402
 from praxis.midoffice.refdata import sp500  # noqa: E402
@@ -106,11 +107,12 @@ CORRELATION_HALF_LIFE = 504.0
 BIM301S's two years. `--correlation-half-life none` is one half-life for the whole matrix, as
 before."""
 
-HORIZON = 11
-"""The model's horizon in trading days (midoffice11's ruling 3). Newey-West with Bartlett weights
-at L lags is exactly the per-day variance of (L + 1)-day returns, so the 10 lags the model has
-always used are an 11-day horizon; `--horizon H` puts H - 1 lags on the volatilities and the
-correlations alike. The default stays 11 until midoffice12's measurements are in."""
+HORIZON = 1
+"""The model's horizon in trading days: one day (midoffice12's ruling 1), the factor covariance
+the one-day covariance. Newey-West with Bartlett weights at L lags is exactly the per-day variance
+of (L + 1)-day returns (midoffice11's ruling 3), so `--horizon H` puts H - 1 lags on the
+volatilities and the correlations alike -- a reporting view of broad portfolios' risk over a
+holding period of H days, not the model (midoffice12's ruling 2)."""
 
 
 def half_life_or_none(text: str) -> float | None:
@@ -131,6 +133,17 @@ def horizon_list(text: str) -> tuple[int, ...]:
         raise argparse.ArgumentTypeError(f"horizons are whole trading days; got {text!r}")
     if not values or min(values) < 1:
         raise argparse.ArgumentTypeError(f"each horizon must be at least one day; got {text!r}")
+    return values
+
+
+def scale_list(text: str) -> tuple[float, ...]:
+    """Eigenfactor adjustment scales, comma-separated, each positive."""
+    try:
+        values = tuple(sorted({float(part) for part in text.split(",") if part.strip()}))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"scales are numbers; got {text!r}")
+    if not values or min(values) <= 0.0:
+        raise argparse.ArgumentTypeError(f"each scale must be positive; got {text!r}")
     return values
 
 
@@ -831,6 +844,18 @@ def bias_section(
     if others:
         print(f"  also evaluated at {', '.join(str(h) for h in others)} trading days "
               f"(--bias-horizons), the same way, summarised after the eigenportfolios")
+    # The eigenfactor risk adjustment at other scales (midoffice13): the refits simulate the
+    # bias -- at a = 0 if the model scales nothing itself -- and one simulation a date serves
+    # every scale, each tested beside the model.
+    scales = [a for a in args.bias_eigen_scales if a != (options.get("eigen_adjustment") or 0.0)]
+    if scales and options.get("eigen_adjustment") is None:
+        options = dict(options, eigen_adjustment=0.0, eigen_draws=args.eigen_draws)
+    if scales:
+        print(f"  the eigenfactor risk adjustment tested beside the model at a = "
+              f"{', '.join(f'{a:g}' for a in scales)}: on each forecast date its bias simulated "
+              f"once, {options['eigen_draws']} histories from the day's factor covariance "
+              f"re-estimated by its own estimator, every scale read from it -- the model's own "
+              f"a = {options['eigen_adjustment']:g}")
 
     # The guard: the forecast as of a date, rebuilt from the panel cut at that date through
     # the run's own pipeline, the scheme held, is the full run's -- its inputs bit for bit
@@ -897,20 +922,36 @@ def bias_section(
     models = cross_sectional_models_as_of(
         inputs.return_panel, inputs.indices, [dates[t] for t in rows], **options
     )
-    run = evaluate(
-        ((t, RiskForecast.from_model(m, securities)) for t, (_, m) in zip(rows, models)),
+    setup = dict(
         dates=dates, securities=securities, returns=inputs.return_panel.returns,
         membership=(np.ones((len(dates), len(securities)), dtype=bool) if membership is None
                     else membership),
         capitalisations=inputs.caps, groups=groups, factor_returns=factor_rows,
-        horizons=evaluated, progress=progress, total=len(rows),
+        horizons=evaluated,
     )
+    test = BiasTest(**setup)
+    variants = {a: BiasTest(**setup) for a in scales}
+    simulated: list[tuple[np.ndarray, np.ndarray, float]] = []
+    for count, (t, (_, fitted)) in enumerate(zip(rows, models)):
+        test.add(t, RiskForecast.from_model(fitted, securities))
+        for a, variant in variants.items():
+            variant.add(t, RiskForecast.from_model(fitted, securities, eigen_scale=a))
+        if fitted.notes.eigen is not None:
+            eigen = fitted.notes.eigen
+            simulated.append((eigen.bias, eigen.standard_error, eigen.seconds))
+        progress(count + 1, len(rows))
+    run = test.result()
+    eigen_runs = {a: variant.result() for a, variant in variants.items()}
     minutes = (time.monotonic() - began) / 60
     run_caps = inputs.caps[[at[d] for d in run.dates]]
-    print(f"  {len(run.dates)} refits in {minutes:.1f} min; the factor covariance as the engine "
-          f"uses it, repaired to positive semi-definite at the configured floor, on "
-          f"{int(run.repaired.sum())} of the {len(run.dates)} dates; {run.dropped} member-day(s) "
-          f"with a forecast and no next-day return left out of every portfolio formed that day")
+    print(f"  {len(run.dates)} refits in {minutes:.1f} min"
+          + (f", {60 * minutes / len(run.dates):.2f} s a refit with its eigenfactor simulation "
+             f"({np.mean([s for _, _, s in simulated]):.2f} s of it) and {len(scales) + 1} "
+             f"tests" if simulated else "")
+          + f"; the factor covariance as the engine uses it, repaired to positive semi-definite "
+          f"at the configured floor, on {int(run.repaired.sum())} of the {len(run.dates)} dates; "
+          f"{run.dropped} member-day(s) with a forecast and no next-day return left out of every "
+          f"portfolio formed that day")
 
     def summary(stats) -> str:
         rolled = stats.rolling
@@ -1018,8 +1059,11 @@ def bias_section(
     _report_eigenportfolios(run, horizon)
     if run.horizons and set(run.horizons) != {horizon}:
         _report_horizons(run, groups, member_stats or [], securities)
+    if eigen_runs:
+        _report_eigen(run, eigen_runs, simulated, options["eigen_adjustment"], groups,
+                      member_stats or [], securities)
     if args.bias_out:
-        _save_bias(args.bias_out, run, run_caps, horizon)
+        _save_bias(args.bias_out, run, run_caps, horizon, eigen_runs, simulated)
 
 
 def ordinal(n: int) -> str:
@@ -1157,15 +1201,137 @@ def _report_horizons(run, groups, member_stats, securities) -> None:
         print(f"  {label:<34}" + "".join(f" {cell:>13}" for cell in cells))
 
 
-def _save_bias(path, run, caps, horizon) -> None:
+EIGEN_CRITERION = ("half the eigenportfolios' mean abs(bias - 1) over every rank, half the "
+                   "minimum-variance portfolios', long-only and unconstrained")
+"""How a is chosen (midoffice13's brief): at one day, by the eigenportfolios and the
+minimum-variance portfolios, on the test's first half; the second half is reported beside it."""
+
+
+def _eigen_reading(run, part, groups, columns) -> dict[str, float]:
+    """One test's one-day statistics over a part of its forecast dates (a slice)."""
+    names = list(run.names)
+
+    def stat(row):
+        return bias_statistics(run.forecast[row, part], run.realised[row, part]).statistic
+
+    k = run.eigen_forecast.shape[0]
+    eigen = np.array([bias_statistics(run.eigen_forecast[r, part],
+                                      run.eigen_realised[r, part]).statistic for r in range(k)])
+    out = {f"eigenportfolios {lo + 1}-{hi}, mean": float(eigen[lo:hi].mean())
+           for lo, hi in ((0, 5), (5, 10), (10, 15), (15, 20), (20, k))}
+    out["eigenportfolios, mean abs(bias - 1)"] = float(np.mean(np.abs(eigen - 1.0)))
+    optimiser = [stat(names.index(f"minimum variance, {label}"))
+                 for label in ("long-only", "unconstrained")]
+    out["minimum variance, long-only"], out["minimum variance, unconstrained"] = optimiser
+    out["minimum variance, mean abs(bias - 1)"] = float(np.mean(np.abs(np.array(optimiser) - 1)))
+    out["the criterion"] = 0.5 * (out["eigenportfolios, mean abs(bias - 1)"]
+                                  + out["minimum variance, mean abs(bias - 1)"])
+    for name in run.names[:4]:
+        out[name] = stat(names.index(name))
+    members = [bias_statistics(run.member_forecast[part, j], run.member_realised[part, j])
+               for j in columns]
+    members = np.array([s.statistic for s in members if s.n >= BIAS_MIN_FORECASTS])
+    out["members, median"] = float(np.median(members)) if members.size else float("nan")
+    out["members, mean abs(bias - 1)"] = (float(np.mean(np.abs(members - 1.0)))
+                                          if members.size else float("nan"))
+    if groups:
+        out["industries, mean abs(bias - 1)"] = float(np.mean(
+            [abs(stat(names.index(f"industry: {g}")) - 1.0) for g in groups]))
+    for family in ("long-only", "long-short"):
+        rows = [i for i, n in enumerate(names) if n.startswith(f"random {family} ")]
+        out[f"random {family}, median"] = float(np.median([stat(i) for i in rows]))
+    return out
+
+
+def _report_eigen(run, eigen_runs, simulated, own, groups, member_stats, securities) -> None:
+    """The eigenfactor risk adjustment at every scale tested, at one day: what it is for -- the
+    eigenportfolios and the minimum-variance portfolios -- and what it should leave alone, over
+    the whole test and each half; a chosen on the first half."""
+    lam = np.array([b for b, _, _ in simulated])
+    errors = np.array([e for _, e, _ in simulated])
+    seconds = np.array([s for _, _, s in simulated])
+    k = lam.shape[1]
+    print(f"\n  The eigenfactor risk adjustment (Menchero, Wang and Orr; USE4) at one day: each "
+          f"eigenvalue of the day's factor covariance scaled by (a (lambda - 1) + 1)^2, the "
+          f"eigenportfolios tested in the unadjusted covariance's eigenbasis; the simulation "
+          f"{seconds.mean():.2f} s a refit ({seconds.min():.2f} to {seconds.max():.2f})")
+    print(f"  lambda by rank over the {len(lam)} dates, the mean (min to max): "
+          + ", ".join(f"{r + 1}: {lam[:, r].mean():.3f} ({lam[:, r].min():.3f}-"
+                      f"{lam[:, r].max():.3f})" for r in (0, 1, 2, 4, 9, 14, 19))
+          + ", " + ", ".join(f"{r + 1}: {lam[:, r].mean():.3f}" for r in range(20, k))
+          + f"; its Monte Carlo standard error at most {errors.max():.4f}, "
+          f"{np.median(errors.max(axis=1)):.4f} at the median date's worst rank")
+    tests = {own: run, **eigen_runs}
+    order = sorted(tests)
+    n = len(run.dates)
+    half = n // 2
+    parts = {
+        f"the whole test ({run.dates[0]} to {run.dates[-1]}, {n})": slice(0, n),
+        f"the first half ({run.dates[0]} to {run.dates[half - 1]}, {half})": slice(0, half),
+        f"the second half ({run.dates[half]} to {run.dates[-1]}, {n - half})": slice(half, n),
+    }
+    columns = [list(securities).index(code) for code, _ in member_stats]
+    readings = {label: {a: _eigen_reading(tests[a], part, groups, columns) for a in order}
+                for label, part in parts.items()}
+    rows = list(next(iter(next(iter(readings.values())).values())))
+    for label, by_scale in readings.items():
+        print(f"\n  {label}, by a ({own:g} the model):")
+        print(f"  {'':<42}" + "".join(f" {f'a = {a:g}':>9}" for a in order))
+        for row in rows:
+            print(f"  {row:<42}" + "".join(f" {by_scale[a][row]:>9.3f}" for a in order))
+    first, second = list(readings.values())[1], list(readings.values())[2]
+    chosen = min(order, key=lambda a: first[a]["the criterion"])
+    print(f"\n  a chosen on the first half by the criterion -- {EIGEN_CRITERION}: a = "
+          f"{chosen:g} ({first[chosen]['the criterion']:.3f}; the model's "
+          f"{first[own]['the criterion']:.3f}); on the second half it reads "
+          f"{second[chosen]['the criterion']:.3f} against the model's "
+          f"{second[own]['the criterion']:.3f}, the best there a = "
+          f"{min(order, key=lambda a: second[a]['the criterion']):g}")
+
+
+def _bias_arrays(run, suffix: str = "", members: bool = True) -> dict[str, np.ndarray]:
+    """One test's forecasts and outcomes as arrays, keyed with `suffix`: the daily ones and each
+    horizon's outcomes with the windows overlapping."""
+    out = {
+        f"forecast{suffix}": run.forecast, f"realised{suffix}": run.realised,
+        f"member_forecast{suffix}": run.member_forecast,
+        f"eigen_forecast{suffix}": run.eigen_forecast,
+        f"eigen_realised{suffix}": run.eigen_realised,
+        f"repaired{suffix}": run.repaired,
+        f"held_long_only{suffix}": run.min_variance_held["long-only"],
+        f"held_unconstrained{suffix}": run.min_variance_held["unconstrained"],
+    }
+    if members:
+        out[f"member_realised{suffix}"] = run.member_realised
+    for h in run.horizons:
+        out[f"realised_h{h}{suffix}"] = run.horizon_realised[h]
+        if members:
+            out[f"member_realised_h{h}{suffix}"] = run.member_horizon_realised[h]
+        out[f"eigen_realised_h{h}{suffix}"] = run.eigen_horizon_realised[h]
+    return out
+
+
+def _save_bias(path, run, caps, horizon, eigen_runs=None, simulated=None) -> None:
     """Every forecast and outcome, for comparing runs: the daily ones, and each horizon's
     outcomes with the windows overlapping (its forecast the daily one times sqrt(h); apart,
-    every h-th date's from the first)."""
-    by_horizon = {}
-    for h in run.horizons:
-        by_horizon[f"realised_h{h}"] = run.horizon_realised[h]
-        by_horizon[f"member_realised_h{h}"] = run.member_horizon_realised[h]
-        by_horizon[f"eigen_realised_h{h}"] = run.eigen_horizon_realised[h]
+    every h-th date's from the first). Under the eigenfactor adjustment's other scales, each
+    test's arrays too, keyed `_a<scale>` -- but its members' outcomes, which are the model's --
+    and the simulation by date."""
+    extra: dict[str, np.ndarray] = {}
+    for a, variant in (eigen_runs or {}).items():
+        # The same members on the same days, only the covariance changed.
+        if not (_same(variant.member_realised, run.member_realised)
+                and all(_same(variant.member_horizon_realised[h], run.member_horizon_realised[h])
+                        for h in run.horizons)):
+            raise SystemExit(f"  the run stops: the members' outcomes at a = {a:g} are not the "
+                             f"model's")
+        extra.update(_bias_arrays(variant, f"_a{a:g}", members=False))
+    if eigen_runs:
+        extra["eigen_scales"] = np.array(sorted(eigen_runs), dtype=float)
+    if simulated:
+        extra["eigen_bias"] = np.array([b for b, _, _ in simulated])
+        extra["eigen_standard_error"] = np.array([e for _, e, _ in simulated])
+        extra["eigen_seconds"] = np.array([s for _, _, s in simulated])
     np.savez_compressed(
         path,
         dates=np.array([str(d) for d in run.dates]),
@@ -1173,14 +1339,9 @@ def _save_bias(path, run, caps, horizon) -> None:
         securities=np.array(run.securities),
         model_horizon=np.array(horizon),
         horizons=np.array(run.horizons, dtype=int),
-        forecast=run.forecast, realised=run.realised,
-        member_forecast=run.member_forecast, member_realised=run.member_realised,
-        eigen_forecast=run.eigen_forecast, eigen_realised=run.eigen_realised,
-        repaired=run.repaired,
-        held_long_only=run.min_variance_held["long-only"],
-        held_unconstrained=run.min_variance_held["unconstrained"],
         caps=caps,
-        **by_horizon,
+        **_bias_arrays(run),
+        **extra,
     )
     print(f"  every forecast and outcome written to {path}")
 
@@ -1289,6 +1450,11 @@ def main(argv: list[str] | None = None) -> int:
                              f"Newey-West at the horizon's lags (default "
                              f"{CORRELATION_HALF_LIFE:g}); none is one half-life for the whole "
                              f"matrix")
+    parser.add_argument("--correlation-lags", type=int, default=None, metavar="L",
+                        help="the factor correlations' Newey-West lags in place of the "
+                             "horizon's: 0 makes them one-day while the volatilities keep the "
+                             "horizon's lags -- the lags on the volatilities alone (with the "
+                             "two-half-life covariance); by default the horizon's for both")
     parser.add_argument("--variance-ratio-half-life", type=float, default=None, metavar="H",
                         help="each factor volatility its one-day volatility on --half-life "
                              "times the square root of its variance ratio at the horizon -- its "
@@ -1304,6 +1470,21 @@ def main(argv: list[str] | None = None) -> int:
                              "the model's horizon, over the index, the size pair, the "
                              "industries, random and minimum-variance portfolios, every member "
                              "singly and the eigenportfolios; about ten minutes")
+    parser.add_argument("--eigen-adjustment", type=float, default=None, metavar="A",
+                        help="the eigenfactor risk adjustment (Menchero, Wang and Orr; USE4): "
+                             "each eigenvalue of the factor covariance scaled by "
+                             "(A (lambda - 1) + 1)^2, lambda by rank from --eigen-draws "
+                             "histories simulated from the covariance and re-estimated by the "
+                             "model's own estimator; 0 simulates and scales nothing; by default "
+                             "none")
+    parser.add_argument("--eigen-draws", type=int, default=EIGEN_DRAWS, metavar="M",
+                        help=f"the eigenfactor simulation's histories per covariance (default "
+                             f"{EIGEN_DRAWS})")
+    parser.add_argument("--bias-eigen-scales", type=scale_list, default=(), metavar="A,A",
+                        help="with --bias, the eigenfactor risk adjustment at these scales too, "
+                             "each tested beside the model and one simulation per forecast date "
+                             "serving them all; read at one day over the whole test and each "
+                             "half, and kept in --bias-out")
     parser.add_argument("--bias-horizons", type=horizon_list, default=(), metavar="H,H",
                         help="with --bias, more horizons in trading days to evaluate every "
                              "forecast at, beside one day and the model's own, comma-separated; "
@@ -1319,6 +1500,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--horizon must be at least one trading day; got {args.horizon}")
     if args.newey_west_lags is not None and args.newey_west_lags < 0:
         parser.error(f"--newey-west-lags must be non-negative; got {args.newey_west_lags}")
+    if args.eigen_adjustment is not None:
+        if not args.eigen_adjustment >= 0.0:
+            parser.error(f"--eigen-adjustment must be non-negative; got {args.eigen_adjustment}")
+        if args.sampling_correction:
+            parser.error("--eigen-adjustment and --sampling-correction are alternative remedies "
+                         "for the covariance's estimation error; use one")
+    if args.eigen_draws < 2:
+        parser.error(f"--eigen-draws must be at least two; got {args.eigen_draws}")
+    if args.bias_eigen_scales and args.sampling_correction:
+        parser.error("--bias-eigen-scales needs the covariance without --sampling-correction")
+    if args.correlation_lags is not None:
+        if args.correlation_half_life is None:
+            parser.error("--correlation-lags needs the two-half-life covariance, not "
+                         "--correlation-half-life none")
+        if args.correlation_lags < 0:
+            parser.error(f"--correlation-lags must be non-negative; got {args.correlation_lags}")
     if args.variance_ratio_half_life is not None:
         if args.correlation_half_life is None:
             parser.error("--variance-ratio-half-life needs the two-half-life covariance, not "
@@ -1563,22 +1760,50 @@ def main(argv: list[str] | None = None) -> int:
             f", overriding --horizon {args.horizon}"
             if args.horizon is not None and args.horizon != horizon else "")
     ratio = args.variance_ratio_half_life
-    if horizon == 1:
-        print(f"  the horizon: 1 trading day -- the factor covariance the one-day covariance, "
-              f"with no Newey-West lags, and the specific risk one day's variance{source}")
-    elif ratio is None:
-        print(f"  the horizon: {horizon} trading days -- the factor covariance Newey-West at "
-              f"{lags} lag(s) with Bartlett weights, on the volatilities and the correlations "
-              f"alike, which is exactly the per-day variance of {horizon}-day returns; the "
-              f"specific risk one day's variance, with no lags, at every horizon{source}")
+    # Which it is (midoffice12's ruling 2): the model's own horizon, or a reporting view of
+    # broad portfolios' risk over a holding period.
+    if horizon == HORIZON:
+        role = "the model's horizon"
     else:
-        print(f"  the horizon: {horizon} trading days -- the factor correlations Newey-West at "
-              f"{lags} lag(s) with Bartlett weights, which is exactly the per-day variance of "
-              f"{horizon}-day returns, and each factor volatility its one-day volatility on a "
-              f"half-life of {args.half_life:g} times the square root of its variance ratio at "
-              f"{lags} lags, the ratio estimated on a half-life of {ratio:g}: the serial "
-              f"correlation from the long window, the level from the short; the specific risk "
-              f"one day's variance, with no lags, at every horizon{source}")
+        model_days = "one day" if HORIZON == 1 else f"{HORIZON} days"
+        role = (f"a reporting view, not the model's horizon of {model_days}: broad "
+                f"portfolios' risk over a holding period of {horizon} days. Its gain over the "
+                f"one-day model scaled by sqrt(h) was measured on 2024-26 alone, a window with "
+                f"the April 2025 shock in it, and is re-tested as data accumulates")
+    corr_lags = args.correlation_lags
+    if corr_lags is not None and corr_lags != lags:
+        # The lags on the volatilities alone (midoffice13): the correlations their own.
+        corr = ("the factor correlations one-day, with no lags" if corr_lags == 0
+                else f"the factor correlations Newey-West at {corr_lags} lag(s)")
+        if ratio is None:
+            vols = (f"the factor volatilities Newey-West at {lags} lag(s) with Bartlett weights, "
+                    f"each the per-day variance of {horizon}-day returns")
+        else:
+            vols = (f"each factor volatility its one-day volatility on a half-life of "
+                    f"{args.half_life:g} times the square root of its variance ratio at {lags} "
+                    f"lags, the ratio estimated on a half-life of {ratio:g}")
+        days = "1 trading day" if horizon == 1 else f"{horizon} trading days"
+        print(f"  the horizon: {days}, {role} -- {vols}; {corr}: the lags on "
+              f"the volatilities alone; the specific risk one day's variance, with no lags, at "
+              f"every horizon{source}")
+    elif horizon == 1:
+        print(f"  the horizon: 1 trading day, {role} -- the factor covariance the one-day "
+              f"covariance, with no Newey-West lags, and the specific risk one day's "
+              f"variance{source}")
+    elif ratio is None:
+        print(f"  the horizon: {horizon} trading days, {role} -- the factor covariance "
+              f"Newey-West at {lags} lag(s) with Bartlett weights, on the volatilities and the "
+              f"correlations alike, which is exactly the per-day variance of {horizon}-day "
+              f"returns; the specific risk one day's variance, with no lags, at every "
+              f"horizon{source}")
+    else:
+        print(f"  the horizon: {horizon} trading days, {role} -- the factor correlations "
+              f"Newey-West at {lags} lag(s) with Bartlett weights, which is exactly the per-day "
+              f"variance of {horizon}-day returns, and each factor volatility its one-day "
+              f"volatility on a half-life of {args.half_life:g} times the square root of its "
+              f"variance ratio at {lags} lags, the ratio estimated on a half-life of {ratio:g}: "
+              f"the serial correlation from the long window, the level from the short; the "
+              f"specific risk one day's variance, with no lags, at every horizon{source}")
     # One half-life for the whole matrix, Newey-West; or the two-half-life estimator (the
     # default, midoffice11's ruling 2): correlations on --correlation-half-life, volatilities
     # on --half-life's, both Newey-West at the horizon's lags, as USE4 corrects both horizons.
@@ -1590,6 +1815,7 @@ def main(argv: list[str] | None = None) -> int:
             correlation_half_life=args.correlation_half_life,
             newey_west_lags=lags,
             ratio_half_life=ratio,
+            correlation_lags=args.correlation_lags,
         )
     options = dict(
         standardise=False,
@@ -1609,6 +1835,8 @@ def main(argv: list[str] | None = None) -> int:
         leverage_correction=args.leverage_correction,
         specific_half_life=args.specific_half_life,
     )
+    if args.eigen_adjustment is not None:
+        options.update(eigen_adjustment=args.eigen_adjustment, eigen_draws=args.eigen_draws)
     model = estimate_cross_sectional_model(return_panel, indices, **options)
     notes = model.notes
     print(f"  {model.describe()}")
@@ -1622,6 +1850,19 @@ def main(argv: list[str] | None = None) -> int:
         print("  each member's residual divided by sqrt(1 - h), its own leverage, in place of "
               "the uniform degrees-of-freedom inflation, and each specific return outside the "
               "regressions by sqrt(1 + h): the sampling-error correction's specific side")
+    if notes.eigen is not None:
+        eigen, a = notes.eigen, notes.eigen_adjustment
+        gamma = eigen.scales(a)
+        print(f"  the eigenfactor risk adjustment, a = {a:g}"
+              + (" (simulated, nothing scaled)" if not a else "")
+              + f": lambda by rank from {eigen.draws} histories simulated from the factor "
+              f"covariance over its {eigen.n_periods} periods and re-estimated by its own "
+              f"estimator, in {eigen.seconds:.1f} s -- {eigen.bias[0]:.3f} at the largest "
+              f"eigenvalue, {eigen.bias[-1]:.3f} at the smallest, {eigen.bias.min():.3f} to "
+              f"{eigen.bias.max():.3f} over the ranks, its Monte Carlo standard error at most "
+              f"{eigen.standard_error.max():.4f}"
+              + (f"; each eigenfactor's volatility multiplied by {gamma.min():.3f} to "
+                 f"{gamma.max():.3f}" if a else ""))
     print(f"  mean cross-sectional R-squared {notes.mean_r_squared:.3f}")
     print(f"  {len(notes.rank_deficient_periods)} collinear period(s) of {notes.n_periods} "
           f"estimated; {sum(notes.empty_periods)} factor-period(s) left out for having no "

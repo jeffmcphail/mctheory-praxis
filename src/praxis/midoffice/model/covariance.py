@@ -248,12 +248,18 @@ class HorizonCovariance:
     autocovariance on a 90-day half-life are mostly estimation noise, while their ratio to the
     one-period variance over two years is steadier; the level still follows the short window. At
     no lags the ratio is one, and on the volatility half-life it is the plain split.
+
+    `correlation_lags`, given with `newey_west_lags`, gives the correlations their own lag count
+    (midoffice13): 0 makes them the long window's one-period correlations while the
+    volatilities keep the horizon's lags -- the lags on the volatilities alone. None, the
+    default, is the volatilities' lags for both.
     """
 
     volatility_half_life: float
     correlation_half_life: float
     newey_west_lags: int | None = None
     ratio_half_life: float | None = None
+    correlation_lags: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("volatility_half_life", "correlation_half_life"):
@@ -275,11 +281,27 @@ class HorizonCovariance:
                 raise ValueError(
                     f"ratio_half_life must be positive, got {self.ratio_half_life!r}"
                 )
+        if self.correlation_lags is not None:
+            if self.newey_west_lags is None:
+                raise ValueError(
+                    "correlation_lags sets the correlations' Newey-West lags apart from the "
+                    "volatilities', so it needs newey_west_lags"
+                )
+            if self.correlation_lags < 0:
+                raise ValueError(
+                    f"correlation_lags must be non-negative, got {self.correlation_lags!r}"
+                )
 
     def _estimator(self, half_life: float):
         if self.newey_west_lags is None:
             return ExponentialCovariance(half_life)
         return NeweyWestCovariance(lags=self.newey_west_lags, half_life=half_life)
+
+    def _correlation_estimator(self):
+        """The long window's estimator, the correlations' lags its own where they are given."""
+        if self.correlation_lags is None:
+            return self._estimator(self.correlation_half_life)
+        return NeweyWestCovariance(lags=self.correlation_lags, half_life=self.correlation_half_life)
 
     def volatility_estimator(self) -> "ExponentialCovariance | NeweyWestCovariance":
         """The estimator the diagonal comes from: each variance is its estimate, the
@@ -298,11 +320,11 @@ class HorizonCovariance:
         ratio at the lags on `ratio_half_life`; a factor with no movement over the ratio's
         window keeps its one-period variance."""
         level = np.diag(ExponentialCovariance(self.volatility_half_life).estimate(returns).matrix)
-        lagged = (
-            long
-            if self.ratio_half_life == self.correlation_half_life
-            else self._estimator(self.ratio_half_life).estimate(returns).matrix
-        )
+        # The correlations' own Newey-West matrix serves where it has the ratio's half-life and
+        # the volatilities' lags.
+        shared = self.ratio_half_life == self.correlation_half_life and self.correlation_lags in (
+            None, self.newey_west_lags)
+        lagged = long if shared else self._estimator(self.ratio_half_life).estimate(returns).matrix
         one_period = np.diag(ExponentialCovariance(self.ratio_half_life).estimate(returns).matrix)
         moved = one_period > 0.0
         ratio = np.ones_like(level)
@@ -344,7 +366,7 @@ class HorizonCovariance:
             vol_matrix, vol_effective = _weighted_covariance(returns, vol_decay**ages)
             short_variance = np.diag(vol_matrix)
         else:
-            long = self._estimator(self.correlation_half_life).estimate(returns)
+            long = self._correlation_estimator().estimate(returns)
             corr_matrix, corr_effective = long.matrix, long.effective_observations
             if self.ratio_half_life is None:
                 short_variance = np.diag(
@@ -382,6 +404,8 @@ class HorizonCovariance:
         method = "exponential, split horizon"
         if self.newey_west_lags is not None:
             method = f"Newey-West, {self.newey_west_lags} lag(s), split horizon"
+            if self.correlation_lags not in (None, self.newey_west_lags):
+                method += f", the correlations at {self.correlation_lags} lag(s)"
             if self.ratio_half_life is not None:
                 method += (f", each volatility one period's times its variance ratio on "
                            f"{self.ratio_half_life:g}")

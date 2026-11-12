@@ -2058,3 +2058,73 @@ def test_a_model_as_of_a_date_forecasts_with_that_dates_exposures_alone():
     with pytest.raises(ValueError, match="exposure_index"):
         next(cross_sectional_models_as_of(returns, chars, [returns.dates[-1]],
                                           exposure_index=-2))
+
+
+# ------------------------------------------------- the eigenfactor risk adjustment (midoffice13)
+
+
+def test_the_eigen_adjustment_is_off_by_default_and_at_zero_simulates_and_changes_nothing():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=120, seed=31, n_char=3)
+    estimator = HorizonCovariance(volatility_half_life=20.0, correlation_half_life=80.0,
+                                  newey_west_lags=0)
+    plain = _fit(returns, chars, covariance_estimator=estimator, annualise=True)
+    assert plain.notes.eigen is None and plain.notes.eigen_adjustment is None
+    zero = _fit(returns, chars, covariance_estimator=estimator, annualise=True,
+                eigen_adjustment=0.0, eigen_draws=60)
+    assert np.array_equal(zero.covariance.matrix, plain.covariance.matrix)
+    assert zero.notes.observed_variance == plain.notes.observed_variance
+    eigen = zero.notes.eigen
+    k = len(zero.factor_ids)
+    assert eigen.bias.shape == (k,) and eigen.draws == 60
+    assert eigen.n_periods == zero.notes.n_periods
+    assert not any("eigenfactor" in q for q in zero.qualifications())
+    # The simulation is from the estimate before annualising, through the estimator itself.
+    periods = returns.frequency.periods_per_year
+    assert np.allclose(eigen.covariance * periods, plain.covariance.matrix, rtol=1e-12)
+
+
+def test_the_eigen_adjustment_scales_the_eigenvalues_and_leaves_the_noise_shares_alone():
+    returns, chars, _, _ = _world(n_secs=40, n_periods=120, seed=31, n_char=3)
+    estimator = ExponentialCovariance(half_life=40.0)
+    plain = _fit(returns, chars, covariance_estimator=estimator, annualise=True)
+    adjusted = _fit(returns, chars, covariance_estimator=estimator, annualise=True,
+                    eigen_adjustment=2.0, eigen_draws=60)
+    eigen = adjusted.notes.eigen
+    periods = returns.frequency.periods_per_year
+    assert np.array_equal(adjusted.covariance.matrix, eigen.adjusted(2.0) * periods)
+    for r in range(eigen.values.size):
+        u = eigen.vectors[:, r]
+        expected = (2.0 * (eigen.bias[r] - 1.0) + 1.0) ** 2 * eigen.values[r] * periods
+        assert u @ adjusted.covariance.matrix @ u == pytest.approx(expected, rel=1e-10)
+    # The estimate's own noise shares and factor returns are untouched.
+    assert adjusted.notes.observed_variance == plain.notes.observed_variance
+    assert adjusted.notes.noise_share == plain.notes.noise_share
+    assert np.array_equal(adjusted.notes.factor_returns.returns,
+                          plain.notes.factor_returns.returns)
+    assert any(q.startswith("the factor covariance's eigenvalues are scaled by the eigenfactor "
+                            "risk adjustment, a = 2") for q in adjusted.qualifications())
+    with pytest.raises(ValueError, match="alternative remedies"):
+        _fit(returns, chars, covariance_estimator=estimator, eigen_adjustment=1.0,
+             sampling_correction=True)
+    with pytest.raises(ValueError, match="non-negative"):
+        _fit(returns, chars, covariance_estimator=estimator, eigen_adjustment=-1.0)
+
+
+def test_nothing_after_a_date_moves_the_eigen_adjusted_model_as_of_it():
+    """The simulation is seeded and rests on the day's covariance alone, so the point-in-time
+    property holds with the adjustment on: everything after the date redrawn, the model as of
+    it the same to the bit, its simulated bias too."""
+    returns, chars, weights, members = _timed(n_periods=60)
+    caps = weights**2
+    t = 35
+    rng = np.random.default_rng(98)
+    later_returns = returns.returns.copy()
+    later_returns[t + 1:] = rng.normal(scale=0.2, size=later_returns[t + 1:].shape)
+    options = dict(_as_of_options(weights, members, 60, caps), sampling_correction=False,
+                   eigen_adjustment=1.5, eigen_draws=40)
+    day = [returns.dates[t]]
+    (_, before), = cross_sectional_models_as_of(returns, chars, day, **options)
+    (_, after), = cross_sectional_models_as_of(
+        dataclasses.replace(returns, returns=later_returns), chars, day, **options)
+    _same_model(before, after)
+    assert np.array_equal(before.notes.eigen.bias, after.notes.eigen.bias)

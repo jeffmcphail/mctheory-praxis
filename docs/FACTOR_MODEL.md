@@ -256,8 +256,14 @@ USE4 corrects both horizons for serial correlation; equal half-lives then reduce
 PSD, and neither then is the recombination; the notes say when it is not. The S&P 500 run's
 factor covariance is this estimator by default (midoffice11's ruling 2): correlations on
 `--correlation-half-life` 504 trading days, BIM301S's two years, volatilities on `--half-life`'s
-90, both Newey-West at the horizon's lags; `--correlation-half-life none` is one half-life for
-the whole matrix.
+90, both Newey-West at the horizon's lags -- none at the one-day default; `--correlation-half-life
+none` is one half-life for the whole matrix.
+
+`correlation_lags` (midoffice13, the run's `--correlation-lags`) gives the correlations their own
+lag count: at 0 they are the long window's one-period correlations while the volatilities keep
+the horizon's lags -- the lags on the volatilities alone, the reporting view's candidate. With
+variance-ratio volatilities the ratio keeps the volatilities' lags on its own window. Given equal
+to the volatilities' lags it is the plain split, to the bit, which a test pins.
 
 `ratio_half_life` (midoffice12, the run's `--variance-ratio-half-life`, off by default) takes
 each volatility's serial correlation from a longer window than its level: each variance is its
@@ -310,11 +316,16 @@ the default.
 the h-day windows, so the h-day windows' sum of squares counts the lag-k autocovariance h - k
 times -- per day `1 - k/h`, Bartlett's weight at `L = h - 1`. Newey-West with Bartlett weights at
 L lags is therefore exactly the per-day variance of (L + 1)-day returns: a test pins it to
-rounding on a padded series. The S&P 500 model's 10 lags are an 11-day horizon -- not a month,
-and no standard one. Its run takes `--horizon H` in trading days, H - 1 lags on the volatilities
-and the correlations alike (`--newey-west-lags` still overrides it, the horizon then L + 1), and
-states the horizon in its report; the default stays 11 until midoffice12's measurements are in.
-Specific risk carries no lags: its per-day variance is one day's at every horizon.
+rounding on a padded series. The S&P 500 model's old 10 lags were an 11-day horizon -- not a
+month, and no standard one. Its run takes `--horizon H` in trading days, H - 1 lags on the
+volatilities and the correlations alike (`--newey-west-lags` still overrides it, the horizon then
+L + 1), and states the horizon in its report. **The model's horizon is one day** (midoffice12's
+ruling 1): the one-day covariance, no lags, which midoffice12 measured right at one day and the
+least biased for the optimiser at every horizon. A longer horizon is a reporting view of broad
+portfolios' risk over a holding period, and the report says it is one (ruling 2); its gain over
+the one-day model scaled was measured on one 2.7-year window with the April 2025 shock in it, and
+is re-tested as data accumulates. Specific risk carries no lags: its per-day variance is one
+day's at every horizon.
 
 **The positive semi-definiteness guarantee is real, and it is conditional.** Bartlett weights
 make the equal-weighted estimator PSD by construction, and over 400 random panels its smallest
@@ -324,6 +335,50 @@ and not academically: on short panels with many factors and a heavy decay -- 25 
 eigenvalue at -0.487. That is a real negative variance forecast, not a rounding artifact. The
 combination is still worth having, but `psd_relative_floor` is doing load-bearing work beneath
 it, and the estimate says so in its notes.
+
+### The eigenfactor risk adjustment
+
+A covariance estimated from a finite history gets its eigenvalues wrong in a known direction: the
+largest come out too large and the smallest too small, because the estimate's eigenvectors are
+fitted to the sample's own noise. An optimiser goes to exactly the small eigen-directions, so
+what it builds realises more risk than forecast. `eigen.eigen_bias` (midoffice13; Menchero, Wang
+and Orr 2011, Barra USE4) measures the bias by simulation and the adjustment undoes it:
+
+- take the day's covariance F0 as the truth and diagonalise it, `F0 = U0 D0 U0'`;
+- simulate M histories from it, independent normal draws over as many periods as the day's
+  estimate rests on, and re-estimate each with the same estimator -- the same weights, the two
+  half-lives and the lags included -- then diagonalise each, `F_m = U_m D_m U_m'`;
+- for each rank k, `lambda(k) = sqrt(mean_m (u_mk' F0 u_mk) / d_mk)`, the simulated eigenfactor's
+  true variance over its estimate;
+- scale each of the day's eigenvalues by `gamma(k)^2 = (a (lambda(k) - 1) + 1)^2`, keeping its
+  eigenvectors.
+
+a = 1 is the simulation alone; USE4 found real data needs more, the simulation knowing only the
+sampling error of a stationary normal history. One simulation a date serves every a.
+
+It is the estimator's option `eigen_adjustment` (the run's `--eigen-adjustment A`, off by
+default), with `eigen_draws` (`--eigen-draws`, 1,000) and a fixed seed, so an as-of refit and a
+refit on the panel cut at its date agree to the bit (a test redraws everything after a date and
+finds the adjusted model as of it unchanged). At a = 0 the bias is simulated and nothing scaled:
+the covariance is the estimate to the bit and the notes carry the simulation for any other a,
+which is how the bias run tests several (`--bias-eigen-scales`). The noise shares stay the
+estimate's; it and the sampling-error correction are alternative remedies and are not combined.
+Each adjusted forecast's eigenportfolios are tested in the unadjusted covariance's eigenbasis,
+so rank k is the same eigenfactor at every a.
+
+**Its tests are worlds whose covariance is known.** On a long history lambda is one to 0.03; on
+30 periods of 10 factors the classic pattern shows, 0.92 at the largest eigenvalue to 1.76 at the
+smallest. And Menchero, Wang and Orr's own check in miniature: estimate a covariance from 60
+periods of a known one, and its eigenfactors' true variance over their estimate averages up to
+1.61 at the smallest ranks; the adjustment at a = 1, simulated from the estimate alone, brings
+every rank to within 0.06 of one.
+
+**On the S&P 500 model's one-day covariance the bias it simulates is small:** a thousand draws
+put lambda at 1.002 at the largest eigenvalue and 1.041 at the smallest of the full sample's 938
+periods, 0.983 to 1.071 over the ranks, each to a Monte Carlo standard error of 0.0012 -- the two
+half-lives leave 260 and 826 effective observations for 25 factors. Over the bias test's dates,
+252 to 937 periods, the smallest five average about 1.06 and some large ranks sit below one
+(rank 3 at about 0.97); the simulation takes about half a second a refit.
 
 ## The cross-sectional estimator
 
@@ -1196,8 +1251,9 @@ factors: built once over the full sample's regression universe. **The guard**: o
 panel cut at the date through its own pipeline (`model_inputs`, the scheme held), and they
 equal the full run's through that date to the bit -- returns, exposures, weights,
 capitalisations, periods -- and so does the model made from them. It passed for the defaults
-and for floor 15 (2024-02-08, 2024-10-14, 2025-06-23, 2026-02-27, 2026-11-02), and for
-midoffice12's defaults on the same dates; the run stops if it does not.
+and for floor 15 (2024-02-08, 2024-10-14, 2025-06-23, 2026-02-27, 2026-11-02), for
+midoffice12's defaults on the same dates, and for midoffice13's one-day defaults and its
+eigenfactor run, the simulation on; the run stops if it does not.
 
 **The portfolios**, each formed at its forecast date from that date's members with a forecast
 and a next-day return, and held to the next: the index cap-weighted and equally weighted; the
@@ -1284,10 +1340,44 @@ tables):
 - **The specific history at a 42-day half-life** moves the members' median 1.034 to 1.031: the
   trend flattens, and 63 stays.
 
-Which horizon for which use, as midoffice12 reads it -- Jeff's to rule: one day for daily risk,
-and for construction at any holding period; the holding period's horizon as a reporting view of
-broad, long-only portfolios' risk over it; and so one day as the model's default, with the
-eigenvalue adjustment after, on the one-day matrix. The default stays 11 until ruled.
+Which horizon for which use, as midoffice12 read it: one day for daily risk, and for
+construction at any holding period; the holding period's horizon as a reporting view of broad,
+long-only portfolios' risk over it. Ruled so (midoffice12's rulings 1 and 2): the model's
+horizon is one day, and the new defaults' bias run equals that one-day run to the bit.
+
+**The eigenfactor risk adjustment, measured** (midoffice13), on the one-day model, at a = 1, 2,
+3 and 4 beside it, one simulation a date (1.25 s a refit with it, 0.49 s of it the simulation):
+
+- **On the small eigenfactors it does what it is for, in both halves of the test:** ranks 16 to
+  25 from about 1.2 to about 1.07 at a = 2 and about one at a = 3; the eigenportfolios' mean
+  abs(bias - 1) over every rank 0.129 to 0.068 at a = 2. Chosen on the test's first half by a
+  criterion fixed beforehand -- half the eigenportfolios' mean abs(bias - 1), half the two
+  minimum-variance portfolios' -- a = 2 (0.149 against the model's 0.191), and it holds on the
+  second (0.112 against 0.138). The simulation alone, a = 1, closes about a third of the small
+  eigenvalues' realised bias.
+- **It is not ready to be the model's covariance.** Rebuilt on it, the minimum-variance
+  portfolios realise more risk at every a and in both halves (unconstrained 9.97% a year to
+  10.13% at a = 2); where the simulation puts lambda below one it shrinks the eigenvalue, and at
+  rank 3 the returns disagree (1.045 to 1.096); it raises the broad portfolios' forecasts (the
+  smallest 85 0.956 to 0.928, out of the band; the members' median 1.003 to 0.990); and the
+  minimum-variance statistic it was to fix barely moves (1.220 to 1.211). It stays an option,
+  off.
+- **One data error dominates the optimiser's statistics.** CTVA's 2026-10-01 total return is
+  -83.8% -- Corteva's separation, a spin-off the panel's total return does not carry, its prices
+  77.65 to 12.57 with no split or event on record -- and both minimum-variance portfolios held
+  9.4% of it: a -13 sigma outcome. Without that one forecast they read 1.055 and 1.097 over the
+  test, not 1.167 and 1.220; by half they are the regime's, 1.25 to 1.30 in the first and 0.82
+  to 0.85 in the calm second.
+
+**The reporting view at 21 days, the lags on the volatilities alone** (midoffice13, the run's
+`--correlation-lags 0`): Newey-West at 20 lags on the volatilities' 90 days and one-day
+correlations reads the four broad portfolios at 21 days as the 21-day model does (their mean
+abs(bias - 1) 0.072 against 0.067; the one-day model scaled by sqrt(21) 0.172), and halves what
+the correlations' lags cost elsewhere -- the smallest eigenportfolios 1.48 against 2.69, the
+unconstrained minimum-variance portfolio 1.22 against 1.31. The variance-ratio volatilities with
+one-day correlations go further toward the one-day model (1.29 and 1.15, the forecast as steady
+as the one-day model's), but their two-year ratio over-forecasts the broad portfolios' 21-day
+risk more (the equally weighted index 0.856).
 
 ## Status
 
