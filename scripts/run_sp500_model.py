@@ -37,7 +37,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from praxis.midoffice.model.bias import RiskForecast, bias_statistics, evaluate  # noqa: E402
+from praxis.midoffice.model.bias import (  # noqa: E402
+    OVERLAP_DRAWS,
+    RiskForecast,
+    bias_statistics,
+    evaluate,
+)
 from praxis.midoffice.model.characteristics import CharacteristicPanel  # noqa: E402
 from praxis.midoffice.model.covariance import (  # noqa: E402
     HorizonCovariance,
@@ -88,6 +93,45 @@ UNBLENDED = {
 """Descriptors computed, screened and reported, and kept out of every blend, with why. A
 forecast exposure must be built from the descriptors the factor was estimated on. Computing
 SERDP historically waits for a reason to; it has never had a usable period in the screen."""
+
+SPECIFIC_HALF_LIFE = 63.0
+"""Each security's specific-risk history weighted by a half-life of 63 trading days, the blend
+told its effective number of observations (midoffice11's ruling 1): the shortest half-life
+measured, and the best on every specific-side bias statistic. `--specific-half-life none` weighs
+every specific return the same, as before."""
+
+CORRELATION_HALF_LIFE = 504.0
+"""The factor covariance's correlations on a half-life of 504 trading days, its volatilities on
+`--half-life`'s 90, both Newey-West: the two-half-life estimator (midoffice11's ruling 2),
+BIM301S's two years. `--correlation-half-life none` is one half-life for the whole matrix, as
+before."""
+
+HORIZON = 11
+"""The model's horizon in trading days (midoffice11's ruling 3). Newey-West with Bartlett weights
+at L lags is exactly the per-day variance of (L + 1)-day returns, so the 10 lags the model has
+always used are an 11-day horizon; `--horizon H` puts H - 1 lags on the volatilities and the
+correlations alike. The default stays 11 until midoffice12's measurements are in."""
+
+
+def half_life_or_none(text: str) -> float | None:
+    """A half-life in trading days, or `none` for the option's other form."""
+    if text.strip().lower() == "none":
+        return None
+    value = float(text)
+    if not value > 0.0:
+        raise argparse.ArgumentTypeError(f"a half-life must be positive, or none; got {text!r}")
+    return value
+
+
+def horizon_list(text: str) -> tuple[int, ...]:
+    """Horizons in trading days, comma-separated, each at least one."""
+    try:
+        values = tuple(sorted({int(part) for part in text.split(",") if part.strip()}))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"horizons are whole trading days; got {text!r}")
+    if not values or min(values) < 1:
+        raise argparse.ArgumentTypeError(f"each horizon must be at least one day; got {text!r}")
+    return values
 
 
 def without(panel: CharacteristicPanel, names) -> CharacteristicPanel:
@@ -736,9 +780,12 @@ def _models_differ(a, b) -> list[str]:
     return out
 
 
-def bias_section(args, panel, market, membership, codes, merges, inputs, model, options) -> None:
+def bias_section(
+    args, panel, market, membership, codes, merges, inputs, model, options, horizon
+) -> None:
     """The out-of-sample bias statistics (midoffice11): the model refitted as of each trading
-    day, each forecast against the next day's return, over the standard portfolios."""
+    day, each forecast against the next day's return, over the standard portfolios; and at the
+    model's horizon, every forecast against the next `horizon` days' return (midoffice12)."""
     notes = model.notes
     dates = panel.dates
     at = {d: i for i, d in enumerate(dates)}
@@ -763,9 +810,27 @@ def bias_section(args, panel, market, membership, codes, merges, inputs, model, 
     print(f"  each forecast taken to a daily scale (annual / {notes.frequency.periods_per_year:g})"
           f" against the next trading day's {args.returns} return; the bias statistic is the "
           f"standard deviation of realised / forecast, one if the forecasts are right, its 95% "
-          f"band about 1 +/- sqrt(2/T); over the whole test, over every 12-month ({BIAS_YEAR}-"
-          f"forecast) window with the windows' mean absolute deviation from one (MRAD), and "
-          f"every 21st forecast over the 21 days after it, bought and held")
+          f"band about 1 +/- sqrt(2/T); over the whole test, and over every 12-month "
+          f"({BIAS_YEAR}-forecast) window with the windows' mean absolute deviation from one "
+          f"(MRAD)")
+    # At the model's horizon (midoffice12): every forecast against the h days after it, the
+    # windows overlapping, and every h-th apart; and at any other horizon asked for.
+    evaluated = sorted({horizon, *args.bias_horizons} - {1})
+    others = [h for h in evaluated if h != horizon]
+    if horizon == 1:
+        print("  the model's horizon is one trading day, so the daily statistic is the "
+              "statistic at its horizon")
+    else:
+        print(f"  and at the model's horizon, {horizon} trading days: every forecast, at {horizon} "
+              f"times its daily variance, against the {horizon} trading days' {args.returns} "
+              f"return after it, bought and held, a name that stops trading held as cash -- the "
+              f"windows overlapping, so their 95% band is found by simulation, right forecasts of "
+              f"normal returns ({OVERLAP_DRAWS:,} draws) -- and beside it every "
+              f"{ordinal(horizon)} forecast from the first, the windows apart, its band "
+              f"1 +/- sqrt(2/T)")
+    if others:
+        print(f"  also evaluated at {', '.join(str(h) for h in others)} trading days "
+              f"(--bias-horizons), the same way, summarised after the eigenportfolios")
 
     # The guard: the forecast as of a date, rebuilt from the panel cut at that date through
     # the run's own pipeline, the scheme held, is the full run's -- its inputs bit for bit
@@ -838,7 +903,7 @@ def bias_section(args, panel, market, membership, codes, merges, inputs, model, 
         membership=(np.ones((len(dates), len(securities)), dtype=bool) if membership is None
                     else membership),
         capitalisations=inputs.caps, groups=groups, factor_returns=factor_rows,
-        progress=progress, total=len(rows),
+        horizons=evaluated, progress=progress, total=len(rows),
     )
     minutes = (time.monotonic() - began) / 60
     run_caps = inputs.caps[[at[d] for d in run.dates]]
@@ -847,21 +912,32 @@ def bias_section(args, panel, market, membership, codes, merges, inputs, model, 
           f"{int(run.repaired.sum())} of the {len(run.dates)} dates; {run.dropped} member-day(s) "
           f"with a forecast and no next-day return left out of every portfolio formed that day")
 
-    def cells(stats, horizon):
+    def summary(stats) -> str:
         rolled = stats.rolling
         return (f"{stats.n:>5} {stats.statistic:>7.3f} {stats.verdict:>5}  "
                 f"{stats.low:.3f}-{stats.high:.3f}  {stats.mrad:>6.3f} "
                 f"{(rolled.min() if rolled.size else float('nan')):>6.3f} "
-                f"{(rolled.max() if rolled.size else float('nan')):>6.3f}   "
-                f"{horizon.n:>4} {horizon.statistic:>6.3f} {horizon.verdict:>5}")
+                f"{(rolled.max() if rolled.size else float('nan')):>6.3f}")
 
+    def apart(stats) -> str:
+        return (f"{stats.n:>4} {stats.statistic:>6.3f} {stats.verdict:>5}  "
+                f"{stats.low:.3f}-{stats.high:.3f}")
+
+    broad = run.names[:4] + ("minimum variance, long-only", "minimum variance, unconstrained")
     header = (f"  {'':<34} {'T':>5} {'bias':>7} {'':>5}  {'95% band':>11}  {'MRAD':>6} "
-              f"{'min':>6} {'max':>6}   {'21-day: T':>9} {'bias':>6}")
-    print("\n  Portfolios, each formed at its forecast date and held to the next")
+              f"{'min':>6} {'max':>6}")
+    print("\n  Portfolios at one day, each formed at its forecast date and held to the next")
     print(header)
-    for name in run.names[:4] + ("minimum variance, long-only",
-                                 "minimum variance, unconstrained"):
-        print(f"  {name:<34} " + cells(run.statistics(name), run.statistics(name, horizon=True)))
+    for name in broad:
+        print(f"  {name:<34} " + summary(run.statistics(name)))
+    if horizon > 1:
+        print(f"\n  Portfolios at the model's horizon, {horizon} trading days, each bought at its "
+              f"forecast date and held {horizon} days: every forecast, the windows overlapping, "
+              f"its band simulated; and every {ordinal(horizon)}, the windows apart")
+        print(header + f"   {'apart: T':>8} {'bias':>6} {'':>5}  {'95% band':>11}")
+        for name in broad:
+            print(f"  {name:<34} " + summary(run.statistics(name, horizon=horizon)) + "   "
+                  + apart(run.statistics(name, horizon=horizon, overlapping=False)))
     for label in ("long-only", "unconstrained"):
         name = f"minimum variance, {label}"
         row = run.names.index(name)
@@ -871,19 +947,25 @@ def bias_section(args, panel, market, membership, codes, merges, inputs, model, 
         worst = float(run.min_variance_violation[label].max())
         print(f"    {name}: {int(np.median(size))} names held at the median ({size.min()} to "
               f"{size.max()}); forecast {forecast_vol:.2%} a year at the median, realised "
-              f"{realised_vol:.2%}; its KKT conditions met to {worst:.1e}")
+              f"{realised_vol:.2%} from its daily returns; its KKT conditions met to {worst:.1e}")
 
     if groups:
         names = [model.factor_names[fid] for fid in model.factor_ids]
         counts = held.counts()
         print(f"\n  Each industry's members, cap-weighted -- the scheme's {len(groups)} as built "
               f"-- against its factor's noise share in the full run (equal / weighted)")
-        print(f"  {'industry':<24} {'members':>7} {'T':>5} {'bias':>7} {'':>5}  {'MRAD':>6}   "
-              f"{'21-day':>6}   {'noise share':>14}")
+        columns = f"{'1 day':>7} {'':>5}  {'MRAD':>6}"
+        if horizon > 1:
+            columns += f"   {f'{horizon} days':>7} {'':>5} {'apart':>6}"
+        print(f"  {'industry':<24} {'members':>7} {'T':>5} {columns}   {'noise share':>14}")
         biases, shares = [], []
         for group in groups:
             stats = run.statistics(f"industry: {group}")
-            horizon = run.statistics(f"industry: {group}", horizon=True)
+            cells = f"{stats.statistic:>7.3f} {stats.verdict:>5}  {stats.mrad:>6.3f}"
+            if horizon > 1:
+                at = run.statistics(f"industry: {group}", horizon=horizon)
+                away = run.statistics(f"industry: {group}", horizon=horizon, overlapping=False)
+                cells += f"   {at.statistic:>7.3f} {at.verdict:>5} {away.statistic:>6.3f}"
             if group in names:
                 k = names.index(group)
                 share = (f"{notes.noise_share[k]:>6.1%} / {notes.weighted_noise_share[k]:.1%}"
@@ -893,25 +975,35 @@ def bias_section(args, panel, market, membership, codes, merges, inputs, model, 
                     shares.append(notes.weighted_noise_share[k])
             else:
                 share = f"in {inputs.scheme.folded.get(group, '?')}"
-            print(f"  {group:<24} {counts.get(group, 0):>7} {stats.n:>5} {stats.statistic:>7.3f} "
-                  f"{stats.verdict:>5}  {stats.mrad:>6.3f}   {horizon.statistic:>6.3f}   "
-                  f"{share:>14}")
+            print(f"  {group:<24} {counts.get(group, 0):>7} {stats.n:>5} {cells}   {share:>14}")
         if len(biases) > 2:
-            print(f"  across the {len(biases)} with a factor of their own, the bias statistic's "
-                  f"correlation with the weighted noise share: "
+            print(f"  across the {len(biases)} with a factor of their own, the one-day bias "
+                  f"statistic's correlation with the weighted noise share: "
                   f"{float(np.corrcoef(biases, shares)[0, 1]):+.3f}")
 
     for family in ("long-only", "long-short"):
-        stats = [run.statistics(n) for n in run.names if n.startswith(f"random {family} ")]
+        family_names = [n for n in run.names if n.startswith(f"random {family} ")]
+        stats = [run.statistics(n) for n in family_names]
         values = np.array([s.statistic for s in stats])
         below = np.mean([s.verdict == "over" for s in stats])
         above = np.mean([s.verdict == "under" for s in stats])
         print(f"\n  Random portfolios, {family}, seed {run.random_seed}: {len(stats)} of 30 members"
               + (" a side" if family == "long-short" else "")
-              + f", weights drawn once per member -- bias median {np.median(values):.3f}, "
-              f"p5 {np.percentile(values, 5):.3f}, p95 {np.percentile(values, 95):.3f}; below the "
-              f"band {below:.0%}, above it {above:.0%}; MRAD median "
-              f"{np.median([s.mrad for s in stats]):.3f}")
+              + f", weights drawn once per member -- at one day, bias median "
+              f"{np.median(values):.3f}, p5 {np.percentile(values, 5):.3f}, p95 "
+              f"{np.percentile(values, 95):.3f}; below the band {below:.0%}, above it "
+              f"{above:.0%}; MRAD median {np.median([s.mrad for s in stats]):.3f}")
+        if horizon > 1:
+            at = [run.statistics(n, horizon=horizon) for n in family_names]
+            values = np.array([s.statistic for s in at])
+            away = [run.statistics(n, horizon=horizon, overlapping=False).statistic
+                    for n in family_names]
+            print(f"    at {horizon} days, the windows overlapping: median "
+                  f"{np.median(values):.3f}, p5 {np.percentile(values, 5):.3f}, p95 "
+                  f"{np.percentile(values, 95):.3f}; "
+                  f"below the simulated band {np.mean([s.verdict == 'over' for s in at]):.0%}, "
+                  f"above it {np.mean([s.verdict == 'under' for s in at]):.0%}; apart, median "
+                  f"{np.median(away):.3f}")
 
     member_stats = []
     for j, code in enumerate(securities):
@@ -922,22 +1014,35 @@ def bias_section(args, panel, market, membership, codes, merges, inputs, model, 
         print(f"\n  Every member singly: none has {BIAS_MIN_FORECASTS} forecasts")
         member_stats = None
     if member_stats is not None:
-        _report_members(run, member_stats, securities, run_caps)
-    _report_eigenportfolios(run)
+        _report_members(run, member_stats, securities, run_caps, horizon)
+    _report_eigenportfolios(run, horizon)
+    if run.horizons and set(run.horizons) != {horizon}:
+        _report_horizons(run, groups, member_stats or [], securities)
     if args.bias_out:
-        _save_bias(args.bias_out, run, run_caps)
+        _save_bias(args.bias_out, run, run_caps, horizon)
 
 
-def _report_members(run, member_stats, securities, caps) -> None:
+def ordinal(n: int) -> str:
+    """1st, 2nd, 3rd, 4th, 11th, 21st."""
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _member_columns(member_stats, securities) -> list[int]:
+    position = {code: j for j, code in enumerate(securities)}
+    return [position[code] for code, _ in member_stats]
+
+
+def _report_members(run, member_stats, securities, caps, horizon) -> None:
     """Every member singly: the distribution of their statistics, the shares outside the band,
-    by size, and the 21-day check."""
+    by size, and at the model's horizon."""
     values = np.array([s.statistic for _, s in member_stats])
     below = np.mean([s.verdict == "over" for _, s in member_stats])
     above = np.mean([s.verdict == "under" for _, s in member_stats])
     fat_below = np.mean([s.statistic < s.fat_band[0] for _, s in member_stats])
     fat_above = np.mean([s.statistic > s.fat_band[1] for _, s in member_stats])
     print(f"\n  Every member singly: {len(member_stats)} securities with {BIAS_MIN_FORECASTS} "
-          f"forecasts or more -- bias p5 {np.percentile(values, 5):.3f}, p25 "
+          f"forecasts or more -- at one day, bias p5 {np.percentile(values, 5):.3f}, p25 "
           f"{np.percentile(values, 25):.3f}, median {np.median(values):.3f}, p75 "
           f"{np.percentile(values, 75):.3f}, p95 {np.percentile(values, 95):.3f}")
     kurtosis = float(np.median([s.kurtosis for _, s in member_stats]))
@@ -954,49 +1059,128 @@ def _report_members(run, member_stats, securities, caps) -> None:
     print("    median by capitalisation quintile over the test, largest first: "
           + ", ".join(f"{np.median([ranked[i][1].statistic for i in q]):.3f}" for q in quintiles
                       if q.size))
-    horizon_values = [
-        bias_statistics(run.member_horizon_forecast[:, j], run.member_horizon_realised[:, j])
-        for j in range(len(securities))
-    ]
-    horizon_values = np.array([s.statistic for s in horizon_values if s.n >= 12])
-    if horizon_values.size:
-        print(f"    21-day, non-overlapping, members with 12 outcomes or more: median "
-              f"{np.median(horizon_values):.3f}")
+    if horizon > 1:
+        forecast, realised = run.member_outcomes(horizon)
+        at = [bias_statistics(forecast[:, j], realised[:, j], overlap=horizon)
+              for j in _member_columns(member_stats, securities)]
+        values = np.array([s.statistic for s in at])
+        print(f"    at {horizon} days, the windows overlapping: median {np.median(values):.3f}, p5 "
+              f"{np.percentile(values, 5):.3f}, p95 {np.percentile(values, 95):.3f}; below its "
+              f"simulated band {np.mean([s.verdict == 'over' for s in at]):.1%}, above it "
+              f"{np.mean([s.verdict == 'under' for s in at]):.1%} (the band for normal returns)")
+        forecast, realised = run.member_outcomes(horizon, overlapping=False)
+        away = [bias_statistics(forecast[:, j], realised[:, j]) for j in range(len(securities))]
+        away = np.array([s.statistic for s in away if s.n >= 12])
+        if away.size:
+            print(f"    apart, every {ordinal(horizon)} forecast, members with 12 outcomes or "
+                  f"more: median {np.median(away):.3f}")
 
 
-def _report_eigenportfolios(run) -> None:
+def _report_eigenportfolios(run, horizon) -> None:
     print("\n  The factor covariance's eigenportfolios against the next period's estimated factor "
-          "returns, by rank, 1 the largest eigenvalue")
-    print(f"  {'rank':>4} {'vol, median':>12} {'T':>5} {'bias':>7} {'':>5}  {'MRAD':>6}   "
-          f"{'21-day':>6}")
+          "returns, by rank, 1 the largest eigenvalue"
+          + (f"; at {horizon} days against the sum of the {horizon} periods' after the forecast"
+             if horizon > 1 else ""))
+    columns = f"{'1 day':>7} {'':>5}  {'MRAD':>6}"
+    if horizon > 1:
+        columns += f"   {f'{horizon} days':>7} {'':>5} {'apart':>6}"
+    print(f"  {'rank':>4} {'vol, median':>12} {'T':>5} {columns}")
     for k in range(run.eigen_forecast.shape[0]):
         stats = bias_statistics(run.eigen_forecast[k], run.eigen_realised[k])
-        horizon = bias_statistics(run.eigen_horizon_forecast[k], run.eigen_horizon_realised[k])
         vol = float(np.median(run.eigen_forecast[k]) * np.sqrt(BIAS_YEAR))
-        print(f"  {k + 1:>4} {vol:>12.2%} {stats.n:>5} {stats.statistic:>7.3f} "
-              f"{stats.verdict:>5}  {stats.mrad:>6.3f}   {horizon.statistic:>6.3f}")
+        cells = f"{stats.statistic:>7.3f} {stats.verdict:>5}  {stats.mrad:>6.3f}"
+        if horizon > 1:
+            forecast, realised = run.eigen_outcomes(horizon)
+            at = bias_statistics(forecast[k], realised[k], overlap=horizon)
+            forecast, realised = run.eigen_outcomes(horizon, overlapping=False)
+            away = bias_statistics(forecast[k], realised[k])
+            cells += f"   {at.statistic:>7.3f} {at.verdict:>5} {away.statistic:>6.3f}"
+        print(f"  {k + 1:>4} {vol:>12.2%} {stats.n:>5} {cells}")
 
 
-def _save_bias(path, run, caps) -> None:
-    """Every forecast and outcome, for comparing runs."""
+def _report_horizons(run, groups, member_stats, securities) -> None:
+    """Every horizon evaluated, side by side: the statistic with the windows overlapping, and
+    after the slash with them apart -- each forecast at h times its daily variance."""
+    horizons = (1,) + run.horizons
+    columns = _member_columns(member_stats, securities)
+
+    def portfolio(name):
+        return lambda h, overlapping: run.statistics(
+            name, horizon=h, overlapping=overlapping).statistic
+
+    def random(family):
+        names = [n for n in run.names if n.startswith(f"random {family} ")]
+        return lambda h, overlapping: float(np.median(
+            [run.statistics(n, horizon=h, overlapping=overlapping).statistic for n in names]))
+
+    def members(h, overlapping):
+        forecast, realised = run.member_outcomes(h, overlapping=overlapping)
+        stats = [bias_statistics(forecast[:, j], realised[:, j]) for j in columns]
+        return float(np.median([s.statistic for s in stats
+                                if s.n >= (2 if overlapping else 12)]))
+
+    def industries(h, overlapping):
+        return float(np.mean([abs(run.statistics(f"industry: {g}", horizon=h,
+                                                 overlapping=overlapping).statistic - 1.0)
+                              for g in groups]))
+
+    def eigen(ranks):
+        def read(h, overlapping):
+            forecast, realised = run.eigen_outcomes(h, overlapping=overlapping)
+            return float(np.mean([bias_statistics(forecast[k], realised[k]).statistic
+                                  for k in ranks]))
+        return read
+
+    k = run.eigen_forecast.shape[0]
+    rows = [(name, portfolio(name)) for name in run.names[:4]]
+    rows += [(name, portfolio(name)) for name in ("minimum variance, long-only",
+                                                  "minimum variance, unconstrained")]
+    rows += [("random long-only, median", random("long-only")),
+             ("random long-short, median", random("long-short"))]
+    if columns:
+        rows.append(("every member singly, median", members))
+    if groups:
+        rows.append(("industries, mean abs(bias - 1)", industries))
+    rows += [(f"eigenportfolios 1-{min(5, k)}, mean", eigen(range(min(5, k)))),
+             (f"eigenportfolios {max(k - 4, 1)}-{k}, mean", eigen(range(max(k - 5, 0), k)))]
+    print("\n  At every horizon evaluated, each forecast at h times its daily variance: the "
+          "statistic with the windows overlapping / apart")
+    print(f"  {'':<34}" + "".join(
+        f" {'1 day' if h == 1 else f'{h} days':>13}" for h in horizons))
+    for label, read in rows:
+        cells = []
+        for h in horizons:
+            if h == 1:
+                cells.append(f"{read(1, True):>13.3f}")
+            else:
+                cells.append(f"{read(h, True):>7.3f}/{read(h, False):<5.3f}")
+        print(f"  {label:<34}" + "".join(f" {cell:>13}" for cell in cells))
+
+
+def _save_bias(path, run, caps, horizon) -> None:
+    """Every forecast and outcome, for comparing runs: the daily ones, and each horizon's
+    outcomes with the windows overlapping (its forecast the daily one times sqrt(h); apart,
+    every h-th date's from the first)."""
+    by_horizon = {}
+    for h in run.horizons:
+        by_horizon[f"realised_h{h}"] = run.horizon_realised[h]
+        by_horizon[f"member_realised_h{h}"] = run.member_horizon_realised[h]
+        by_horizon[f"eigen_realised_h{h}"] = run.eigen_horizon_realised[h]
     np.savez_compressed(
         path,
         dates=np.array([str(d) for d in run.dates]),
-        horizon_dates=np.array([str(d) for d in run.horizon_dates]),
         names=np.array(run.names),
         securities=np.array(run.securities),
+        model_horizon=np.array(horizon),
+        horizons=np.array(run.horizons, dtype=int),
         forecast=run.forecast, realised=run.realised,
-        horizon_forecast=run.horizon_forecast, horizon_realised=run.horizon_realised,
         member_forecast=run.member_forecast, member_realised=run.member_realised,
-        member_horizon_forecast=run.member_horizon_forecast,
-        member_horizon_realised=run.member_horizon_realised,
         eigen_forecast=run.eigen_forecast, eigen_realised=run.eigen_realised,
-        eigen_horizon_forecast=run.eigen_horizon_forecast,
-        eigen_horizon_realised=run.eigen_horizon_realised,
         repaired=run.repaired,
         held_long_only=run.min_variance_held["long-only"],
         held_unconstrained=run.min_variance_held["unconstrained"],
         caps=caps,
+        **by_horizon,
     )
     print(f"  every forecast and outcome written to {path}")
 
@@ -1020,7 +1204,14 @@ def main(argv: list[str] | None = None) -> int:
                              "more days than a 5-year panel has")
     parser.add_argument("--half-life", type=float, default=90.0,
                         help="volatility half-life in trading days (BIM301S uses 90)")
-    parser.add_argument("--newey-west-lags", type=int, default=10)
+    parser.add_argument("--horizon", type=int, default=None, metavar="H",
+                        help=f"the model's horizon in trading days (default {HORIZON}): the "
+                             f"factor covariance Newey-West at H - 1 lags with Bartlett weights, "
+                             f"on the volatilities and the correlations alike, which is exactly "
+                             f"the per-day variance of H-day returns; 1 is the one-day covariance")
+    parser.add_argument("--newey-west-lags", type=int, default=None, metavar="L",
+                        help="the Newey-West lags, overriding --horizon's H - 1; the horizon is "
+                             "then L + 1")
     parser.add_argument("--industries", action="store_true",
                         help="add SIC-derived industry factors and drop the market factor, "
                              "which they span; codes come from the fetch cache at no cost")
@@ -1085,20 +1276,38 @@ def main(argv: list[str] | None = None) -> int:
                              "default), or its residuals in the regressions alone; factor "
                              "returns and the specific risk model's fit keep to the "
                              "regressions either way")
-    parser.add_argument("--specific-half-life", type=float, default=None,
+    parser.add_argument("--specific-half-life", type=half_life_or_none,
+                        default=SPECIFIC_HALF_LIFE, metavar="H",
                         help="weight each security's specific-risk history by this half-life "
-                             "in trading days, the blend told its effective number of "
-                             "observations; by default every specific return weighs the same")
-    parser.add_argument("--correlation-half-life", type=float, default=None,
+                             f"in trading days, the blend told its effective number of "
+                             f"observations (default {SPECIFIC_HALF_LIFE:g}); none weighs every "
+                             f"specific return the same")
+    parser.add_argument("--correlation-half-life", type=half_life_or_none,
+                        default=CORRELATION_HALF_LIFE, metavar="H",
                         help="the two-half-life factor covariance: correlations on this "
                              "half-life in trading days, volatilities on --half-life's, both "
-                             "Newey-West with --newey-west-lags; by default one half-life")
+                             f"Newey-West at the horizon's lags (default "
+                             f"{CORRELATION_HALF_LIFE:g}); none is one half-life for the whole "
+                             f"matrix")
+    parser.add_argument("--variance-ratio-half-life", type=float, default=None, metavar="H",
+                        help="each factor volatility its one-day volatility on --half-life "
+                             "times the square root of its variance ratio at the horizon -- its "
+                             "Newey-West variance over its one-day variance -- estimated on "
+                             "this half-life, so the serial correlation comes from the long "
+                             "window and the level from the short one (with the two-half-life "
+                             "covariance); by default each volatility is Newey-West on "
+                             "--half-life")
     parser.add_argument("--bias", action="store_true",
                         help="the out-of-sample bias statistics: the model refitted as of each "
                              "trading day from its first with a year of factor returns, each "
-                             "forecast against the next day's return, over the index, the size "
-                             "pair, the industries, random and minimum-variance portfolios, "
-                             "every member singly and the eigenportfolios; about 15 minutes")
+                             "forecast against the next day's return and the next H days', H "
+                             "the model's horizon, over the index, the size pair, the "
+                             "industries, random and minimum-variance portfolios, every member "
+                             "singly and the eigenportfolios; about ten minutes")
+    parser.add_argument("--bias-horizons", type=horizon_list, default=(), metavar="H,H",
+                        help="with --bias, more horizons in trading days to evaluate every "
+                             "forecast at, beside one day and the model's own, comma-separated; "
+                             "summarised side by side and kept in --bias-out")
     parser.add_argument("--bias-out", default=None, metavar="PATH",
                         help="with --bias, every forecast and outcome to this .npz")
     parser.add_argument("--bias-guard", type=int, default=5, metavar="N",
@@ -1106,6 +1315,21 @@ def main(argv: list[str] | None = None) -> int:
                              "model's inputs on from the panel cut at the date, the scheme "
                              "held (default 5: the first, the last and three between; 0 skips)")
     args = parser.parse_args(argv)
+    if args.horizon is not None and args.horizon < 1:
+        parser.error(f"--horizon must be at least one trading day; got {args.horizon}")
+    if args.newey_west_lags is not None and args.newey_west_lags < 0:
+        parser.error(f"--newey-west-lags must be non-negative; got {args.newey_west_lags}")
+    if args.variance_ratio_half_life is not None:
+        if args.correlation_half_life is None:
+            parser.error("--variance-ratio-half-life needs the two-half-life covariance, not "
+                         "--correlation-half-life none")
+        if not args.variance_ratio_half_life > 0.0:
+            parser.error(f"--variance-ratio-half-life must be positive; got "
+                         f"{args.variance_ratio_half_life}")
+    # The lags in effect, and the horizon they make: --newey-west-lags overrides --horizon.
+    lags = (args.newey_west_lags if args.newey_west_lags is not None
+            else (HORIZON if args.horizon is None else args.horizon) - 1)
+    horizon = lags + 1
     # None leaves the window to the library.
     beta_months = (
         args.beta_window if args.beta_days is None
@@ -1330,16 +1554,42 @@ def main(argv: list[str] | None = None) -> int:
     print("\nModel")
     print(f"  regression weights: "
           f"{'equal' if args.equal_weight else 'square root of capitalisation'}")
-    # One half-life for the whole matrix, Newey-West; or, with --correlation-half-life, the
-    # two-half-life estimator: correlations on that one, volatilities on --half-life's, both
-    # Newey-West, as USE4 corrects both horizons.
+    # The horizon (midoffice11's ruling 3): Newey-West with Bartlett weights at L lags is the
+    # per-day variance of (L + 1)-day returns, so the lags are the horizon, said in days.
+    if args.newey_west_lags is None:
+        source = ""
+    else:
+        source = f"; set by --newey-west-lags {lags}" + (
+            f", overriding --horizon {args.horizon}"
+            if args.horizon is not None and args.horizon != horizon else "")
+    ratio = args.variance_ratio_half_life
+    if horizon == 1:
+        print(f"  the horizon: 1 trading day -- the factor covariance the one-day covariance, "
+              f"with no Newey-West lags, and the specific risk one day's variance{source}")
+    elif ratio is None:
+        print(f"  the horizon: {horizon} trading days -- the factor covariance Newey-West at "
+              f"{lags} lag(s) with Bartlett weights, on the volatilities and the correlations "
+              f"alike, which is exactly the per-day variance of {horizon}-day returns; the "
+              f"specific risk one day's variance, with no lags, at every horizon{source}")
+    else:
+        print(f"  the horizon: {horizon} trading days -- the factor correlations Newey-West at "
+              f"{lags} lag(s) with Bartlett weights, which is exactly the per-day variance of "
+              f"{horizon}-day returns, and each factor volatility its one-day volatility on a "
+              f"half-life of {args.half_life:g} times the square root of its variance ratio at "
+              f"{lags} lags, the ratio estimated on a half-life of {ratio:g}: the serial "
+              f"correlation from the long window, the level from the short; the specific risk "
+              f"one day's variance, with no lags, at every horizon{source}")
+    # One half-life for the whole matrix, Newey-West; or the two-half-life estimator (the
+    # default, midoffice11's ruling 2): correlations on --correlation-half-life, volatilities
+    # on --half-life's, both Newey-West at the horizon's lags, as USE4 corrects both horizons.
     if args.correlation_half_life is None:
-        estimator = NeweyWestCovariance(lags=args.newey_west_lags, half_life=args.half_life)
+        estimator = NeweyWestCovariance(lags=lags, half_life=args.half_life)
     else:
         estimator = HorizonCovariance(
             volatility_half_life=args.half_life,
             correlation_half_life=args.correlation_half_life,
-            newey_west_lags=args.newey_west_lags,
+            newey_west_lags=lags,
+            ratio_half_life=ratio,
         )
     options = dict(
         standardise=False,
@@ -1723,7 +1973,8 @@ def main(argv: list[str] | None = None) -> int:
         for note in qualifications:
             print(f"  - {note}")
     if args.bias:
-        bias_section(args, panel, market, membership, codes, merges, inputs, model, options)
+        bias_section(args, panel, market, membership, codes, merges, inputs, model, options,
+                     horizon)
     return 0
 
 

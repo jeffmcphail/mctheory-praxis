@@ -22,6 +22,7 @@ from praxis.midoffice.model.bias import (
     eigenportfolios,
     evaluate,
     minimum_variance,
+    overlapping_band,
     rolling_bias,
 )
 
@@ -68,6 +69,35 @@ def test_the_statistics_read_realised_over_forecast_and_roll_over_windows():
     assert stats.mrad == pytest.approx(np.mean(np.abs(stats.rolling - 1.0)))
     assert stats.verdict == "under" and abs(stats.kurtosis - 3.0) < 0.6
     assert rolling_bias(np.ones(10), 20).size == 0
+
+
+def test_the_overlapping_band_is_simulated_and_wider_and_at_one_period_the_plain_one():
+    """Windows of h periods, each starting a period after the last, are serially correlated:
+    for large n the statistic's spread is sqrt((2h^2 + 1) / 3h) times the independent one's,
+    and the sample mean takes a little more off, so the band sits a shade below one."""
+    assert overlapping_band(686, 1) == bias_band(686)
+    assert np.isnan(overlapping_band(1, 5)[0])
+    for h, n in ((5, 682), (11, 676), (21, 666)):
+        low, high = overlapping_band(n, h)
+        assert low < 1.0 < high
+        factor = np.sqrt((2.0 * h * h + 1.0) / (3.0 * h))
+        assert (high - low) / 2.0 == pytest.approx(factor * 1.96 / np.sqrt(2.0 * n), rel=0.06)
+        assert (low + high) / 2.0 < 1.0
+        # The same band each time it is read, from the same simulation.
+        assert overlapping_band(n, h) == (low, high)
+    # Its coverage, on tests drawn apart from the simulation's own: about 95 percent.
+    rng = np.random.default_rng(99)
+    h, n = 11, 400
+    low, high = overlapping_band(n, h)
+    days = rng.standard_normal((4_000, n + h - 1))
+    running = np.concatenate([np.zeros((4_000, 1)), np.cumsum(days, axis=1)], axis=1)
+    z = (running[:, h:] - running[:, :-h]) / np.sqrt(h)
+    stats = np.std(z, axis=1, ddof=1)
+    assert np.mean((stats > low) & (stats < high)) == pytest.approx(0.95, abs=0.012)
+    # A statistic read with an overlap takes that band, and no kurtosis band.
+    read = bias_statistics(np.ones(n), z[0], overlap=h)
+    assert (read.low, read.high) == (low, high) and read.overlap == h
+    assert np.isnan(read.fat_band[0])
 
 
 # ------------------------------------------------------------------ forecasts and portfolios
@@ -182,10 +212,51 @@ def test_forecasts_that_are_the_truth_score_one_and_a_known_shortfall_its_invers
     assert 0.85 < inside <= 1.0
     eigen = [bias_statistics(truth.eigen_forecast[k], truth.eigen_realised[k]) for k in range(5)]
     assert all(abs(e.statistic - 1.0) < 2.5 * band for e in eigen)
-    # The horizon check: every 21st date, 21 periods ahead, non-overlapping.
-    assert len(truth.horizon_dates) == 699 // 21 + (1 if 699 % 21 else 0) - 1
-    assert abs(truth.statistics("the index, cap-weighted", horizon=True).statistic - 1.0) < 0.35
+    # The horizon: every 21st date, 21 periods ahead, the windows apart.
+    apart = truth.statistics("the index, cap-weighted", horizon=21, overlapping=False)
+    assert apart.n == 699 // 21 + (1 if 699 % 21 else 0) - 1
+    assert abs(apart.statistic - 1.0) < 0.35
     assert truth.min_variance_violation["long-only"].max() < 1e-7
+
+
+def test_at_a_horizon_every_forecast_is_held_h_periods_and_every_hth_is_apart():
+    """Every forecast date's portfolios bought and held h periods, its forecast sqrt(h) times
+    the one-period one; the truth scoring one inside the simulated band, a known shortfall its
+    inverse; every h-th from the first the windows apart; one period the daily statistic."""
+    world = _known_world()
+    forecast, dates, securities, returns, membership, caps, groups, f = world
+    rows = range(0, 699)
+    truth = _run(world, rows, horizons=(5, 1, 5))
+    short = _run(_known_world(scale=0.8), rows, horizons=(5,))
+    assert truth.horizons == (5,)
+    t, h = 40, 5
+    weights_index = np.full((1, 150), 0.0)
+    weights_index[0] = caps[t] / caps[t].sum()
+    held, outcome = truth.portfolio_outcomes(h)
+    assert held.shape == outcome.shape == truth.forecast.shape
+    assert outcome[0, t] == pytest.approx(buy_and_hold(returns[t + 1 : t + 1 + h],
+                                                       weights_index)[0], rel=1e-12)
+    assert held[0, t] == truth.forecast[0, t] * np.sqrt(h)
+    assert np.isnan(outcome[:, -4:]).all() and np.isfinite(outcome[:, -5]).all()
+    members_forecast, members_realised = truth.member_outcomes(h)
+    assert members_realised[t, 3] == pytest.approx(np.prod(1 + returns[t + 1 : t + 6, 3]) - 1)
+    eigen_forecast, eigen_realised = truth.eigen_outcomes(h)
+    _, vectors = eigenportfolios(forecast.covariance)
+    assert np.allclose(eigen_realised[:, t], vectors.T @ f[t + 1 : t + 6].sum(axis=0))
+    for name in ("the index, cap-weighted", "minimum variance, unconstrained", "industry: I1"):
+        stats = truth.statistics(name, horizon=h)
+        assert stats.n == 699 - h + 1 and stats.overlap == h
+        # Within twice the simulated band's half-width, as the daily check above is.
+        assert abs(stats.statistic - 1.0) < stats.high - stats.low
+        assert short.statistics(name, horizon=h).statistic == pytest.approx(
+            stats.statistic / 0.8, rel=1e-9)
+        apart = truth.statistics(name, horizon=h, overlapping=False)
+        _, every = truth.portfolio_outcomes(h, overlapping=False)
+        assert apart.n == np.isfinite(every[0]).sum() == 139 and apart.overlap == 1
+        # One period is the daily statistic itself.
+        assert truth.statistics(name, horizon=1) == truth.statistics(name)
+    with pytest.raises(KeyError, match="horizon 11 was not evaluated"):
+        truth.statistics("the index, cap-weighted", horizon=11)
 
 
 def test_a_member_with_no_next_return_is_left_out_of_that_days_portfolios_and_counted():
@@ -193,7 +264,7 @@ def test_a_member_with_no_next_return_is_left_out_of_that_days_portfolios_and_co
     returns = world[3].copy()
     returns[11, 5] = np.nan
     world[3] = returns
-    run = _run(tuple(world), range(0, 59), horizon=21)
+    run = _run(tuple(world), range(0, 59), horizons=(21,))
     assert run.dropped == 1
     assert np.isnan(run.member_forecast[10, 5]) and np.isfinite(run.member_forecast[11, 5])
     with pytest.raises(ValueError, match="no next period"):

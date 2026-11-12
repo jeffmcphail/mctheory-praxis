@@ -24,6 +24,13 @@ portfolio formed that day, as the index itself leaves it out; how many such memb
 were is counted. Over a longer horizon a portfolio is bought and held, a name that stops trading
 held as cash from then.
 
+**At a horizon of h periods** every forecast, at h times its one-period variance, is set against
+the h periods' return after it (midoffice12). The windows overlap, each starting a period after
+the last, so the outcomes are serially correlated and the statistic varies more than 2/T says:
+its band is found by simulation, right forecasts of normal returns (`overlapping_band`). Every
+h-th forecast from the first, the windows apart, is the statistic beside it, its band the plain
+one. At h = 1 both are the one-period statistic.
+
 **The eigenportfolios realise against estimated factor returns,** which carry each period's
 estimation noise: they test whether the covariance's eigenvalues are biased -- the case for
 Barra's eigenfactor adjustment -- and cannot judge a correction for that noise, which real
@@ -34,6 +41,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from functools import lru_cache
 from typing import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -43,6 +51,13 @@ from ..risk.basis import PSDRepair, nearest_psd
 
 ROLLING_WINDOW = 252
 """Twelve months of daily forecasts: the rolling windows' length."""
+
+OVERLAP_DRAWS = 10_000
+"""How many simulated tests the overlapping windows' band is read from: its quantiles are then
+good to about 0.001."""
+
+OVERLAP_SEED = 12
+"""The band's simulation is seeded, so a test reads the same band every time it is run."""
 
 
 def bias_statistic(z: np.ndarray) -> float:
@@ -60,6 +75,48 @@ def bias_band(n: int) -> tuple[float, float]:
         return float("nan"), float("nan")
     half = float(np.sqrt(2.0 / n))
     return 1.0 - half, 1.0 + half
+
+
+@lru_cache(maxsize=None)
+def _simulated_bands(size: int, horizon: int, draws: int, seed: int) -> tuple[np.ndarray, ...]:
+    """The 2.5 and 97.5 percentiles of the statistic over the first n of `size` overlapping
+    windows, for every n from 2: `draws` tests of right forecasts of standard normal returns,
+    each window the sum of `horizon` consecutive returns over sqrt(horizon), each starting a
+    period after the last. One simulation serves every n, each test's statistic read off its
+    prefix sums."""
+    k = np.arange(2, size + 1, dtype=float)
+    stats = np.empty((draws, size - 1))
+    rng = np.random.default_rng(seed)
+    chunk = 1_000
+    for start in range(0, draws, chunk):
+        m = min(chunk, draws - start)
+        days = rng.standard_normal((m, size + horizon - 1))
+        running = np.concatenate([np.zeros((m, 1)), np.cumsum(days, axis=1)], axis=1)
+        z = (running[:, horizon:] - running[:, :-horizon]) / np.sqrt(horizon)
+        first = np.cumsum(z, axis=1)[:, 1:]
+        second = np.cumsum(z * z, axis=1)[:, 1:]
+        variance = (second - first * first / k) / (k - 1.0)
+        stats[start : start + m] = np.sqrt(np.clip(variance, 0.0, None))
+    low, high = np.quantile(stats, [0.025, 0.975], axis=0)
+    return low, high
+
+
+def overlapping_band(
+    n: int, horizon: int, *, draws: int = OVERLAP_DRAWS, seed: int = OVERLAP_SEED
+) -> tuple[float, float]:
+    """The statistic's 95 percent band for n outcomes over `horizon` periods each whose windows
+    overlap, each starting a period after the last: for right forecasts of normal returns, by
+    simulation. The overlap makes the outcomes serially correlated, and the band wider than
+    1 +/- sqrt(2/n) -- about sqrt((2h^2 + 1) / 3h) times as wide, for large n. At horizon 1 the
+    windows are apart, and it is `bias_band`'s."""
+    if horizon <= 1:
+        return bias_band(n)
+    if n < 2:
+        return float("nan"), float("nan")
+    # Simulated once per size class, so a band depends on n and the horizon alone.
+    size = max(1024, 1 << (n - 1).bit_length())
+    low, high = _simulated_bands(size, int(horizon), int(draws), int(seed))
+    return float(low[n - 2]), float(high[n - 2])
 
 
 def rolling_bias(z: np.ndarray, window: int = ROLLING_WINDOW) -> np.ndarray:
@@ -86,6 +143,9 @@ class BiasStatistics:
     # 1 +/- 1.96 sqrt((kurtosis - 1) / (4 n)).
     kurtosis: float = float("nan")
     mean: float = float("nan")
+    # How many periods each outcome's window spans, each starting a period after the last: 1
+    # for outcomes apart, whose band is 1 +/- sqrt(2/n); more, and the band is simulated.
+    overlap: int = 1
 
     @property
     def verdict(self) -> str:
@@ -99,24 +159,31 @@ class BiasStatistics:
 
     @property
     def fat_band(self) -> tuple[float, float]:
-        if not np.isfinite(self.kurtosis) or self.n < 1:
+        """The band the outcomes' own kurtosis implies; for independent outcomes alone, so nan
+        where the windows overlap."""
+        if not np.isfinite(self.kurtosis) or self.n < 1 or self.overlap > 1:
             return float("nan"), float("nan")
         half = 1.96 * float(np.sqrt(max(self.kurtosis - 1.0, 0.0) / (4.0 * self.n)))
         return 1.0 - half, 1.0 + half
 
 
 def bias_statistics(
-    forecast: np.ndarray, realised: np.ndarray, *, window: int = ROLLING_WINDOW
+    forecast: np.ndarray,
+    realised: np.ndarray,
+    *,
+    window: int = ROLLING_WINDOW,
+    overlap: int = 1,
 ) -> BiasStatistics:
     """The statistic of realised / forecast over the outcomes where both are finite and the
-    forecast is positive, in date order."""
+    forecast is positive, in date order. `overlap` is how many periods each outcome's window
+    spans, each starting a period after the last: past 1 the band is `overlapping_band`'s."""
     forecast = np.asarray(forecast, dtype=float)
     realised = np.asarray(realised, dtype=float)
     ok = np.isfinite(forecast) & np.isfinite(realised) & (forecast > 0.0)
     z = np.where(ok, realised / np.where(ok, forecast, 1.0), np.nan)
     finite = z[ok]
     n = int(finite.size)
-    low, high = bias_band(n)
+    low, high = bias_band(n) if overlap <= 1 else overlapping_band(n, overlap)
     rolling = rolling_bias(z[ok], window)
     kurtosis = mean = float("nan")
     if n >= 4:
@@ -132,6 +199,7 @@ def bias_statistics(
         mrad=float(np.mean(np.abs(rolling - 1.0))) if rolling.size else float("nan"),
         kurtosis=kurtosis,
         mean=mean,
+        overlap=max(int(overlap), 1),
     )
 
 
@@ -288,15 +356,14 @@ class BiasRun:
     # The eigenportfolios by rank, largest eigenvalue first: factors by dates.
     eigen_forecast: np.ndarray
     eigen_realised: np.ndarray
-    # The non-overlapping horizon: its forecast dates, and the same three at its scale.
-    horizon: int
-    horizon_dates: tuple[date, ...]
-    horizon_forecast: np.ndarray
-    horizon_realised: np.ndarray
-    member_horizon_forecast: np.ndarray
-    member_horizon_realised: np.ndarray
-    eigen_horizon_forecast: np.ndarray
-    eigen_horizon_realised: np.ndarray
+    # Each horizon h evaluated past one period: every forecast date's outcome over the h
+    # periods after it, bought and held, the windows overlapping -- nan where the test has
+    # fewer than h periods left -- for the portfolios, the members and the eigenportfolios, in
+    # the shapes above. The forecast at h is the one-period one times sqrt(h).
+    horizons: tuple[int, ...]
+    horizon_realised: Mapping[int, np.ndarray]
+    member_horizon_realised: Mapping[int, np.ndarray]
+    eigen_horizon_realised: Mapping[int, np.ndarray]
     # Per date: whether the engine's PSD repair bound, and the minimum-variance portfolios'
     # sizes and KKT violations.
     repaired: np.ndarray
@@ -307,11 +374,45 @@ class BiasRun:
     securities: tuple[str, ...]
     random_seed: int
 
-    def statistics(self, name: str, *, horizon: bool = False) -> BiasStatistics:
+    def _at(self, forecast, realised, by_horizon, horizon, overlapping, axis):
+        if horizon == 1:
+            return forecast, realised
+        if horizon not in self.horizons:
+            raise KeyError(f"horizon {horizon} was not evaluated; this run has "
+                           f"{(1,) + self.horizons}")
+        forecast, realised = forecast * np.sqrt(horizon), by_horizon[horizon]
+        if not overlapping:
+            # Every h-th forecast date from the first: the windows apart.
+            apart = np.arange(0, len(self.dates), horizon)
+            forecast = np.take(forecast, apart, axis=axis)
+            realised = np.take(realised, apart, axis=axis)
+        return forecast, realised
+
+    def portfolio_outcomes(self, horizon: int = 1, *, overlapping: bool = True):
+        """The portfolios' forecasts and outcomes at a horizon, names by dates; apart, every
+        h-th forecast date's from the first."""
+        return self._at(self.forecast, self.realised, self.horizon_realised, horizon,
+                        overlapping, 1)
+
+    def member_outcomes(self, horizon: int = 1, *, overlapping: bool = True):
+        """Every member's forecasts and outcomes at a horizon, dates by securities."""
+        return self._at(self.member_forecast, self.member_realised,
+                        self.member_horizon_realised, horizon, overlapping, 0)
+
+    def eigen_outcomes(self, horizon: int = 1, *, overlapping: bool = True):
+        """The eigenportfolios' forecasts and outcomes at a horizon, factors by dates."""
+        return self._at(self.eigen_forecast, self.eigen_realised, self.eigen_horizon_realised,
+                        horizon, overlapping, 1)
+
+    def statistics(
+        self, name: str, *, horizon: int = 1, overlapping: bool = True
+    ) -> BiasStatistics:
+        """A named portfolio's statistics at a horizon: at one period the daily statistic;
+        past it the windows overlapping, their band simulated, or apart."""
         row = self.names.index(name)
-        if horizon:
-            return bias_statistics(self.horizon_forecast[row], self.horizon_realised[row])
-        return bias_statistics(self.forecast[row], self.realised[row])
+        forecast, realised = self.portfolio_outcomes(horizon, overlapping=overlapping)
+        return bias_statistics(forecast[row], realised[row],
+                               overlap=horizon if overlapping else 1)
 
 
 def _random_weights(keys, sizes, eligible_idx, count, long_short):
@@ -346,12 +447,13 @@ def evaluate(
     random_portfolios: int = 100,
     random_names: int = 30,
     seed: int = 11,
-    horizon: int = 21,
+    horizons: Sequence[int] = (21,),
     progress: Callable[[int, int], None] | None = None,
     total: int | None = None,
 ) -> BiasRun:
     """Every forecast in `forecasts` -- (row, forecast as of that row) on the panel's rows --
-    against the next row's outcome, for a standard set of portfolios.
+    against the next row's outcome, and over each of `horizons` (in periods), for a standard
+    set of portfolios.
 
     `returns`, `membership` and `capitalisations` are dates by securities on the panel's rows;
     `factor_returns` dates by factors on the same rows, nan where the period was not estimated.
@@ -368,11 +470,15 @@ def evaluate(
       portfolio keeps its names from day to day but for the index's changes;
     - every member singly, and the covariance's eigenportfolios against the factor returns.
 
-    Every `horizon`-th forecast date, from the first, is also tested over the `horizon` periods
-    after it, bought and held: the non-overlapping check.
+    Every forecast date is also tested over each horizon h past one period -- every portfolio
+    and member bought at its forecast date and held h periods, the eigenportfolios against the
+    sum of the h periods' factor returns -- the windows overlapping; every h-th from the first
+    is the windows apart (`BiasRun.statistics`).
     """
     securities = tuple(securities)
     n_secs = len(securities)
+    horizons = tuple(sorted({int(h) for h in horizons if int(h) > 1}))
+    n_factors = factor_returns.shape[1]
     rng = np.random.default_rng(seed)
     long_keys, long_sizes = rng.random((random_portfolios, n_secs)), rng.random(
         (random_portfolios, n_secs)
@@ -396,13 +502,9 @@ def evaluate(
     member_realised: list[np.ndarray] = []
     eigen_forecast: list[np.ndarray] = []
     eigen_realised: list[np.ndarray] = []
-    horizon_rows: list[int] = []
-    h_forecast: list[np.ndarray] = []
-    h_realised: list[np.ndarray] = []
-    mh_forecast: list[np.ndarray] = []
-    mh_realised: list[np.ndarray] = []
-    eh_forecast: list[np.ndarray] = []
-    eh_realised: list[np.ndarray] = []
+    h_realised: dict[int, list[np.ndarray]] = {h: [] for h in horizons}
+    mh_realised: dict[int, list[np.ndarray]] = {h: [] for h in horizons}
+    eh_realised: dict[int, list[np.ndarray]] = {h: [] for h in horizons}
     repaired: list[bool] = []
     held = {"long-only": [], "unconstrained": []}
     violation = {"long-only": [], "unconstrained": []}
@@ -457,17 +559,18 @@ def evaluate(
         eigen_forecast.append(np.sqrt(np.clip(values, 0.0, None) / scale))
         eigen_realised.append(vectors.T @ factor_returns[t + 1])
         repaired.append(forecast.repair.repaired)
-        if (t - first_row) % horizon == 0 and t + horizon <= last_row:
-            block = returns[t + 1 : t + 1 + horizon]
-            horizon_rows.append(t)
-            h_forecast.append(out_forecast[-1] * np.sqrt(horizon))
-            h_realised.append(np.where(live, buy_and_hold(block, weights), np.nan))
+        for h in horizons:
+            if t + h > last_row:
+                h_realised[h].append(np.full(len(names), np.nan))
+                mh_realised[h].append(np.full(n_secs, np.nan))
+                eh_realised[h].append(np.full(n_factors, np.nan))
+                continue
+            block = returns[t + 1 : t + 1 + h]
+            h_realised[h].append(np.where(live, buy_and_hold(block, weights), np.nan))
             growth = np.prod(1.0 + np.nan_to_num(block, nan=0.0), axis=0) - 1.0
-            mh_forecast.append(member_forecast[-1] * np.sqrt(horizon))
-            mh_realised.append(np.where(eligible, growth, np.nan))
-            eh_forecast.append(eigen_forecast[-1] * np.sqrt(horizon))
-            eh_realised.append(vectors.T @ np.nansum(factor_returns[t + 1 : t + 1 + horizon],
-                                                     axis=0))
+            mh_realised[h].append(np.where(eligible, growth, np.nan))
+            eh_realised[h].append(vectors.T @ np.nansum(factor_returns[t + 1 : t + 1 + h],
+                                                        axis=0))
         rows_seen.append(t)
         if progress is not None:
             progress(count + 1, total or 0)
@@ -482,16 +585,13 @@ def evaluate(
         realised=stack(out_realised, len(names)),
         member_forecast=np.array(member_forecast),
         member_realised=np.array(member_realised),
-        eigen_forecast=stack(eigen_forecast, factor_returns.shape[1]),
-        eigen_realised=stack(eigen_realised, factor_returns.shape[1]),
-        horizon=horizon,
-        horizon_dates=tuple(dates[t] for t in horizon_rows),
-        horizon_forecast=stack(h_forecast, len(names)),
-        horizon_realised=stack(h_realised, len(names)),
-        member_horizon_forecast=np.array(mh_forecast),
-        member_horizon_realised=np.array(mh_realised),
-        eigen_horizon_forecast=stack(eh_forecast, factor_returns.shape[1]),
-        eigen_horizon_realised=stack(eh_realised, factor_returns.shape[1]),
+        eigen_forecast=stack(eigen_forecast, n_factors),
+        eigen_realised=stack(eigen_realised, n_factors),
+        horizons=horizons,
+        horizon_realised={h: stack(h_realised[h], len(names)) for h in horizons},
+        member_horizon_realised={h: np.array(mh_realised[h]).reshape(-1, n_secs)
+                                 for h in horizons},
+        eigen_horizon_realised={h: stack(eh_realised[h], n_factors) for h in horizons},
         repaired=np.array(repaired, dtype=bool),
         min_variance_held={k: np.array(v) for k, v in held.items()},
         min_variance_violation={k: np.array(v) for k, v in violation.items()},

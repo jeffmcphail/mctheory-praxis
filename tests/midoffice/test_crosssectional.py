@@ -1675,6 +1675,15 @@ def test_the_two_half_life_estimators_diagonal_has_sampling_weights_and_the_shru
         and "weighted as the covariance" not in q
         for q in shrunk.qualifications()
     )
+    # Variance-ratio volatilities (midoffice12) are a product of estimates over another, no
+    # quadratic form: no weighted share either, and the run goes on without one.
+    ratio = HorizonCovariance(volatility_half_life=12.0, correlation_half_life=48.0,
+                              newey_west_lags=2, ratio_half_life=48.0)
+    with pytest.raises(ValueError, match="no quadratic form"):
+        sampling_weights(ratio, 30, diagonal=True)
+    varied = _fit(returns, chars, min_securities=12, covariance_estimator=ratio)
+    assert varied.notes.weighted_noise_share == ()
+    assert len(varied.notes.noise_share) == len(varied.factor_ids)
 
 
 def test_without_the_correction_the_loud_noise_qualification_quotes_the_weighted_share():

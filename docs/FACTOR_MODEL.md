@@ -254,8 +254,20 @@ that `effective_observations` means what Barra means by it.
 USE4 corrects both horizons for serial correlation; equal half-lives then reduce it to
 `NeweyWestCovariance`, which a test pins. Newey-West under exponential weights is not guaranteed
 PSD, and neither then is the recombination; the notes say when it is not. The S&P 500 run's
-`--correlation-half-life` takes it: correlations on that half-life, volatilities on
-`--half-life`'s, both at `--newey-west-lags`.
+factor covariance is this estimator by default (midoffice11's ruling 2): correlations on
+`--correlation-half-life` 504 trading days, BIM301S's two years, volatilities on `--half-life`'s
+90, both Newey-West at the horizon's lags; `--correlation-half-life none` is one half-life for
+the whole matrix.
+
+`ratio_half_life` (midoffice12, the run's `--variance-ratio-half-life`, off by default) takes
+each volatility's serial correlation from a longer window than its level: each variance is its
+one-period variance on the volatility half-life times its variance ratio at the lags -- its
+Newey-West variance over its one-period variance -- both on `ratio_half_life`. Twenty lags of
+autocovariance on a 90-day half-life are mostly estimation noise; over AR(1) factors the
+variant's variances scatter about the Bartlett target at 0.57 of the plain split's spread, and
+sit nearer it (0.98 of it on average, against 0.93), which a test pins. At no lags the ratio is
+one, and on the volatility half-life it is the plain split. Its diagonal is a product of two
+estimates over a third, no quadratic form in the returns, so it has no weighted noise share.
 
 ### Newey-West, and what Bartlett weighting costs
 
@@ -293,6 +305,16 @@ bias but add estimation noise from high-lag autocovariances that should be zero.
 twenty lags the recovery stops improving and starts falling back. Newey and West's own rule,
 `floor(4 (T/100)^(2/9))`, is conservative and close to the best available, which is why it is
 the default.
+
+**The lags are a horizon** (midoffice11's ruling 3). Two days k apart fall together in h - k of
+the h-day windows, so the h-day windows' sum of squares counts the lag-k autocovariance h - k
+times -- per day `1 - k/h`, Bartlett's weight at `L = h - 1`. Newey-West with Bartlett weights at
+L lags is therefore exactly the per-day variance of (L + 1)-day returns: a test pins it to
+rounding on a padded series. The S&P 500 model's 10 lags are an 11-day horizon -- not a month,
+and no standard one. Its run takes `--horizon H` in trading days, H - 1 lags on the volatilities
+and the correlations alike (`--newey-west-lags` still overrides it, the horizon then L + 1), and
+states the horizon in its report; the default stays 11 until midoffice12's measurements are in.
+Specific risk carries no lags: its per-day variance is one day's at every horizon.
 
 **The positive semi-definiteness guarantee is real, and it is conditional.** Bartlett weights
 make the equal-weighted estimator PSD by construction, and over 400 random panels its smallest
@@ -741,13 +763,17 @@ largest is Signature Bank's, from 58% to 396%: its history after its failure is 
 at fractions of a cent. The history is still equally weighted over the window, so a joiner's
 oldest volatility counts as much as its newest.
 
-`specific_half_life` (the run's `--specific-half-life`, midoffice11; None by default, equal
-weights, 09 ruling 3) weights each return by its age back from the forecast date, `0.5 ** (age /
-half_life)`, with the reliability-weighted variance -- the ddof-1 one at equal weights -- and
-tells the blend the history's effective number of observations, Kish's `(sum w)^2 / sum w^2`, in
-place of its count. A long history under a half-life `H` is worth about `2.885 H` observations,
-so the characteristics' weight rises as the history is discounted: at the S&P 500 run's spread,
-2.9% at an equal-weighted 938 periods, about 13% at `H = 63`.
+`specific_half_life` (midoffice11; the library's default None, equal weights) weights each return
+by its age back from the forecast date, `0.5 ** (age / half_life)`, with the reliability-weighted
+variance -- the ddof-1 one at equal weights -- and tells the blend the history's effective number
+of observations, Kish's `(sum w)^2 / sum w^2`, in place of its count. A long history under a
+half-life `H` is worth about `2.885 H` observations, so the characteristics' weight rises as the
+history is discounted: at the S&P 500 run's spread, 2.9% at an equal-weighted 938 periods,
+13.47% at `H = 63`. The S&P 500 run's `--specific-half-life` is 63 by default (midoffice11's
+ruling 1, superseding 09 ruling 3's equal weights), the best of the half-lives its bias
+statistics measured; `--specific-half-life none` weighs every return the same. Its median
+specific risk is 28.98%, where equal weights give 24.76%: the 63-day history follows the rise in
+residual dispersion through 2025 and 2026.
 
 ## Descriptors: building the exposures instead of assuming them
 
@@ -1141,9 +1167,19 @@ is 15.58 / 24.79 / 40.56% at p10 / median / p90.
 followed. Each forecast is made at a date's close from data through that date alone, taken to
 a daily scale, and set against the next trading day's total return: `z = realised / forecast`.
 The bias statistic is the standard deviation of z -- one if the forecasts are right, its 95%
-band about `1 +/- sqrt(2/T)` -- over the whole test, over every 12-month window with the
-windows' mean absolute deviation from one (MRAD), and over every 21st forecast's 21 days after
-it, bought and held, as a check.
+band about `1 +/- sqrt(2/T)` -- over the whole test, and over every 12-month window with the
+windows' mean absolute deviation from one (MRAD).
+
+**At the model's horizon** (midoffice12) every forecast, at h times its daily variance, is set
+against the h trading days' return after it, bought and held. The windows overlap, each starting
+a day after the last, so the outcomes are serially correlated and the statistic varies more than
+`sqrt(2/T)` says -- for large T about `sqrt((2h^2 + 1) / 3h)` times as much, 2.7 at h = 11 -- and
+the sample mean takes a little more off: the band is found by simulation, right forecasts of
+normal returns, 10,000 draws (`bias.overlapping_band`), and sits a shade below one. Beside it,
+every h-th forecast from the first, the windows apart, has the plain band. At h = 1 both are the
+daily statistic. `--bias-horizons` evaluates more horizons the same way; midoffice11's 21-day
+check is the 21-day statistic with the windows apart, and the new defaults' run reproduces it to
+the bit.
 
 **Refitted daily.** `crosssectional.cross_sectional_models_as_of` is the whole estimator on
 both panels cut at each date -- every return, characteristic, weight, membership,
@@ -1160,8 +1196,8 @@ factors: built once over the full sample's regression universe. **The guard**: o
 panel cut at the date through its own pipeline (`model_inputs`, the scheme held), and they
 equal the full run's through that date to the bit -- returns, exposures, weights,
 capitalisations, periods -- and so does the model made from them. It passed for the defaults
-and for floor 15 (2024-02-08, 2024-10-14, 2025-06-23, 2026-02-27, 2026-11-02); the run stops
-if it does not.
+and for floor 15 (2024-02-08, 2024-10-14, 2025-06-23, 2026-02-27, 2026-11-02), and for
+midoffice12's defaults on the same dates; the run stops if it does not.
 
 **The portfolios**, each formed at its forecast date from that date's members with a forecast
 and a next-day return, and held to the next: the index cap-weighted and equally weighted; the
@@ -1215,7 +1251,43 @@ horizon: that is estimation error, not a long-run effect.
   eigenportfolios 1.86, the random long-only portfolios 1.025 with 28% above the band where the
   defaults had 70%, at a cost of the index's MRAD 0.169 to 0.190.
 - **Together**, the 63-day history and the two half-lives add: members 1.034, random long-only
-  1.017 and long-short 1.016, the industries' mean absolute deviation from one 0.066.
+  1.017 and long-short 1.016, the industries' mean absolute deviation from one 0.066. They are
+  the defaults since midoffice11's rulings, and the new defaults' bias run equals that run to the
+  bit.
+
+**The horizon, measured** (midoffice12). On the new defaults, the model at horizons 1, 5, 11
+and 21 trading days, every one read at every one of those horizons (midoffice12's retro has the
+tables):
+
+- **At its own horizon each model is right for the broad portfolios:** the cap-weighted index
+  1.015, 0.991, 0.986 and 1.006, every broad portfolio inside its band. The equally weighted
+  index and the small caps drift below one as h grows (0.965 to 0.892, 0.956 to 0.866): over
+  three weeks the small caps mean-revert more (a realised variance ratio of 0.64) than the
+  21-day lags hold them to (0.73).
+- **The lags' price is paid in the small eigen-directions, at every horizon.** The smallest five
+  eigenportfolios read 1.19, 1.46, 1.92 and 2.69 at their own horizons, the one-day model's 1.16
+  to 1.20 at every horizon: at 20 lags their forecast variance falls to a third of the one-day
+  model's and no realised horizon follows. The unconstrained minimum-variance portfolio under the
+  one-day model reads 1.22 at one day and 1.045 at 21 days -- the latter two errors cancelling,
+  the optimisation bias and the portfolio's own mean reversion -- and under the 21-day model 1.63
+  and 1.31: the optimiser finds the lags' noise at any holding period.
+- **The lags hold the index's mean reversion about right** -- at 20 lags its per-day variance is
+  0.682 of the one-day model's, the realised 21-day ratio 0.702 -- so at 21 days the one-day
+  model scaled by sqrt(21) puts the index's forecast 16% above what was realised (0.860) where
+  the 21-day model reads 1.006. And they make the forecast noisier from day to day: the index's
+  log forecast volatility changes with an sd of 0.011 a day under the one-day model, 0.025 under
+  the 21-day one.
+- **The variance-ratio volatilities at 21 days** cut that noise to 0.014 and ease the optimiser's
+  bias (1.31 to 1.27), but the correlations' 20 lags keep the smallest eigenportfolios at 2.4,
+  and the two-year ratio, less mean-reverting than 2024-26 was, over-forecasts the broad
+  portfolios at 21 days more than the 21-day model does.
+- **The specific history at a 42-day half-life** moves the members' median 1.034 to 1.031: the
+  trend flattens, and 63 stays.
+
+Which horizon for which use, as midoffice12 reads it -- Jeff's to rule: one day for daily risk,
+and for construction at any holding period; the holding period's horizon as a reporting view of
+broad, long-only portfolios' risk over it; and so one day as the model's default, with the
+eigenvalue adjustment after, on the one-day matrix. The default stays 11 until ruled.
 
 ## Status
 

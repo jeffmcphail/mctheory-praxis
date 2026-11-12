@@ -240,11 +240,20 @@ class HorizonCovariance:
     half-lives then reduce it to `NeweyWestCovariance`. None, the default, is BIM301's plain
     exponential weighting. Newey-West under exponential weights is not guaranteed positive
     semi-definite, and neither then is the recombination: the notes say when it is not.
+
+    `ratio_half_life`, given with `newey_west_lags`, takes each volatility's serial correlation
+    from a longer window than its level (midoffice12): each variance is its one-period variance
+    on the volatility half-life times its variance ratio at the lags -- its Newey-West variance
+    over its one-period variance -- both on `ratio_half_life`. Ten or twenty lags of
+    autocovariance on a 90-day half-life are mostly estimation noise, while their ratio to the
+    one-period variance over two years is steadier; the level still follows the short window. At
+    no lags the ratio is one, and on the volatility half-life it is the plain split.
     """
 
     volatility_half_life: float
     correlation_half_life: float
     newey_west_lags: int | None = None
+    ratio_half_life: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("volatility_half_life", "correlation_half_life"):
@@ -256,6 +265,16 @@ class HorizonCovariance:
                 f"newey_west_lags must be non-negative, or None for no Newey-West; got "
                 f"{self.newey_west_lags!r}"
             )
+        if self.ratio_half_life is not None:
+            if self.newey_west_lags is None:
+                raise ValueError(
+                    "ratio_half_life sets the volatilities' variance ratio at the Newey-West "
+                    "lags, so it needs newey_west_lags"
+                )
+            if not self.ratio_half_life > 0.0:
+                raise ValueError(
+                    f"ratio_half_life must be positive, got {self.ratio_half_life!r}"
+                )
 
     def _estimator(self, half_life: float):
         if self.newey_west_lags is None:
@@ -265,8 +284,30 @@ class HorizonCovariance:
     def volatility_estimator(self) -> "ExponentialCovariance | NeweyWestCovariance":
         """The estimator the diagonal comes from: each variance is its estimate, the
         correlations aside. So the diagonal is a quadratic form in the returns even though the
-        matrix is not."""
+        matrix is not -- but for variance-ratio volatilities, a product of two estimates over a
+        third, which is none."""
+        if self.ratio_half_life is not None:
+            raise ValueError(
+                "variance-ratio volatilities are no quadratic form in the returns: each is a "
+                "one-period variance times a ratio of two others"
+            )
         return self._estimator(self.volatility_half_life)
+
+    def _ratio_variances(self, returns: np.ndarray, long: np.ndarray) -> np.ndarray:
+        """Each factor's one-period variance on the volatility half-life times its variance
+        ratio at the lags on `ratio_half_life`; a factor with no movement over the ratio's
+        window keeps its one-period variance."""
+        level = np.diag(ExponentialCovariance(self.volatility_half_life).estimate(returns).matrix)
+        lagged = (
+            long
+            if self.ratio_half_life == self.correlation_half_life
+            else self._estimator(self.ratio_half_life).estimate(returns).matrix
+        )
+        one_period = np.diag(ExponentialCovariance(self.ratio_half_life).estimate(returns).matrix)
+        moved = one_period > 0.0
+        ratio = np.ones_like(level)
+        ratio[moved] = np.diag(lagged)[moved] / one_period[moved]
+        return level * ratio
 
     @classmethod
     def bim301_long(cls, periods_per_year: float = 12.0) -> "HorizonCovariance":
@@ -301,15 +342,20 @@ class HorizonCovariance:
             vol_decay = 0.5 ** (1.0 / self.volatility_half_life)
             corr_matrix, corr_effective = _weighted_covariance(returns, corr_decay**ages)
             vol_matrix, vol_effective = _weighted_covariance(returns, vol_decay**ages)
+            short_variance = np.diag(vol_matrix)
         else:
             long = self._estimator(self.correlation_half_life).estimate(returns)
-            short = self._estimator(self.volatility_half_life).estimate(returns)
             corr_matrix, corr_effective = long.matrix, long.effective_observations
-            vol_matrix = short.matrix
+            if self.ratio_half_life is None:
+                short_variance = np.diag(
+                    self._estimator(self.volatility_half_life).estimate(returns).matrix
+                )
+            else:
+                short_variance = self._ratio_variances(returns, long.matrix)
 
         # Correlations from the long estimate, volatilities from the short one.
         long_sd = np.sqrt(np.clip(np.diag(corr_matrix), 0.0, None))
-        short_sd = np.sqrt(np.clip(np.diag(vol_matrix), 0.0, None))
+        short_sd = np.sqrt(np.clip(short_variance, 0.0, None))
         safe = np.where(long_sd > 0.0, long_sd, 1.0)
         correlation = corr_matrix / np.outer(safe, safe)
         # A factor with no movement over the long window has no correlation to anyone; leave
@@ -336,6 +382,9 @@ class HorizonCovariance:
         method = "exponential, split horizon"
         if self.newey_west_lags is not None:
             method = f"Newey-West, {self.newey_west_lags} lag(s), split horizon"
+            if self.ratio_half_life is not None:
+                method += (f", each volatility one period's times its variance ratio on "
+                           f"{self.ratio_half_life:g}")
             smallest = float(np.linalg.eigvalsh((matrix + matrix.T) / 2.0).min())
             if smallest < 0.0:
                 notes.append(

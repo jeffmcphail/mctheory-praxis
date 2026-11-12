@@ -1,16 +1,15 @@
 # Mid-office state
 
-**Updated:** 2026-11-12, at the end of midoffice11 (midoffice10's rulings; the out-of-sample
-bias statistics, the defaults and ten candidates). Brought up to date at the end of every
-piece, in the same commit as its retro (Rule 43). Not a history: the state a new session needs to carry on. The detail is in the
-retros named below.
+**Updated:** 2026-11-12, at the end of midoffice12 (midoffice11's rulings; the horizon, measured).
+Brought up to date at the end of every piece, in the same commit as its retro (Rule 43). Not a
+history: the state a new session needs to carry on. The detail is in the retros named below.
 
 ---
 
 ## Start here
 
 1. Read `claude/CLAUDE_CODE_RULES.md` (Rule 43 above all), then this file, then the latest retro:
-   `claude/retros/RETRO_midoffice11_bias_statistics.md`.
+   `claude/retros/RETRO_midoffice12_horizon.md`.
 2. **How the work runs.**
    - **The brief.** Each piece, `midofficeNN`, is a brief written in Chat and pasted into the Code
      session. Code transcribes it verbatim to `claude/handoffs/BRIEF_midofficeNN_<slug>.md`; its
@@ -30,8 +29,8 @@ retros named below.
    - Scratch goes to `claude/scratch/midofficeNN/` (gitignored), its outputs copied into the retro.
    - Python is ASCII and keeps the file's line endings (most `.py` here are CRLF in the working
      copy; the `claude/` briefs and retros LF).
-   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,338 passed
-     and 1 skipped at midoffice11. That file looks for `../core_repo/src`, which isn't on this
+   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,343 passed
+     and 1 skipped at midoffice12. That file looks for `../core_repo/src`, which isn't on this
      machine.
 4. **Working notes, from the pieces so far.**
    - A bash heredoc has failed in this harness on some apostrophes (06, 07, 08), though not
@@ -49,7 +48,12 @@ retros named below.
      leaves the Python running. Long runs go in a runner script started in its own minimized
      console (`Start-Process -WindowStyle Minimized`), one at a time, each started only while 3
      GB is available, resumable from its results files, watched by a light background check of
-     those files (`claude/scratch/midoffice11/runner.py`).
+     those files (`claude/scratch/midoffice12/runner.py`, midoffice11's before it). The venv's
+     `python.exe` is a launcher: the runner's own pid is the one its log prints.
+   - **BLAS on one thread for bit-for-bit comparisons (12).** A multi-threaded matrix product sums
+     in another order: a bias run's portfolio forecasts then differ from a single-threaded run's
+     in the last bit (3.5e-18). The runners set `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and
+     `MKL_NUM_THREADS` to 1, and every stored bias run was made so.
 
 ---
 
@@ -98,36 +102,34 @@ layer (c92d343 to e859b4e, 2026-11-01).
 - fccc480: **midoffice09** -- the count rulings, total returns by default, residuals for every
   covered name.
 - 4f27f23: **midoffice10** -- PCG spared, spans ended off an exchange, the noise share measured.
-- Next: **midoffice11**. Jeff commits it after 4f27f23 (`git log --oneline -3`).
+- 7c7350e: **midoffice11** -- the out-of-sample bias statistics, the leverage correction's
+  specific side, the weighted share always.
+- Next: **midoffice12**. Jeff commits it after 7c7350e (`git log --oneline -3`).
 
-**The current piece: midoffice11, COMPLETE (2026-11-12).**
+**The current piece: midoffice12, COMPLETE (2026-11-12).**
 
-- **midoffice10's rulings, each measured.**
-  - **The correction's specific side** (`--leverage-correction`, off): the algebra holds, and
-    the estimator's uniform inflation n/(n - k) is it at the mean leverage, 0.050. Construction's
-    members average 0.156; the largest leverages are the mega caps (TSLA 0.357, AAPL 0.319, NVDA
-    0.306), whose specific risk it raises 16 to 21%.
-  - **The weighted noise share** is always computed, reported beside the equal-weighted one,
-    and quoted by the qualification (Wholesale's 69%).
-  - The two unused imports removed; a test that never ran (a duplicate name) now runs.
-- **The out-of-sample bias statistics** (`--bias`, about ten minutes): 686 forecasts from
-  2024-02-08, each the estimator refitted on data through its date alone, the scheme held; the
-  guard (the inputs rebuilt from the panel cut at five dates, to the bit) passed.
-  - **The defaults read 1.07 to 1.12 for broad portfolios at the daily horizon,** and that is
-    Newey-West's long horizon: daily returns mean-revert, 10 lags hold the index's factor
-    variance at 0.805 of its one-day variance (1.114 predicted); the 21-day check reads 0.88 to
-    1.02, and without lags the daily reads 1.00 to 1.02. The members read 1.075 at the median,
-    the largest names worst.
-  - **The lag terms are most of the eigenvalue bias:** the smallest eigenportfolios read 2.2 with
-    them, 1.25 without; the unconstrained minimum-variance portfolio 1.58 and 1.24.
-  - **Floor 15 hurts** (Construction's portfolio 1.07 to 1.32); **the correction** hurts the
-    optimiser's portfolio at both horizons (1.58 to 1.93) and centres the industries only at 21
-    days; **a 63-day history half-life** helps every specific-side measure (members 1.075 to
-    1.042); **the two-half-life covariance** (90 / 504) is the best covariance candidate; the two
-    together add up.
-- **Waiting on Jeff:** the decisions in the retro. My choices: the 63-day history and the two
-  half-lives as the defaults; the correction and its specific side left off; no fold; the
-  eigenvalue adjustment next, measured together with the Newey-West lag count.
+- **midoffice11's rulings, measured.** The 63-day specific history and the two-half-life
+  covariance (90 / 504) are the run's defaults; the new defaults' run equals midoffice11's code
+  with the two options in every field and line, and their bias run equals H63T504 to the bit in
+  every array; the guard passed. The horizon is named and a parameter (`--horizon`, default 11).
+- **The bias statistics at the model's horizon:** every forecast against the next h days'
+  return, the windows overlapping, the band simulated; every h-th apart beside it; at one day
+  midoffice11's statistic exactly.
+- **The horizon, measured** -- 1, 5 and 21 against 11, each read at every horizon:
+  - **each is right for the broad portfolios at its own horizon** (the index 1.015, 0.991,
+    0.986, 1.006), all inside their bands;
+  - **the lags' cost grows with h, in the small eigen-directions:** the smallest
+    eigenportfolios 1.19, 1.46, 1.92, 2.69; at every horizon read, the one-day model forecasts
+    the optimiser's portfolios best (unconstrained 1.22 at one day, 1.045 at 21; the 21-day
+    model's 1.63 and 1.31);
+  - **the lags hold the index's mean reversion about right** (0.682 at 21 days against a
+    realised 0.702), so at 21 days the one-day model scaled over-forecasts the index by 16%;
+  - **the variance-ratio variant at 21** quiets the volatilities but not the correlations' lags
+    (the smallest eigenportfolios 2.4); **the 42-day history** is not clearly better than 63.
+- **Waiting on Jeff:** the decisions in the retro. My choices: one day for daily risk and for
+  construction, so one day as the default horizon; the holding period's horizon as a reporting
+  view for broad portfolios; the eigenvalue adjustment next, on the one-day matrix; lags on the
+  volatilities alone as the long-horizon candidate; 63 kept.
 
 ---
 
@@ -184,8 +186,17 @@ in `docs/FACTOR_MODEL.md`.
   04 ruling 4)
 - **Weights and industries.** Regression weights are sqrt(cap), and the standardisation's mean
   is cap-weighted. Industries come from SIC, groups under 15 merged into their division, with no
-  market factor beside them. Newey-West takes 10 lags at half-life 90. (666599b; docs) On the
-  panel on securities, each security's SIC code is its own latest record's. (08)
+  market factor beside them. (666599b; docs) On the panel on securities, each security's SIC
+  code is its own latest record's. (08)
+- **The factor covariance** is the two-half-life estimator: volatilities on a half-life of 90,
+  correlations on 504, both Newey-West at the horizon's lags (11 ruling 2; the run's
+  `--correlation-half-life`, `none` for one half-life). The new defaults' bias run equals
+  midoffice11's H63T504 to the bit (checked in 12).
+- **The horizon is named, and a parameter** (11 ruling 3): Newey-West with Bartlett weights at L
+  lags is exactly the per-day variance of (L + 1)-day returns, so the 10 lags are an 11-day
+  horizon. `--horizon H` is H - 1 lags on the volatilities and the correlations alike,
+  `--newey-west-lags` overriding; the report states it. The default stays 11 until midoffice12's
+  measurements are ruled on. Specific risk carries no lags.
 - **Noise shares** get one model-wide answer after the rebuild, never a deletion per factor (04
   ruling 1). Both are always computed and the run's factor table reports them side by side --
   equal-weighted (Construction 38.2%, Wholesale 46.2%, Finance & Real Estate 31.0%, Size
@@ -194,21 +205,29 @@ in `docs/FACTOR_MODEL.md`.
 - **The sampling-error correction** is an option, off. It needs a covariance estimator that is
   a quadratic form -- sample, exponential or Newey-West -- and refuses the others; the
   two-half-life estimator's diagonal is one, so it has a weighted share but not the correction.
-  The eigenvalue adjustment waited for the bias statistics. (10; 10 ruling 1)
+  (10; 10 ruling 1; 11 ruling 5) **The eigenvalue adjustment** comes after the horizon is
+  settled, not with it, since the lags that set the horizon are most of the bias it would
+  correct. (11 ruling 4)
 - **The correction's specific side** (`leverage_correction`, `--leverage-correction`) is an
   option, off: each member's residual over sqrt(1 - h) in place of the uniform inflation, each
-  specific return outside the regression over sqrt(1 + h). (10 ruling 1; built in 11)
+  specific return outside the regression over sqrt(1 + h). (10 ruling 1; built in 11; 11
+  ruling 5)
 - **An industry fold** (`merge_industries`, `--merge-industry A=B`) is an option, none by
-  default; folds are recorded in `folded`, apart from the grouping's `merged`. No fold for now;
-  floor 15 by the Pearson rule was the candidate the bias statistics judged. (10; 10 ruling 3)
+  default; folds are recorded in `folded`, apart from the grouping's `merged`. No fold: floor 15
+  by the Pearson rule hurt (11). Construction's split, and the mega caps' weight in their
+  industries (TSLA's leverage 0.357), are a scheme question for later. (10 ruling 3; 11 ruling 6)
 - **Size Nonlinearity** stays (04 rulings 1-2; 10 ruling 4). **FRCB's 2023-05-04 return** is
   dropped, an OTC price after the index let it go (10 ruling 5).
 - **The bias statistics' method** (11's brief): each forecast the estimator refitted on data
   through its date alone, daily (`cross_sectional_models_as_of`); the industry scheme held fixed,
   as Barra fixes a model's industry factors; the first forecast once the covariance has 252
   estimated periods; the guard on a handful of dates (`--bias-guard`, five); each forecast at a
-  daily scale against the next day's total return, the 21-day horizon non-overlapping as a
-  check.
+  daily scale against the next day's total return. At the model's horizon h (12's brief): every
+  forecast, at h times its daily variance, against the h days' return after it, bought and held,
+  the windows overlapping, their band found by simulation (`bias.overlapping_band`, normal
+  returns, 10,000 draws, seeded); every h-th forecast apart beside it; at h = 1 the daily
+  statistic itself. `--bias-horizons` evaluates more horizons the same way; midoffice11's 21-day
+  check is the 21-day statistic apart.
 - **A security's own specific-risk history** is every specific return it has, member or not:
   in each estimated period, the return of every security with a return and a complete
   characteristic row less its exposures times the members' factor returns, with no
@@ -319,7 +338,10 @@ in `docs/FACTOR_MODEL.md`.
   So no member-day changes; every span ended is listed with the priced days it removes. A leaver
   that stays listed keeps forecasting from its own history. (09 ruling 2; built in 10,
   `--listed`)
-- **A specific-risk history is equally weighted** over the window, for now. (09 ruling 3)
+- **A specific-risk history is weighted by a 63-day half-life**, each return by its age back from
+  the forecast date, the blend told its effective number of observations (11 ruling 1,
+  superseding 09 ruling 3's equal weights; the run's `--specific-half-life`, `none` for equal
+  weights, the library's default still None).
 
 ---
 
@@ -385,8 +407,11 @@ python scripts/run_sp500_model.py --industries --membership
 ```
 
 That is the panel on securities with its counts repaired and its spans listed
-(`DEFAULT_PANEL`, `_listed`), total returns, traded volumes, and covered histories. The old panel, for comparison, runs as below, and with
-`--specific-history regression` too it reproduces midoffice08's run A exactly:
+(`DEFAULT_PANEL`, `_listed`), total returns, traded volumes, covered histories weighted by a
+63-day half-life, the two-half-life covariance (90 / 504) and the horizon 11. The old panel, for
+comparison, runs as below, and with `--specific-history regression --specific-half-life none
+--correlation-half-life none` too it takes midoffice08's code path, which reproduced its run A
+exactly (`none none` reproduces midoffice11's defaults to the bit on the panel on securities):
 
 ```
 python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2026-11-04.npz --industries --membership --returns price
@@ -403,13 +428,21 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   default.
 - `--leverage-correction`: the correction's specific side. Off by default.
 - `--specific-half-life H`: each specific-risk history weighted by a half-life of H trading days,
-  the blend told its effective number of observations. Equal weights by default.
+  the blend told its effective number of observations; 63 by default (11 ruling 1), `none` for
+  equal weights.
 - `--correlation-half-life H`: the two-half-life factor covariance, correlations on H,
-  volatilities on `--half-life`, both Newey-West at `--newey-west-lags`. One half-life by
-  default.
+  volatilities on `--half-life`, both Newey-West at the horizon's lags; 504 by default (11
+  ruling 2), `none` for one half-life.
+- `--horizon H`: the model's horizon in trading days, H - 1 Newey-West lags on the volatilities
+  and the correlations alike; 11 by default (11 ruling 3). `--newey-west-lags L` overrides it,
+  the horizon then L + 1; the report says which set it.
+- `--variance-ratio-half-life H` (12): each factor volatility its one-day volatility on
+  `--half-life` times the square root of its variance ratio at the horizon, the ratio estimated
+  on H. Off by default; it needs the two-half-life covariance, and has no weighted noise share.
 - `--bias`: the out-of-sample bias statistics after the report, about ten minutes alone on this
-  machine; `--bias-out PATH` keeps every forecast and outcome in an `.npz`; `--bias-guard N`
-  (default 5, 0 skips) is the guard's date count, about four minutes at five.
+  machine, at one day and at the model's horizon; `--bias-horizons H,H` evaluates more horizons;
+  `--bias-out PATH` keeps every forecast and outcome in an `.npz`; `--bias-guard N` (default 5,
+  0 skips) is the guard's date count, two to four minutes at five.
 - On the panel on securities, `--membership` is its own, checked against the newest snapshot's
   hash, and `--industries` reads its own SIC codes and needs no key.
 - The old panel carries price returns and adjusted volumes alone. Its `--industries` reads the
@@ -417,14 +450,16 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
 
 **At the defaults:**
 
-- **Time:** about 50 to 75 s.
+- **Time:** about 50 to 65 s.
 - **Mean R-squared:** 0.293203 over 938 periods from 2023-02-08.
 - **Members in the regression a period:** median 502, range 499 to 503.
-- **Specific risk:** p10 15.58%, median 24.76%, p90 40.49%, 550 forecasts.
-- **The size pair:** 11.87% for the smallest 85, 0.62% for the largest 50, 0.01% for the index.
+- **Specific risk:** p10 16.58%, median 28.98%, p90 48.98%, 550 forecasts (equal-weighted
+  histories, midoffice11's defaults: 15.58 / 24.76 / 40.49%).
+- **The size pair:** 11.40% for the smallest 85, 0.60% for the largest 50, 0.01% for the index.
+- **The covariance:** 826.4 effective observations of 938, the correlation window's.
 
-The old panel, `--returns price --specific-history regression`: 0.298076, 451 (422-476),
-11.94 / 0.38 / 0.01%.
+The old panel, `--returns price --specific-history regression`, at midoffice11's defaults:
+0.298076, 451 (422-476), 11.94 / 0.38 / 0.01%.
 
 **Its standing lines, and what each is there to catch:**
 
@@ -436,6 +471,8 @@ The old panel, `--returns price --specific-history regression`: 0.298076, 451 (4
 - **Coverage:** values from an empty window, or from under min_coverage, counted against each
   descriptor's own inputs independently. It must read "none".
 - **Outsiders at the members' bounds:** the estimation universe setting the scale.
+- **The horizon** (12): the trading days the factor covariance's lags make, and whether
+  `--newey-west-lags` set them: what a daily reading of the model's risk is short or long by.
 - **Each index's blend over the estimated periods.** Guard: it stops if a descriptor feeds the
   forecast and no estimated period, or if an estimated period's blend is not the forecast's.
 - **Style exposures over the members on every date read:** cap-weighted mean zero and sd one, to
@@ -455,9 +492,10 @@ The old panel, `--returns price --specific-history regression`: 0.298076, 451 (4
 - **The factor table's noise shares, equal-weighted and weighted, and its exactly-1 and none
   columns:** thin and one-member factors, and how much of the current regime's variance is noise.
 - **Under `--bias`, its guard** (the run stops if the inputs rebuilt from the panel cut at a date
-  are not the full run's through it) and **its statistics**: the portfolios' table at both
-  horizons, the industries against their weighted noise shares, the random portfolios, every
-  member singly, the eigenportfolios.
+  are not the full run's through it) and **its statistics**: the portfolios at one day and at the
+  model's horizon, the windows overlapping (their band simulated) and apart; the industries
+  against their weighted noise shares, the random portfolios, every member singly, the
+  eigenportfolios, at both; and every horizon `--bias-horizons` adds, side by side.
 - **Specific risk:**
   - the percentiles;
   - the shares of V-squared;
@@ -500,20 +538,18 @@ The old panel, `--returns price --specific-history regression`: 0.298076, 451 (4
 
 ## What is next
 
-1. **Jeff's rulings on midoffice11** (its retro, "Decisions left for Jeff"):
-   - **The specific-risk history:** a 63-day half-life as the default (my choice), 126, or equal
-     weights; or shorter ones measured first.
-   - **The factor covariance:** the two-half-life estimator, volatilities 90 and correlations
-     504, as the default (my choice), or the single half-life 90.
-   - **The horizon:** keep Newey-West's long horizon, its daily forecasts about 10% short for
-     factor risk, as the model's horizon (my choice), or not.
-   - **The eigenvalue adjustment:** commission it next (my choice), measured together with the
-     Newey-West lag count, since the lag terms are most of the eigenvalue bias.
-   - **The correction and its specific side:** left options, off (my choice).
-   - **The thin industries:** no fold (my choice); Construction is two industries if a scheme
-     change is wanted.
-2. **The bias statistics are standing:** every later candidate is judged by `--bias` against
-   the defaults, run one at a time through a runner like midoffice11's.
+1. **Jeff's rulings on midoffice12** (its retro, "Decisions left for Jeff"):
+   - **The model's default horizon:** one day (my choice); 11, as now; or another.
+   - **The h-day risk of broad portfolios:** a run at the holding period's horizon as a reporting
+     view (my choice), or the one-day model scaled by sqrt(h).
+   - **Lags on the volatilities alone, the correlations one-day:** measure it as the
+     long-horizon view's candidate (my choice), or not.
+   - **The eigenvalue adjustment:** next, on the matrix the horizon ruling leaves (11 ruling 4).
+   - **The variance-ratio variant:** an option, off (my choice), or removed.
+   - **The specific history:** 63 stays (42 not clearly better).
+2. **The bias statistics are standing,** at one day and the model's horizon: every later
+   candidate is one `--bias --bias-horizons ...` run against the defaults, one at a time through
+   a runner like midoffice12's.
 
 **Open, not queued:**
 
@@ -524,9 +560,13 @@ The old panel, `--returns price --specific-history regression`: 0.298076, 451 (4
 - six ruff findings at HEAD in files no mid-office piece has touched since --
   `characteristics.py` (an E501, an unused `Sequence`), `exposure_basis.py` (an unused
   `Mapping`, two N806 `T`), `timeseries.py` (an unused `Sequence`); checked in 11
-  (`ruff_head_untouched.txt`);
-- shorter specific-risk half-lives than 63, and whether the latest half's slight over-forecast
-  at 63 grows (11);
+  (`ruff_head_untouched.txt`), untouched in 12;
+- the specific history's half-life past 42: the trend from equal weights to 42 has flattened
+  (members 1.075, 1.057, 1.045, 1.042, then on the new defaults 1.034 at 63, 1.031 at 42) (12);
+- the small caps mean-revert more than any model's lags hold them to (a realised 0.64 at 21
+  days against the 21-day model's 0.73), so their long-horizon risk is over-forecast (12);
+- the largest names stay under-forecast at one day (the top quintile 1.054 under the one-day
+  model, 1.089 under the 11-day one): midoffice11's leverages, a scheme question (11, 12);
 - the sampling covariance is the classical `sigma^2 (X'WX)^-1`; a heteroskedasticity-robust
   sandwich would say whether it misstates a thin industry's noise (10);
 - a member floor is not a noise floor: SIC20, with 21 members, is 55% noise, weighted (10);

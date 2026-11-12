@@ -404,6 +404,63 @@ def test_with_newey_west_lags_each_horizon_is_its_newey_west_estimate():
         HorizonCovariance(12.0, 72.0, newey_west_lags=-1)
 
 
+def test_variance_ratio_volatilities_take_the_level_short_and_the_serial_correlation_long():
+    """midoffice12's variant against the lags' noise: each variance its one-period variance on
+    the volatility half-life times its Newey-West variance over its one-period variance on the
+    ratio's half-life; the correlations the plain split's."""
+    returns, _ = _structured()
+    lags = 3
+    plain = HorizonCovariance(12.0, 72.0, newey_west_lags=lags).estimate(returns).matrix
+    level = np.diag(ExponentialCovariance(12.0).estimate(returns).matrix)
+    for ratio_half_life in (72.0, 36.0):
+        variant = HorizonCovariance(12.0, 72.0, newey_west_lags=lags,
+                                    ratio_half_life=ratio_half_life)
+        estimate = variant.estimate(returns)
+        lagged = NeweyWestCovariance(lags=lags, half_life=ratio_half_life).estimate(returns)
+        one_period = ExponentialCovariance(ratio_half_life).estimate(returns)
+        assert np.allclose(np.diag(estimate.matrix),
+                           level * np.diag(lagged.matrix) / np.diag(one_period.matrix),
+                           rtol=1e-12, atol=0)
+        assert np.allclose(_correlation(estimate.matrix), _correlation(plain), rtol=1e-12,
+                           atol=1e-15)
+        assert estimate.method == (f"Newey-West, 3 lag(s), split horizon, each volatility one "
+                                   f"period's times its variance ratio on {ratio_half_life:g}")
+    # On the volatility half-life it is the plain split; at no lags the ratio is one, exactly.
+    same = HorizonCovariance(12.0, 72.0, newey_west_lags=lags, ratio_half_life=12.0)
+    assert np.allclose(same.estimate(returns).matrix, plain, rtol=1e-12, atol=0)
+    assert np.array_equal(
+        HorizonCovariance(12.0, 72.0, newey_west_lags=0, ratio_half_life=72.0)
+        .estimate(returns).matrix,
+        HorizonCovariance(12.0, 72.0, newey_west_lags=0).estimate(returns).matrix,
+    )
+    with pytest.raises(ValueError, match="needs newey_west_lags"):
+        HorizonCovariance(12.0, 72.0, ratio_half_life=72.0)
+    with pytest.raises(ValueError, match="ratio_half_life must be positive"):
+        HorizonCovariance(12.0, 72.0, newey_west_lags=2, ratio_half_life=0.0)
+    with pytest.raises(ValueError, match="no quadratic form"):
+        same.volatility_estimator()
+
+
+def test_variance_ratio_volatilities_carry_less_of_the_lags_noise():
+    """Why the variant: twenty lags of autocovariance on a 90-day half-life are mostly noise.
+    Over AR(1) factors its variances scatter about the Bartlett target at under seven tenths
+    of the plain split's spread, and sit no further from it on average."""
+    lags, rho = 20, 0.2
+    j = np.arange(1, lags + 1)
+    target = (1.0 + 2.0 * np.sum((1.0 - j / (lags + 1.0)) * rho**j)) / (1.0 - rho**2)
+    plain, ratio = [], []
+    for seed in range(40):
+        returns = _ar1(rho, 1500, 700 + seed)
+        plain.append(np.diag(
+            HorizonCovariance(90.0, 504.0, newey_west_lags=lags).estimate(returns).matrix))
+        ratio.append(np.diag(
+            HorizonCovariance(90.0, 504.0, newey_west_lags=lags, ratio_half_life=504.0)
+            .estimate(returns).matrix))
+    plain, ratio = np.array(plain) / target, np.array(ratio) / target
+    assert ratio.std() < 0.7 * plain.std()
+    assert abs(ratio.mean() - 1.0) <= abs(plain.mean() - 1.0)
+
+
 def test_the_split_gets_both_optima_where_neither_single_half_life_can():
     """Barra's rationale, verified rather than quoted.
 
@@ -595,6 +652,29 @@ def _bartlett_expectation(rho: float, lags: int) -> float:
     """
     j = np.arange(1, lags + 1)
     return float(1.0 + 2.0 * np.sum((1.0 - j / (lags + 1.0)) * rho**j))
+
+
+def test_bartlett_weights_at_h_minus_one_lags_are_the_per_day_variance_of_h_day_returns():
+    """The horizon (midoffice11's ruling 3), exactly. Two days k apart fall together in h - k
+    of the h-day windows, so the windows' sum of squares counts lag k's autocovariance h - k
+    times -- per day 1 - k/h, Bartlett's weight at h - 1 lags. Exact on a series padded with
+    h - 1 zeros at each end, so every window that reaches a day holds it whole, and summing to
+    zero, so the estimator's centring takes nothing off; normalised as the estimator normalises
+    one day's, by n - 1."""
+    rng = np.random.default_rng(41)
+    for h in (1, 2, 5, 11, 21):
+        draws = rng.integers(-9, 10, size=(299, 3)).astype(float)
+        core = np.vstack([draws, -draws.sum(axis=0)])
+        pad = np.zeros((h - 1, 3))
+        series = np.vstack([pad, core, pad])
+        n = series.shape[0]
+        sums = np.array([series[t : t + h].sum(axis=0) for t in range(n - h + 1)])
+        per_day = sums.T @ sums / (h * (n - 1))
+        estimate = NeweyWestCovariance(lags=h - 1).estimate(series).matrix
+        assert np.allclose(estimate, per_day, rtol=1e-12, atol=0)
+    # One day is no lags: the one-day covariance itself.
+    assert np.array_equal(NeweyWestCovariance(lags=0).estimate(core).matrix,
+                          SampleCovariance().estimate(core).matrix)
 
 
 def test_zero_lags_reduce_to_the_sample_covariance():
