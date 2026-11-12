@@ -38,10 +38,25 @@ The counts follow midoffice08's rulings on what Polygon's records get wrong, eac
 - **The overrides file** (`--overrides`, `config/sp500_share_count_overrides.json`): rulings on
   single securities' counts, each with its evidence, applied and listed. `none` reads none.
 
+And the distributions of shares the cache records wrongly or not at all (midoffice14):
+
+- **The spin-off overrides file** (`--spin-offs`, `config/sp500_spin_off_overrides.json`):
+  rulings with their evidence. On each ruling's ex-date the parent's total return carries the
+  child's shares at the child's close, (w (C_t + D_t) + k V) / C_s - 1, the stitched prices left
+  as Polygon has them; a split the parent made with the distribution and the cache does not
+  record is applied to its count as a split (Honeywell's 1-for-2 of 2026-06-29), checked by its
+  samples; a child with no count of its own takes its parent's on the record date at the ratio,
+  until a sample of its own carries one; a count override a ruling supersedes is not read, and is
+  listed. `none` reads none.
+- **The first-day check**, standing: on each security's first day in the panel, the members
+  whose raw price opened furthest below the market's, each with the record or ruling that
+  explains it, or none.
+
 Writes, beside the plan (gitignored, like it): `sp500_securities_<first>_<last><suffix>.npz`,
-the panel, and `.json`, the report -- `--suffix` `_listed` by default. midoffice09's panel,
-`_repaired`, is `--spare none --listed any`; midoffice08's, with no suffix, is `--first-counts
-found --repair none --overrides none --spare none --listed any`. An existing file is never
+the panel, and `.json`, the report -- `--suffix` `_spinoffs` by default. midoffice10's panel,
+`_listed`, is `--spin-offs none --suffix _listed`; midoffice09's, `_repaired`, is that with
+`--spare none --listed any`; midoffice08's, with no suffix, is `--first-counts found --repair
+none --overrides none --spin-offs none --spare none --listed any`. An existing file is never
 overwritten without `--overwrite`.
 """
 
@@ -128,13 +143,18 @@ def main(argv: list[str] | None = None) -> int:
                         help="exchange: a span ends where its records place the security off an "
                              "exchange, but for any member-day (the default, midoffice09's "
                              "ruling 2); any keeps every span, midoffice09's build")
-    parser.add_argument("--suffix", default="_listed",
-                        help="appended to the output's stem (default _listed; midoffice09's panel "
-                             "is _repaired, midoffice08's has none)")
+    parser.add_argument("--spin-offs", default="config/sp500_spin_off_overrides.json",
+                        help="the rulings on distributions of shares the cache records wrongly "
+                             "or not at all (midoffice14); none reads none, midoffice10's build")
+    parser.add_argument("--suffix", default="_spinoffs",
+                        help="appended to the output's stem (default _spinoffs; midoffice10's "
+                             "panel is _listed, midoffice09's _repaired, midoffice08's has none)")
     parser.add_argument("--overwrite", action="store_true",
                         help="write over an existing panel of the same name; without it the "
                              "build stops first")
     args = parser.parse_args(argv)
+    spin_offs = ([] if args.spin_offs == "none"
+                 else securities.read_spin_offs(args.spin_offs))
 
     plan_path = Path(args.plan)
     cache = Path(args.cache)
@@ -280,6 +300,11 @@ def main(argv: list[str] | None = None) -> int:
         if found.found is not None and found.found[0] not in found.span.samples:
             samples.setdefault(found.span.key, []).append(
                 (found.found[0], found.span.ticker, found.found[1]))
+    # A split a spin-off ruling records and the cache does not, checked by the parent's own
+    # samples and applied with the gate's: Honeywell's 1-for-2 with its Aerospace distribution.
+    ruled_splits = securities.spin_off_splits(spin_offs, samples, args.tolerance,
+                                              args.largest_term)
+    checks = checks + ruled_splits
     weighted_on: dict[tuple[str, dt.date], float] = {}
     if args.spare == "weighted":
         for key, rows in samples.items():
@@ -310,10 +335,17 @@ def main(argv: list[str] | None = None) -> int:
               + own)
     overrides = ([] if args.overrides == "none"
                  else securities.read_overrides(args.overrides))
+    # A count override a spin-off ruling supersedes is not read: HON's of midoffice08, which the
+    # reverse split of 2026-06-29 explains.
+    superseded = [(o, r) for o in overrides for r in spin_offs
+                  if (o.key, o.first, o.last) in r.supersedes]
+    unmatched = [(r, s) for r in spin_offs for s in r.supersedes
+                 if not any((o.key, o.first, o.last) == s for o in overrides)]
+    overrides = [o for o in overrides if not any(o is s for s, _ in superseded)]
     panel = securities.build_panel(
         dates, columns, bars, checks, samples, fetched.dividends, member_days,
         (bars(args.market, "adj"), bars(args.market, "raw"),
-         fetched.dividends.get(args.market, ())), overrides)
+         fetched.dividends.get(args.market, ())), overrides, spin_offs)
     labels = [c.label for c in columns]
     repeated = [label for label, k in collections.Counter(labels).items() if k > 1]
     if repeated:
@@ -365,6 +397,46 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  {args.market}: {panel.market_distributions} distributions; total less price return "
           f"{np.nansum(market_gap):.4f} over the window, {np.nanmean(market_gap) * 252:.2%} a "
           f"year")
+
+    print("\nSpin-offs: distributions of shares the cache records wrongly or not at all, "
+          + (f"{args.spin_offs}: {len(spin_offs)} rulings, {len(panel.spin_offs)} applied -- on "
+             f"each ex-date the parent's total return (w (C_t + D_t) + k V) / C_s - 1, the child "
+             f"at its close; the stitched prices as Polygon has them"
+             if args.spin_offs != "none" else "none read (--spin-offs none)"))
+    keys_of = {key: c.keys for c in columns for key in c.keys}
+    for use in panel.spin_offs:
+        r = use.ruling
+        record = reference(cache, r.child, use.child_day)
+        figi = (record or {}).get("composite_figi")
+        if r.child_key and figi and figi not in keys_of.get(r.child_key, (r.child_key,)):
+            raise SystemExit(f"  {r.child} on {use.child_day} is {figi}, not the ruling's "
+                             f"{r.child_key}")
+        print(f"  {r.label:<6} {use.day} -> {r.child:<5} {r.ratio:.6g} a share"
+              + (f", the parent's split {r.split:g} with it" if r.split != 1.0 else "")
+              + f": {use.raw_before:,.2f} on {use.previous} to {use.raw_after:,.2f}"
+              + (f" with {use.cash:g} in cash" if use.cash else "")
+              + (f", w {use.splits:g}" if use.splits != 1.0 else "")
+              + f"; {r.child} {use.child_close:,.2f} on {use.child_day}"
+              + ("" if use.child_day == use.day else ", its first close, none on the ex-date")
+              + f" ({(record or {}).get('name') or 'no record that day'}"
+              + (f", {figi}" if figi else "") + f"): total return {use.step - 1:+.4%}, the "
+              f"adjusted closes' {use.adjusted - 1:+.4%}; {r.ruled}")
+    for check in ruled_splits:
+        print(f"  a split the cache does not record, applied to the count: {check.detail}")
+    for seed in panel.seeded:
+        r = seed.ruling
+        print(f"  {r.child:<6} {seed.key}: no count of its own -- {r.label}'s "
+              f"{seed.parent_count:,.0f} on the record date {r.record} times {r.ratio:g}, "
+              f"{seed.count:,.0f}, from {seed.first} "
+              + (f"to {seed.until}, its own first count" if seed.until
+                 else "to the window's end, Polygon carrying none")
+              + f": {seed.days} days, {seed.member_days} member-days")
+    for o, r in superseded:
+        print(f"  a count override superseded by {r.label}'s ruling of {r.ex_date}, not read: "
+              f"{o.label} {o.key} {o.first}..{o.last} ({o.ruled})")
+    for r, (key, first, last) in unmatched:
+        print(f"  ! {r.label}'s ruling supersedes a count override not read: {key} "
+              f"{first}..{last}")
 
     print(f"\nShare counts\n  splits applied on their execution dates: {len(panel.applied)}; "
           f"stale samples read past: {len(panel.stale_read_past)}"
@@ -507,6 +579,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    {label:<6} {len(group):>3} of {every[label]:>3} records, ratio "
               f"{min(ratios):.4f}..{max(ratios):.4f}, from {group[0].day} to {group[-1].day}")
 
+    # ------------------------------------------------------------------ the first-day check
+    firsts = securities.first_days(panel, bars(args.market, "raw"), checks, fetched.dividends,
+                                   spin_offs)
+    unexplained = [(f, g) for f in firsts for g in f.gaps if not g[3]]
+    print(f"\nThe first-day check: on each security's first day in the panel, the members whose "
+          f"raw price opened more than 1.5 points below {args.market}'s, the three lowest, each "
+          f"with what explains it -- a spin-off's parent gaps by the child's value on its "
+          f"ex-date: {len(firsts)} first days, {len(unexplained)} gap(s) nothing on record "
+          f"explains")
+    for f in firsts:
+        print(f"  {f.day} {f.label:<6} "
+              + (", ".join(f"{g[1]} {g[2]:+.2%}{' (' + g[3] + ')' if g[3] else ''}"
+                           for g in f.gaps) or "none"))
+
     # ------------------------------------------------------------------ industries
     sic, sic_on = [], []
     for column in columns:
@@ -568,7 +654,30 @@ def main(argv: list[str] | None = None) -> int:
                  "splits": dict(kinds)},
         "rules": {"first_counts": args.first_counts, "repair": args.repair,
                   "spare": args.spare, "listed": args.listed,
-                  "overrides": args.overrides, "tolerance": args.tolerance},
+                  "overrides": args.overrides, "spin_offs": args.spin_offs,
+                  "tolerance": args.tolerance},
+        "spin_offs": [{"parent": u.ruling.parent, "label": u.ruling.label,
+                       "child": u.ruling.child, "child_key": u.ruling.child_key,
+                       "ratio": u.ruling.ratio, "split": u.ruling.split,
+                       "record": str(u.ruling.record), "ex_date": str(u.day),
+                       "previous": str(u.previous), "raw_before": u.raw_before,
+                       "raw_after": u.raw_after, "child_close": u.child_close,
+                       "child_day": str(u.child_day), "cash": u.cash, "splits": u.splits,
+                       "adjusted": u.adjusted, "step": u.step, "ruled": u.ruling.ruled}
+                      for u in panel.spin_offs],
+        "spin_off_splits": [{"key": c.key, "day": str(c.split.execution_date),
+                             "ratio": c.split.ratio, "detail": c.detail}
+                            for c in ruled_splits],
+        "seeded": [{"child": s.ruling.child, "key": s.key, "first": str(s.first),
+                    "count": s.count, "parent": s.ruling.label,
+                    "parent_count": s.parent_count, "record": str(s.ruling.record),
+                    "until": str(s.until) if s.until else None, "days": s.days,
+                    "member_days": s.member_days} for s in panel.seeded],
+        "superseded_overrides": [{"label": o.label, "key": o.key, "first": str(o.first),
+                                  "last": str(o.last), "by": [r.label, str(r.ex_date)]}
+                                 for o, r in superseded],
+        "first_days": [{"label": f.label, "key": f.key, "day": str(f.day),
+                        "gaps": [list(g) for g in f.gaps]} for f in firsts],
         "delistings": [{"ticker": d.span.ticker, "key": d.span.key, "first": str(d.span.first),
                         "last": str(d.span.last), "off_exchange": str(d.off_exchange),
                         "market": d.market, "exchange": d.exchange,

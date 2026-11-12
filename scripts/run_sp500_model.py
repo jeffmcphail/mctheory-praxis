@@ -81,10 +81,12 @@ from praxis.midoffice.refdata.polygon import (  # noqa: E402
     read_api_key,
 )
 
-DEFAULT_PANEL = "data/external/polygon/sp500_securities_2022-01-03_2026-11-03_listed.npz"
+DEFAULT_PANEL = "data/external/polygon/sp500_securities_2022-01-03_2026-11-03_spinoffs.npz"
 """The panel on securities: its share counts repaired by midoffice08's rulings, a sample its own
-weighted count confirms spared and every span ended where it leaves an exchange by midoffice09's.
-The run's panel when none is given."""
+weighted count confirms spared and every span ended where it leaves an exchange by midoffice09's,
+and every spin-off the cache does not carry carried in the total return by midoffice14's rulings
+(`config/sp500_spin_off_overrides.json`). The run's panel when none is given; midoffice13's,
+before the spin-offs, is `_listed`."""
 
 UNBLENDED = {
     "SERDP": "its residual series is kept for the last window alone, so it has a value on the "
@@ -111,8 +113,10 @@ HORIZON = 1
 """The model's horizon in trading days: one day (midoffice12's ruling 1), the factor covariance
 the one-day covariance. Newey-West with Bartlett weights at L lags is exactly the per-day variance
 of (L + 1)-day returns (midoffice11's ruling 3), so `--horizon H` puts H - 1 lags on the
-volatilities and the correlations alike -- a reporting view of broad portfolios' risk over a
-holding period of H days, not the model (midoffice12's ruling 2)."""
+volatilities -- a reporting view of broad portfolios' risk over a holding period of H days, not
+the model (midoffice12's ruling 2) -- and none on the correlations, by default: the lags on the
+volatilities alone (midoffice13's ruling 4). `--correlation-lags horizon` gives the correlations
+the horizon's lags too, as before."""
 
 
 def half_life_or_none(text: str) -> float | None:
@@ -134,6 +138,19 @@ def horizon_list(text: str) -> tuple[int, ...]:
     if not values or min(values) < 1:
         raise argparse.ArgumentTypeError(f"each horizon must be at least one day; got {text!r}")
     return values
+
+
+def lags_or_horizon(text: str) -> int | str:
+    """A number of Newey-West lags, or `horizon` for the horizon's own."""
+    if text.strip().lower() == "horizon":
+        return "horizon"
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"lags are whole periods, or horizon; got {text!r}")
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"lags must be non-negative; got {text!r}")
+    return value
 
 
 def scale_list(text: str) -> tuple[float, ...]:
@@ -964,31 +981,46 @@ def bias_section(
         return (f"{stats.n:>4} {stats.statistic:>6.3f} {stats.verdict:>5}  "
                 f"{stats.low:.3f}-{stats.high:.3f}")
 
+    def vols(name, h=1) -> str:
+        forecast, realised = _volatility(run, name, horizon=h)
+        return f"   {forecast:>8.2%} {realised:>8.2%}"
+
     broad = run.names[:4] + ("minimum variance, long-only", "minimum variance, unconstrained")
     header = (f"  {'':<34} {'T':>5} {'bias':>7} {'':>5}  {'95% band':>11}  {'MRAD':>6} "
               f"{'min':>6} {'max':>6}")
-    print("\n  Portfolios at one day, each formed at its forecast date and held to the next")
-    print(header)
+    vol_header = f"   {'forecast':>8} {'realised':>8}"
+    # The realised volatility beside the statistic (midoffice13's ruling 5): the optimiser's
+    # portfolios realising more risk is the test the eigenfactor adjustment failed, kept for
+    # every covariance candidate after it.
+    print("\n  Portfolios at one day, each formed at its forecast date and held to the next; "
+          "beside each, its volatility % a year -- the forecast at its median, the realised "
+          "from its returns")
+    print(header + vol_header)
     for name in broad:
-        print(f"  {name:<34} " + summary(run.statistics(name)))
+        print(f"  {name:<34} " + summary(run.statistics(name)) + vols(name))
     if horizon > 1:
         print(f"\n  Portfolios at the model's horizon, {horizon} trading days, each bought at its "
               f"forecast date and held {horizon} days: every forecast, the windows overlapping, "
-              f"its band simulated; and every {ordinal(horizon)}, the windows apart")
-        print(header + f"   {'apart: T':>8} {'bias':>6} {'':>5}  {'95% band':>11}")
+              f"its band simulated; and every {ordinal(horizon)}, the windows apart; the "
+              f"volatility % a year from the {horizon}-day returns, the windows overlapping")
+        print(header + f"   {'apart: T':>8} {'bias':>6} {'':>5}  {'95% band':>11}" + vol_header)
         for name in broad:
             print(f"  {name:<34} " + summary(run.statistics(name, horizon=horizon)) + "   "
-                  + apart(run.statistics(name, horizon=horizon, overlapping=False)))
+                  + apart(run.statistics(name, horizon=horizon, overlapping=False))
+                  + vols(name, horizon))
+    halves = _halves(run)
     for label in ("long-only", "unconstrained"):
         name = f"minimum variance, {label}"
         row = run.names.index(name)
-        realised_vol = float(np.nanstd(run.realised[row], ddof=1) * np.sqrt(BIAS_YEAR))
-        forecast_vol = float(np.nanmedian(run.forecast[row]) * np.sqrt(BIAS_YEAR))
         size = run.min_variance_held[label]
         worst = float(run.min_variance_violation[label].max())
+        parts = [(part, _volatility(run, name, part)[1],
+                  bias_statistics(run.forecast[row, part], run.realised[row, part]).statistic)
+                 for part in halves.values()]
         print(f"    {name}: {int(np.median(size))} names held at the median ({size.min()} to "
-              f"{size.max()}); forecast {forecast_vol:.2%} a year at the median, realised "
-              f"{realised_vol:.2%} from its daily returns; its KKT conditions met to {worst:.1e}")
+              f"{size.max()}); its KKT conditions met to {worst:.1e}; realised "
+              f"{_volatility(run, name)[1]:.2%} a year, the first half {parts[0][1]:.2%} (bias "
+              f"{parts[0][2]:.3f}), the second {parts[1][1]:.2%} ({parts[1][2]:.3f})")
 
     if groups:
         names = [model.factor_names[fid] for fid in model.factor_ids]
@@ -1207,6 +1239,27 @@ EIGEN_CRITERION = ("half the eigenportfolios' mean abs(bias - 1) over every rank
 minimum-variance portfolios, on the test's first half; the second half is reported beside it."""
 
 
+def _volatility(run, name, part=slice(None), horizon=1) -> tuple[float, float]:
+    """A named portfolio's volatility a year over a part of the test's dates (a slice): the
+    forecast at its median, and the realised from its returns -- at a horizon past one day its
+    h-day returns', the windows overlapping."""
+    row = run.names.index(name)
+    forecast, realised = run.portfolio_outcomes(horizon)
+    year = np.sqrt(BIAS_YEAR / horizon)
+    return (float(np.nanmedian(forecast[row, part]) * year),
+            float(np.nanstd(realised[row, part], ddof=1) * year))
+
+
+def _halves(run) -> dict[str, slice]:
+    """The test's two halves by forecast date, labelled: the first n // 2 dates, then the rest."""
+    n = len(run.dates)
+    half = n // 2
+    return {
+        f"the first half ({run.dates[0]} to {run.dates[half - 1]}, {half})": slice(0, half),
+        f"the second half ({run.dates[half]} to {run.dates[-1]}, {n - half})": slice(half, n),
+    }
+
+
 def _eigen_reading(run, part, groups, columns) -> dict[str, float]:
     """One test's one-day statistics over a part of its forecast dates (a slice)."""
     names = list(run.names)
@@ -1224,6 +1277,10 @@ def _eigen_reading(run, part, groups, columns) -> dict[str, float]:
                  for label in ("long-only", "unconstrained")]
     out["minimum variance, long-only"], out["minimum variance, unconstrained"] = optimiser
     out["minimum variance, mean abs(bias - 1)"] = float(np.mean(np.abs(np.array(optimiser) - 1)))
+    # Each scale's own optimiser portfolios' realised risk (midoffice13's ruling 5).
+    for label in ("long-only", "unconstrained"):
+        out[f"minimum variance, {label}: realised vol, %"] = 100.0 * _volatility(
+            run, f"minimum variance, {label}", part)[1]
     out["the criterion"] = 0.5 * (out["eigenportfolios, mean abs(bias - 1)"]
                                   + out["minimum variance, mean abs(bias - 1)"])
     for name in run.names[:4]:
@@ -1264,12 +1321,8 @@ def _report_eigen(run, eigen_runs, simulated, own, groups, member_stats, securit
     tests = {own: run, **eigen_runs}
     order = sorted(tests)
     n = len(run.dates)
-    half = n // 2
-    parts = {
-        f"the whole test ({run.dates[0]} to {run.dates[-1]}, {n})": slice(0, n),
-        f"the first half ({run.dates[0]} to {run.dates[half - 1]}, {half})": slice(0, half),
-        f"the second half ({run.dates[half]} to {run.dates[-1]}, {n - half})": slice(half, n),
-    }
+    parts = {f"the whole test ({run.dates[0]} to {run.dates[-1]}, {n})": slice(0, n),
+             **_halves(run)}
     columns = [list(securities).index(code) for code, _ in member_stats]
     readings = {label: {a: _eigen_reading(tests[a], part, groups, columns) for a in order}
                 for label, part in parts.items()}
@@ -1450,11 +1503,12 @@ def main(argv: list[str] | None = None) -> int:
                              f"Newey-West at the horizon's lags (default "
                              f"{CORRELATION_HALF_LIFE:g}); none is one half-life for the whole "
                              f"matrix")
-    parser.add_argument("--correlation-lags", type=int, default=None, metavar="L",
-                        help="the factor correlations' Newey-West lags in place of the "
-                             "horizon's: 0 makes them one-day while the volatilities keep the "
-                             "horizon's lags -- the lags on the volatilities alone (with the "
-                             "two-half-life covariance); by default the horizon's for both")
+    parser.add_argument("--correlation-lags", type=lags_or_horizon, default=None, metavar="L",
+                        help="the factor correlations' own Newey-West lags, with the "
+                             "two-half-life covariance: by default none at any horizon above one "
+                             "day, the volatilities keeping the horizon's -- the lags on the "
+                             "volatilities alone (midoffice13's ruling 4); horizon gives the "
+                             "correlations the horizon's lags too, midoffice12's reporting view")
     parser.add_argument("--variance-ratio-half-life", type=float, default=None, metavar="H",
                         help="each factor volatility its one-day volatility on --half-life "
                              "times the square root of its variance ratio at the horizon -- its "
@@ -1510,12 +1564,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--eigen-draws must be at least two; got {args.eigen_draws}")
     if args.bias_eigen_scales and args.sampling_correction:
         parser.error("--bias-eigen-scales needs the covariance without --sampling-correction")
-    if args.correlation_lags is not None:
-        if args.correlation_half_life is None:
-            parser.error("--correlation-lags needs the two-half-life covariance, not "
-                         "--correlation-half-life none")
-        if args.correlation_lags < 0:
-            parser.error(f"--correlation-lags must be non-negative; got {args.correlation_lags}")
+    if args.correlation_lags is not None and args.correlation_half_life is None:
+        parser.error("--correlation-lags needs the two-half-life covariance, not "
+                     "--correlation-half-life none")
     if args.variance_ratio_half_life is not None:
         if args.correlation_half_life is None:
             parser.error("--variance-ratio-half-life needs the two-half-life covariance, not "
@@ -1527,6 +1578,17 @@ def main(argv: list[str] | None = None) -> int:
     lags = (args.newey_west_lags if args.newey_west_lags is not None
             else (HORIZON if args.horizon is None else args.horizon) - 1)
     horizon = lags + 1
+    # The correlations' own lags (midoffice13's ruling 4): at any horizon above one day none by
+    # default, the lags on the volatilities alone; `horizon` the horizon's, as the estimator's
+    # own default has it. At one day there are no lags to give either.
+    if args.correlation_lags == "horizon":
+        correlation_lags = None
+    elif args.correlation_lags is not None:
+        correlation_lags = args.correlation_lags
+    elif lags > 0 and args.correlation_half_life is not None:
+        correlation_lags = 0
+    else:
+        correlation_lags = None
     # None leaves the window to the library.
     beta_months = (
         args.beta_window if args.beta_days is None
@@ -1770,7 +1832,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"portfolios' risk over a holding period of {horizon} days. Its gain over the "
                 f"one-day model scaled by sqrt(h) was measured on 2024-26 alone, a window with "
                 f"the April 2025 shock in it, and is re-tested as data accumulates")
-    corr_lags = args.correlation_lags
+    corr_lags = correlation_lags
     if corr_lags is not None and corr_lags != lags:
         # The lags on the volatilities alone (midoffice13): the correlations their own.
         corr = ("the factor correlations one-day, with no lags" if corr_lags == 0
@@ -1815,7 +1877,7 @@ def main(argv: list[str] | None = None) -> int:
             correlation_half_life=args.correlation_half_life,
             newey_west_lags=lags,
             ratio_half_life=ratio,
-            correlation_lags=args.correlation_lags,
+            correlation_lags=correlation_lags,
         )
     options = dict(
         standardise=False,

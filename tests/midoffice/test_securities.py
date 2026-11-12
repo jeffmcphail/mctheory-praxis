@@ -71,6 +71,8 @@ RAW = {
     "RE": {i: 5.0 + 0.1 * i for i in range(0, 40)},
     "SPL": {i: 50.0 + i for i in list(range(0, 10)) + list(range(20, 40))},
     "SPY": {i: 400.0 + i for i in range(0, 40)},
+    # A spin-off's child, in no column: trading from day 12.
+    "KID": {i: 3.0 + 0.1 * i for i in range(12, 40)},
 }
 FACTOR = {"NEW": lambda i: 0.5 if i < 15 else 1.0}
 
@@ -91,7 +93,8 @@ def two_for_one(stale=()):
                       tuple(stale), (day(19), 201.0))
 
 
-def small_panel(splits=None, samples=None, member_days=None, dividends=None, overrides=()):
+def small_panel(splits=None, samples=None, member_days=None, dividends=None, overrides=(),
+                spin_offs=(), bars_of=None):
     spans = [span("F1", "OLD", 0, 9, 0, 9), span("F1", "NEW", 10, 24, 10, 16, 19, 24),
              span("P", "RE", 0, 19, 0, 19), span("S", "RE", 20, 39, 20, 30, 39),
              span("Y", "SPL", 20, 39, 20, 39)]
@@ -114,8 +117,9 @@ def small_panel(splits=None, samples=None, member_days=None, dividends=None, ove
         "F1": [(day(5), day(25))], "P": [(day(0), day(19))], "S": [(day(20), day(35))],
         "Y": [(day(25), day(39))]}
     return securities.build_panel(
-        DAYS, columns, bars, splits if splits is not None else [two_for_one([(day(16), 100.0)])],
-        samples, paid, members, market, overrides)
+        DAYS, columns, bars_of or bars,
+        splits if splits is not None else [two_for_one([(day(16), 100.0)])],
+        samples, paid, members, market, overrides, spin_offs)
 
 
 def test_the_columns_merge_a_reorganisation_under_its_successor_and_keep_a_splice_apart():
@@ -385,3 +389,169 @@ def test_a_span_off_an_exchange_ends_but_for_the_days_the_index_still_held_it():
     assert kept[0].samples == (day(0), day(10), day(20))
     assert (gone.span.key, gone.last_listed, gone.kept_to, gone.held) == ("GONE", None, None, ())
     assert kept[1] == spans[2] and kept[2] == spans[3]
+
+
+# --------------------------------------------------------------------- spin-offs (midoffice14)
+
+def spin_off(ex, *, child="KID", ratio=0.5, record=None, split=1.0, child_key=None,
+             child_count=None):
+    return securities.SpinOff("F1", "NEW", "name F1", child, child_key, ratio,
+                              record or day(ex - 1), day(ex), day(ex), split, child_count,
+                              (), "evidence", "ruled")
+
+
+def price_only(on):
+    return SplitCheck("F1", "name F1", Split(day(on), 1000.0, 1033.0, "NEW"), (day(10), 100.0),
+                      (day(16), 100.0), False, "unchanged", "price-only", False, "price-only")
+
+
+def test_a_spin_off_ruling_carries_the_childs_shares_in_the_parents_total_return():
+    """CTVA's case: on the ex-date the parent's total return is its raw close plus the child's
+    shares at the child's close, plus the day's cash, over its raw close the day before; a
+    price-only event the cache records there does not enter it; the stitched prices keep their
+    own step, and the days after keep theirs."""
+    plain = small_panel()
+    panel = small_panel(splits=[two_for_one([(day(16), 100.0)]), price_only(12)],
+                        spin_offs=[spin_off(12)])
+    p, total = panel.prices[:, 0], panel.total_prices[:, 0]
+    assert total[12] / total[11] == pytest.approx((52.0 + 1.0 + 0.5 * 4.2) / 51.0)
+    assert np.array_equal(p, plain.prices[:, 0], equal_nan=True)
+    assert total[13] / total[12] == pytest.approx(p[13] / p[12])
+    assert total[11] == plain.total_prices[11, 0]
+    (use,) = panel.spin_offs
+    assert (use.key, use.previous, use.day, use.child_day, use.splits) == (
+        "F1", day(11), day(12), day(12), 1.0)
+    assert (use.raw_before, use.raw_after, use.child_close, use.cash) == pytest.approx(
+        (51.0, 52.0, 4.2, 1.0))
+    assert use.adjusted == pytest.approx((26.0 + 0.5) / 25.5)
+    assert use.step == pytest.approx(55.1 / 51.0)
+    assert panel.distributions == plain.distributions
+
+
+def test_a_ruling_on_a_split_day_takes_the_split_as_the_adjusted_closes_do():
+    """The ratio is the child's shares an old share: on the two-for-one's day the parent's new
+    shares count twice, as the adjusted closes' step has them."""
+    panel = small_panel(spin_offs=[spin_off(15)])
+    (use,) = panel.spin_offs
+    assert use.splits == 2.0 and use.adjusted == pytest.approx(35.0 / 27.0)
+    assert use.step == pytest.approx((2.0 * 35.0 + 0.5 * 4.5) / 54.0)
+
+
+def test_a_rulings_split_is_applied_to_the_count_as_the_gates_are_when_its_samples_follow():
+    """HON's case: a split the parent made with its distribution and the cache does not record,
+    checked by the parent's own samples, which must follow it, and applied on the ex-date; the
+    split guard holds; it enters the day's total return; counts that do not follow it refuse."""
+    samples = {"F1": [(day(0), "OLD", 100.0), (day(10), "NEW", 100.0), (day(16), "NEW", 100.0),
+                      (day(19), "NEW", 201.0), (day(24), "NEW", 100.0)],
+               "P": [(day(0), "RE", 50.0)], "S": [(day(30), "RE", 54.0)],
+               "Y": [(day(20), "SPL", 7.0)]}
+    ruling = spin_off(20, split=0.5)
+    (check,) = securities.spin_off_splits([ruling], samples)
+    assert (check.key, check.split.execution_date, check.split.ratio) == ("F1", day(20), 0.5)
+    assert (check.kind, check.counts, check.before, check.followed) == (
+        "split", "follow", (day(19), 201.0), (day(24), 100.0))
+    assert "the cache does not record" in check.detail and check.prices is None
+    splits = [two_for_one([(day(16), 100.0)]), check]
+    panel = small_panel(splits=splits, samples=samples, spin_offs=[ruling])
+    f1 = panel.shares[:, 0]
+    assert list(f1[[19, 20, 23, 24]]) == [201.0, 100.5, 100.5, 100.0]
+    assert ("F1", day(20), 0.5) in panel.applied
+    assert securities.split_guard(panel, splits, samples).passed
+    assert panel.total_prices[20, 0] / panel.total_prices[19, 0] == pytest.approx(
+        (0.5 * 40.0 + 0.5 * 5.0) / 39.0)
+    unchanged = {**samples, "F1": samples["F1"][:-1] + [(day(24), "NEW", 201.0)]}
+    with pytest.raises(ValueError, match="not one its counts follow"):
+        securities.spin_off_splits([ruling], unchanged)
+
+
+def test_a_child_without_a_count_takes_its_parents_on_the_record_date_until_its_own():
+    """Vylor's case: the parent's carried count on the record date times the ratio, from the
+    child's first day on or after the ex-date until a sample of its own carries one -- never
+    back -- and the seeding is listed; a child no column holds is refused."""
+    samples = {"F1": [(day(0), "OLD", 100.0), (day(10), "NEW", 100.0), (day(16), "NEW", 100.0),
+                      (day(19), "NEW", 201.0)],
+               "P": [(day(0), "RE", 50.0)], "S": [(day(30), "RE", 54.0)],
+               "Y": [(day(30), "SPL", 7.0)]}
+    ruling = spin_off(20, child="SPL", child_key="Y", record=day(19), child_count="parent")
+    panel = small_panel(samples=samples, spin_offs=[ruling])
+    y = panel.shares[:, 2]
+    assert not np.isfinite(y[:20]).any()
+    assert list(y[[20, 29, 30, 39]]) == [100.5, 100.5, 7.0, 7.0]
+    (seed,) = panel.seeded
+    assert (seed.key, seed.first, seed.count, seed.parent_count, seed.until) == (
+        "Y", day(20), 100.5, 201.0, day(30))
+    assert (seed.days, seed.member_days) == (10, 5)
+    assert panel.total_prices[20, 0] / panel.total_prices[19, 0] == pytest.approx(
+        (40.0 + 0.5 * 70.0) / 39.0)
+    with pytest.raises(ValueError, match="as columns"):
+        small_panel(samples=samples, spin_offs=[spin_off(20, child="SPL", child_key="NONE",
+                                                         child_count="parent")])
+
+
+def test_the_spin_off_file_is_read_with_its_rules(tmp_path):
+    """Each ruling the parent's key, the child, a positive ratio and split, its dates in order,
+    a seeded count only with the child's key, and evidence; one ruling a parent and ex-date.
+    The repo's file reads: CTVA's with Vylor's count seeded, HON's with its reverse split and the
+    count override it supersedes."""
+    import json
+
+    def write(*entries):
+        path = tmp_path / "spin_offs.json"
+        path.write_text(json.dumps({"entries": list(entries)}), encoding="utf-8")
+        return path
+
+    good = {"parent": "K", "label": "KK", "name": "the parent", "child": "C", "child_key": "F",
+            "ratio": 1.0, "record": "2026-09-24", "distributed": "2026-10-01",
+            "ex_date": "2026-10-01", "child_count": "parent", "evidence": "the record",
+            "ruled": "midoffice14"}
+    (read,) = securities.read_spin_offs(write(good))
+    assert (read.parent, read.child, read.ratio, read.split, read.ex_date, read.child_count) == (
+        "K", "C", 1.0, 1.0, dt.date(2026, 10, 1), "parent")
+    for bad, why in (({**good, "ratio": 0}, "positive"),
+                     ({**good, "child_count": "half"}, "not 'half'"),
+                     ({**good, "child_key": None}, "needs the child's key"),
+                     ({**good, "ex_date": "2026-09-01"}, "backwards"),
+                     ({**good, "evidence": ""}, "needs its evidence")):
+        with pytest.raises(ValueError, match=why):
+            securities.read_spin_offs(write(bad))
+    with pytest.raises(ValueError, match="two rulings"):
+        securities.read_spin_offs(write(good, good))
+    path = Path(__file__).resolve().parents[2] / "config" / "sp500_spin_off_overrides.json"
+    rulings = {(r.label, r.ex_date): r for r in securities.read_spin_offs(path)}
+    ctva = rulings[("CTVA", dt.date(2026, 10, 1))]
+    assert (ctva.child, ctva.ratio, ctva.record, ctva.child_count) == (
+        "VYLR", 1.0, dt.date(2026, 9, 24), "parent")
+    hon = rulings[("HON", dt.date(2026, 6, 29))]
+    assert (hon.child, hon.ratio, hon.split) == ("HONA", 0.5, 0.5)
+    assert hon.supersedes == (("BBG000H556T9", dt.date(2026, 10, 12), dt.date(2026, 11, 3)),)
+    assert all(r.evidence and r.ruled for r in rulings.values())
+
+
+def test_the_first_day_check_lists_the_members_gaps_and_what_explains_them():
+    """On a security's first day in the panel, a member whose raw price opened below the
+    market's by more than the threshold is listed, and marked by a ruling, a split event or a
+    distribution that day where one explains it."""
+    import dataclasses
+
+    def gapped(ticker, basis):
+        rows = bars(ticker, basis)
+        if ticker != "NEW" or basis != "raw":
+            return rows
+        return tuple(dataclasses.replace(b, open=30.0) if b.date == day(20) else b for b in rows)
+
+    splits = [two_for_one([(day(16), 100.0)])]
+    panel = small_panel(bars_of=gapped)
+    (first,) = securities.first_days(panel, bars("SPY", "raw"), splits, {})
+    expected = 30.0 / 39.0 - 1.0 - (420.0 / 419.0 - 1.0)
+    assert (first.key, first.label, first.day) == ("Y", "SPL", day(20))
+    ((key, label, gap, why),) = first.gaps
+    assert (key, label, why) == ("F1", "NEW", "") and gap == pytest.approx(expected)
+    (ruled,) = securities.first_days(panel, bars("SPY", "raw"), splits, {}, [spin_off(20)])
+    assert ruled.gaps[0][3] == "ruling"
+    on_day = SplitCheck("F1", "name F1", Split(day(20), 1.0, 2.0, "NEW"), None, None, True,
+                        None, "split", False, "a split")
+    (split,) = securities.first_days(panel, bars("SPY", "raw"), splits + [on_day], {})
+    assert split.gaps[0][3] == "split"
+    cash = {"NEW": [Dividend(day(20), 0.5, "USD", "SC", 0, None, "NEW")]}
+    (paid,) = securities.first_days(panel, bars("SPY", "raw"), splits, cash)
+    assert paid.gaps[0][3] == "distribution"

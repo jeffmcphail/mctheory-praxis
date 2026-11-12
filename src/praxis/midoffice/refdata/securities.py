@@ -62,14 +62,15 @@ from __future__ import annotations
 import datetime as dt
 import json
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
 
 from .identity import Record
-from .polygon import Bar, Dividend
-from .rebuild import TOLERANCE, Span, SplitCheck
+from .polygon import Bar, Dividend, Split
+from .rebuild import LARGEST_TERM, TOLERANCE, Span, SplitCheck, classify
 
 Bars = Callable[[str, str], Sequence[Bar]]
 """A ticker's daily bars, "adj" or "raw": read as needed, one column's at a time."""
@@ -414,6 +415,157 @@ def read_overrides(path: Path | str) -> list[Override]:
     return out
 
 
+@dataclass(frozen=True)
+class SpinOff:
+    """A ruling on a distribution of another company's shares that the cache records wrongly or
+    not at all (`read_spin_offs`; midoffice14). On `ex_date` the parent's total return carries
+    `ratio` of the child's shares a parent share, valued at the child's raw close that day -- or
+    its first after, where it had none -- with any cash distribution the same day:
+
+        (w (C_t + D_t) + k V) / C_s - 1,
+
+    C the parent's raw closes on the ex-date and its previous priced day s, D its cash that day,
+    V the child's close and w the ratios of the splits the build applies between s and t. The
+    stitched prices -- Polygon's adjusted closes -- are left as they are: the ruling is the total
+    return's. `split`, where the parent split with the distribution and the cache records no
+    event for it, is applied to its carried count on the ex-date as a split the gate classified
+    (`spin_off_splits`), and so enters w. `child_count` "parent": where the child's records carry
+    no count, the parent's carried count on the record date times the ratio, from the child's
+    first day on or after the ex-date until a sample of its own carries one. `supersedes`: count
+    overrides this ruling replaces, each (key, first, last)."""
+
+    parent: str
+    label: str
+    name: str
+    child: str
+    child_key: str | None
+    """The child's composite FIGI, where Polygon's record has one: its column's key, or a key it
+    holds, for `child_count`; checked against the child's record where the cache has one."""
+    ratio: float
+    record: dt.date
+    distributed: dt.date
+    ex_date: dt.date
+    split: float = 1.0
+    child_count: str | None = None
+    supersedes: tuple[tuple[str, dt.date, dt.date], ...] = ()
+    evidence: str = ""
+    ruled: str = ""
+
+
+def read_spin_offs(path: Path | str) -> list[SpinOff]:
+    """The spin-off overrides file, `config/sp500_spin_off_overrides.json`: rulings with their
+    evidence, as the count rulings are carried (midoffice14's brief). Each entry the parent's key,
+    label and name, the child's ticker and key, the ratio, the record, distribution and ex-dates,
+    any split the parent made with it, whether the child's count is seeded from the parent's, the
+    count overrides it supersedes, and the evidence."""
+    entries = json.loads(Path(path).read_text(encoding="utf-8"))["entries"]
+    out = []
+    for entry in entries:
+        where = f"{entry.get('label', entry['parent'])} {entry.get('ex_date')}"
+        ratio, split = float(entry["ratio"]), float(entry.get("split", 1.0))
+        if not ratio > 0.0 or not split > 0.0:
+            raise ValueError(f"{where}: a ratio and a split are positive")
+        child_count = entry.get("child_count")
+        if child_count not in (None, "parent"):
+            raise ValueError(f"{where}: a child's count is seeded from the parent's or not, not "
+                             f"{child_count!r}")
+        if child_count and not entry.get("child_key"):
+            raise ValueError(f"{where}: a seeded count needs the child's key")
+        record, distributed, ex = (dt.date.fromisoformat(entry[k])
+                                   for k in ("record", "distributed", "ex_date"))
+        if distributed < record or ex < record:
+            raise ValueError(f"{where}: its dates run backwards")
+        if not entry.get("evidence"):
+            raise ValueError(f"{where}: a ruling needs its evidence")
+        supersedes = tuple((s["key"], dt.date.fromisoformat(s["first"]),
+                            dt.date.fromisoformat(s["last"]))
+                           for s in entry.get("supersedes", ()))
+        out.append(SpinOff(entry["parent"], entry.get("label", entry["parent"]),
+                           entry.get("name", ""), entry["child"], entry.get("child_key"), ratio,
+                           record, distributed, ex, split, child_count, supersedes,
+                           entry["evidence"], entry.get("ruled", "")))
+    seen = set()
+    for s in out:
+        if (s.parent, s.ex_date) in seen:
+            raise ValueError(f"{s.label}: two rulings on {s.ex_date}")
+        seen.add((s.parent, s.ex_date))
+    return out
+
+
+def spin_off_splits(
+    spin_offs: Sequence[SpinOff],
+    samples: Mapping[str, Sequence[tuple[dt.date, str, float]]],
+    tolerance: float = TOLERANCE,
+    largest_term: int = LARGEST_TERM,
+) -> list[SplitCheck]:
+    """Each split a spin-off ruling says the parent made with its distribution, and the cache
+    does not record, as a split event the gate would classify: tested against the parent's own
+    share samples (`rebuild.classify`), which must follow it, and not against the raw price,
+    which the distribution in the same minute offsets -- Honeywell's 1-for-2 reverse split of
+    2026-06-29, one minute after its Aerospace distribution. Raises if the counts do not follow
+    the ratio."""
+    out = []
+    for s in spin_offs:
+        if s.split == 1.0:
+            continue
+        fraction = Fraction(s.split).limit_denominator(1000)
+        split = Split(s.ex_date, float(fraction.denominator), float(fraction.numerator), s.label)
+        counts = sorted((day, float(count)) for day, _, count in samples.get(s.parent, ())
+                        if count)
+        before = next((c for c in reversed(counts) if c[0] < s.ex_date), None)
+        later = [c for c in counts if c[0] >= s.ex_date]
+        found = classify(split, before, later, None, tolerance=tolerance,
+                         largest_term=largest_term)
+        if found["kind"] != "split" or found["counts"] != "follow":
+            raise ValueError(f"{s.label} {s.ex_date}: the ruling's split of {s.split:g} is not "
+                             f"one its counts follow: {found['detail']}")
+        detail = (f"{found['detail']}; a spin-off ruling's split the cache does not record, its "
+                  f"price not tested -- the distribution the same day offsets the gap")
+        out.append(SplitCheck(s.parent, s.name, split, before, found["after"], found["whole"],
+                              found["counts"], found["kind"], False, detail, found["stale"],
+                              found["followed"], None, None))
+    return out
+
+
+@dataclass(frozen=True)
+class SpinOffUse:
+    """A spin-off ruling as the build applied it: the parent's ex-date total return, from the
+    adjusted closes and from the ruling."""
+
+    ruling: SpinOff
+    key: str
+    previous: dt.date
+    day: dt.date
+    raw_before: float
+    raw_after: float
+    child_close: float
+    child_day: dt.date
+    """The child's close the value is taken at: the ex-date's, or its first after."""
+    cash: float
+    splits: float
+    """w: the ratios of the splits the build applies between the two days."""
+    adjusted: float
+    """The day's total-return step from the adjusted closes, as built without the ruling."""
+    step: float
+    """The ruling's: (w (C_t + D_t) + k V) / C_s."""
+
+
+@dataclass(frozen=True)
+class Seeded:
+    """A child's count seeded from its parent's: the parent's carried count on the record date
+    times the ratio, from `first` until its own first count, `until` (None: to the window's
+    end)."""
+
+    ruling: SpinOff
+    key: str
+    first: dt.date
+    count: float
+    parent_count: float
+    until: dt.date | None
+    days: int
+    member_days: int
+
+
 # ----------------------------------------------------------------------------- the build
 
 
@@ -498,6 +650,12 @@ class Panel:
     overridden: list[tuple[Override, int, int, int]] = field(default_factory=list)
     """Each override used: it, the days of its range inside the column's spans, the member-days
     among them, and the samples inside it not read."""
+    spin_offs: list[SpinOffUse] = field(default_factory=list)
+    """Each spin-off ruling applied to its parent's total return."""
+    seeded: list[Seeded] = field(default_factory=list)
+    """Each child's count seeded from its parent's."""
+    opens: np.ndarray | None = None
+    """The raw opens, under each cell's ticker: for the first-day check, not written."""
 
 
 def _by_date(bars: Sequence[Bar]) -> dict[dt.date, Bar]:
@@ -527,14 +685,16 @@ def build_panel(
     member_days: Mapping[str, Sequence[tuple[dt.date, dt.date]]],
     market: tuple[Sequence[Bar], Sequence[Bar], Sequence[Dividend]],
     overrides: Sequence[Override] = (),
+    spin_offs: Sequence[SpinOff] = (),
 ) -> Panel:
     """Assemble the panel. `bars(ticker, "adj" | "raw")` is a ticker's daily bars;
-    `splits` the gate's classification of every split event inside the spans; `samples[key]`
-    each plan key's share counts, (date, ticker, count), the searched first counts among them;
-    `dividends[ticker]` each ticker's distributions; `member_days[key]` each plan key's runs of
-    membership, (first, last), read through the renames; `market` the market series' adjusted
-    and raw bars and its distributions; `overrides` the rulings on counts (`Override`).
-    `dates` are the trading calendar, the market's."""
+    `splits` the gate's classification of every split event inside the spans, with any split a
+    spin-off ruling adds (`spin_off_splits`); `samples[key]` each plan key's share counts, (date,
+    ticker, count), the searched first counts among them; `dividends[ticker]` each ticker's
+    distributions; `member_days[key]` each plan key's runs of membership, (first, last), read
+    through the renames; `market` the market series' adjusted and raw bars and its
+    distributions; `overrides` the rulings on counts (`Override`); `spin_offs` the rulings on
+    distributions of shares (`SpinOff`). `dates` are the trading calendar, the market's."""
     dates = tuple(dates)
     n, m = len(dates), len(columns)
     at = {day: i for i, day in enumerate(dates)}
@@ -545,11 +705,16 @@ def build_panel(
 
     prices, total, raw_prices = blank(), blank(), blank()
     volumes, adjusted_volumes, shares, highs, lows = blank(), blank(), blank(), blank(), blank()
+    opens = blank()
     tickers = np.full(shape, "", dtype=object)
     membership = np.zeros(shape, dtype=bool)
     out = Panel(dates, tuple(columns), prices, total, raw_prices, volumes, adjusted_volumes,
                 shares, highs, lows, tickers, membership, np.full(n, np.nan),
-                np.full(n, np.nan))
+                np.full(n, np.nan), opens=opens)
+    for ruling in spin_offs:
+        if ruling.ex_date not in at or ruling.record not in at:
+            raise ValueError(f"{ruling.label}: the spin-off ruling's ex-date {ruling.ex_date} "
+                             f"and record date {ruling.record} must be trading days")
     by_key: dict[str, list[SplitCheck]] = {}
     for check in splits:
         by_key.setdefault(check.key, []).append(check)
@@ -605,6 +770,7 @@ def build_panel(
                 prices[i, j] = a.close * scale
                 adjusted_volumes[i, j] = a.volume / scale
                 raw_prices[i, j] = r.close
+                opens[i, j] = r.open
                 volumes[i, j] = r.volume
                 highs[i, j] = r.high
                 lows[i, j] = r.low
@@ -624,13 +790,39 @@ def build_panel(
             due.setdefault(later[0], []).append(event)
             if dates[later[0]] != event.ex_date:
                 out.unpriced_ex_dates.append((column.key, event, dates[later[0]]))
+        # A spin-off ruling's ex-date carries the child's shares in the total return, from the
+        # raw closes (`SpinOff`); the stitched prices keep the adjusted closes' own step.
+        spun = {at[r.ex_date]: r for r in spin_offs if r.parent in column.keys}
         if priced:
             total[priced[0], j] = prices[priced[0], j]
             for s, t in zip(priced, priced[1:]):
                 cash = sum(d.cash_amount for d in due.get(t, ()))
                 reinvested = cash * prices[t, j] / raw_prices[t, j]
-                total[t, j] = total[s, j] * (prices[t, j] + reinvested) / prices[s, j]
+                ruling = spun.pop(t, None)
+                if ruling is None:
+                    total[t, j] = total[s, j] * (prices[t, j] + reinvested) / prices[s, j]
+                else:
+                    step = (prices[t, j] + reinvested) / prices[s, j]
+                    w = 1.0
+                    for check in events:
+                        if check.applies and dates[s] < check.split.execution_date <= dates[t]:
+                            w *= check.split.ratio
+                    child = [b for b in bars(ruling.child, "raw") if b.date >= ruling.ex_date]
+                    if not child or child[0].close <= 0.0:
+                        raise ValueError(f"{column.label}: no close of {ruling.child} on or "
+                                         f"after its ex-date {ruling.ex_date}")
+                    ruled = ((w * (raw_prices[t, j] + cash) + ruling.ratio * child[0].close)
+                             / raw_prices[s, j])
+                    out.spin_offs.append(SpinOffUse(
+                        ruling, column.key, dates[s], dates[t], float(raw_prices[s, j]),
+                        float(raw_prices[t, j]), float(child[0].close), child[0].date,
+                        float(cash), w, float(step), float(ruled)))
+                    total[t, j] = total[s, j] * ruled
                 out.distributions += len(due.get(t, ()))
+        if spun:
+            raise ValueError(f"{column.label}: a spin-off ruling's ex-date "
+                             f"{', '.join(str(dates[t]) for t in spun)} is not a priced day "
+                             f"after the column's first")
 
         # Share counts: carried forward from each sample, splits applied on their dates.
         applied = [c for c in events if c.applies]
@@ -703,6 +895,34 @@ def build_panel(
         for o in mine:
             inside = [i for i in assigned if o.first <= dates[i] <= o.last]
             out.overridden.append((o, len(inside), int(membership[inside, j].sum()), unread[o]))
+
+    # A child whose records carry no count: its parent's on the record date at the ratio, from
+    # its first day on or after the ex-date until a sample of its own carries one, never back.
+    index = {key: j for j, c in enumerate(columns) for key in c.keys}
+    for ruling in spin_offs:
+        if ruling.child_count != "parent":
+            continue
+        if ruling.child_key not in index or ruling.parent not in index:
+            raise ValueError(f"{ruling.label}: a seeded count needs the parent and the child, "
+                             f"{ruling.child} ({ruling.child_key}), as columns")
+        jp, jc = index[ruling.parent], index[ruling.child_key]
+        base = shares[at[ruling.record], jp]
+        if not np.isfinite(base):
+            raise ValueError(f"{ruling.label}: no count carried on the record date "
+                             f"{ruling.record} to seed {ruling.child}'s")
+        inside = tickers[:, jc] != ""
+        days = [i for i in range(at[ruling.ex_date], n) if inside[i]]
+        if not days:
+            raise ValueError(f"{ruling.child}: no day in its spans on or after {ruling.ex_date}")
+        count, filled, i = float(base) * ruling.ratio, [], days[0]
+        while i < n and not np.isfinite(shares[i, jc]):
+            if inside[i]:
+                shares[i, jc] = count
+                filled.append(i)
+            i += 1
+        out.seeded.append(Seeded(ruling, columns[jc].key, dates[days[0]], count, float(base),
+                                 dates[i] if i < n else None, len(filled),
+                                 int(membership[filled, jc].sum())))
 
     # The market series, both returns; a distribution on its ex-date, or the first trading day
     # after it.
@@ -931,3 +1151,69 @@ def weighted_check(
             out.append(Weighted(panel.columns[j].key, panel.columns[j].label, ticker, day,
                                 float(value), carried, bool(own) and float(own) == carried))
     return sorted(out, key=lambda w: (w.label, w.day))
+
+
+@dataclass(frozen=True)
+class FirstDay:
+    """A security's first priced day in the panel, and the members whose raw price opened
+    furthest below the market's that day: where a child's first day is its parent's ex-date,
+    the parent's gap is the distribution's value, and a gap no record or ruling explains is a
+    spin-off the total return may not carry (midoffice14)."""
+
+    key: str
+    label: str
+    day: dt.date
+    gaps: tuple[tuple[str, str, float, str], ...]
+    """Each member's key, label, opening gap less the market's, and what explains it: "ruling"
+    (a spin-off ruling's ex-date), "split" (a split event the build read), "distribution" (a
+    cash one), or "" for nothing on record."""
+
+
+def first_days(
+    panel: Panel,
+    market_raw: Sequence[Bar],
+    splits: Sequence[SplitCheck],
+    dividends: Mapping[str, Sequence[Dividend]],
+    spin_offs: Sequence[SpinOff] = (),
+    threshold: float = 0.015,
+    most: int = 3,
+) -> list[FirstDay]:
+    """A standing check: on each column's first priced day after the window's first, the
+    members other than it whose raw opening gap -- the open over the previous raw close, less
+    the market's -- is below `-threshold`, the `most` lowest, each with what explains it. The
+    previous close across a change of ticker is the old ticker's, as the stitched prices bridge
+    it."""
+    if panel.opens is None:
+        raise ValueError("the first-day check needs the panel's raw opens")
+    market = _by_date(market_raw)
+    split_days = {(c.key, c.split.execution_date) for c in splits}
+    ruled = {(r.parent, r.ex_date) for r in spin_offs}
+    out = []
+    for j, column in enumerate(panel.columns):
+        priced = np.flatnonzero(np.isfinite(panel.raw_prices[:, j]))
+        if not priced.size or priced[0] == 0:
+            continue
+        i = int(priced[0])
+        day, before = panel.dates[i], panel.dates[i - 1]
+        if day not in market or before not in market or market[before].close <= 0.0:
+            continue
+        reference = market[day].open / market[before].close - 1.0
+        rows = []
+        for k in np.flatnonzero(panel.membership[i]):
+            if k == j or not (np.isfinite(panel.opens[i, k])
+                              and np.isfinite(panel.raw_prices[i - 1, k])):
+                continue
+            gap = float(panel.opens[i, k] / panel.raw_prices[i - 1, k] - 1.0 - reference)
+            if gap >= -threshold:
+                continue
+            keys = panel.columns[k].keys
+            ticker = str(panel.tickers[i, k])
+            why = ("ruling" if any((key, day) in ruled for key in keys)
+                   else "split" if any((key, day) in split_days for key in keys)
+                   else "distribution" if any(d.ex_date == day
+                                              for d in dividends.get(ticker, ()))
+                   else "")
+            rows.append((panel.columns[k].key, panel.columns[k].label, gap, why))
+        rows.sort(key=lambda row: row[2])
+        out.append(FirstDay(column.key, column.label, day, tuple(rows[:most])))
+    return sorted(out, key=lambda f: (f.day, f.label))

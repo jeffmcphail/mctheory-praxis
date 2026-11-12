@@ -261,9 +261,13 @@ none` is one half-life for the whole matrix.
 
 `correlation_lags` (midoffice13, the run's `--correlation-lags`) gives the correlations their own
 lag count: at 0 they are the long window's one-period correlations while the volatilities keep
-the horizon's lags -- the lags on the volatilities alone, the reporting view's candidate. With
-variance-ratio volatilities the ratio keeps the volatilities' lags on its own window. Given equal
-to the volatilities' lags it is the plain split, to the bit, which a test pins.
+the horizon's lags -- the lags on the volatilities alone. With variance-ratio volatilities the
+ratio keeps the volatilities' lags on its own window. Given equal to the volatilities' lags it
+is the plain split, to the bit, which a test pins. The run gives the correlations no lags at any
+horizon above one day by default (midoffice13's ruling 4): the 21-day reporting view is the lags
+on the volatilities alone, and its bias run equals midoffice13's V21N to the bit in every array
+(checked in midoffice14). `--correlation-lags horizon` gives the correlations the horizon's lags
+too, midoffice12's view; the estimator's own default, `None`, is still the horizon's.
 
 `ratio_half_life` (midoffice12, the run's `--variance-ratio-half-life`, off by default) takes
 each volatility's serial correlation from a longer window than its level: each variance is its
@@ -1150,9 +1154,36 @@ cache holds the fetch:
     alternating between two counts, as Constellation's do, are left: the rule cannot tell which
     is true.
   - **Rulings for what no rule can tell,** in `config/sp500_share_count_overrides.json`, each
-    with its evidence: Honeywell's records carrying Honeywell Aerospace's count from
-    2026-10-12, Skydance's carrying none after it took Warner Bros. Discovery. The build lists
-    every entry it uses.
+    with its evidence: Honeywell's records read as carrying Honeywell Aerospace's count from
+    2026-10-12 (midoffice08) -- superseded by the spin-off rulings below, the halving being
+    Honeywell's own reverse split -- and Skydance's carrying none after it took Warner Bros.
+    Discovery. The build lists every entry it uses, and every one a spin-off ruling supersedes.
+- **Spin-offs the total return does not carry** (midoffice14), in
+  `config/sp500_spin_off_overrides.json`, each ruling with its evidence, the public record's
+  terms and the data's. Polygon records some spin-offs as fractional split events, which its
+  adjusted closes carry; many it records not at all, and those look like a loss: a raw price gap
+  on the ex-date, the count unchanged, no record. On each ruling's ex-date the parent's total
+  return is the brief's -- (w (C_t + D_t) + k V) / C_s - 1, its raw closes that day and the
+  priced day before, its cash that day, k of the child's shares a parent share at the child's
+  close V (its first close after, where it has none that day: Lennar's, whose record date was
+  its ex-date), w any split the build applies between -- and the stitched prices keep Polygon's
+  adjusted closes. 19 rulings: 13 of the pairs the brief names that the cache does not carry,
+  CTVA's among them (-83.8% to +4.1%); Lennar's of 2025-01-21, carried at a third of the
+  distribution's value; and five the public record adds -- Jacobs' second Amentum distribution,
+  BD's Waters shares, Aptiv's Versigent, Honeywell's Aerospace and S&P Global's Mobility. The
+  seven Polygon records within 10% of the brief's value are left as carried. Honeywell made a
+  1-for-2 reverse split one minute after its Aerospace distribution, which the cache does not
+  record and which offsets the price gap: the ruling applies it to the count as a split the gate
+  classified, checked by Honeywell's own samples (635,675,701 to 316,940,010, 0.499 times), so
+  its count from 2026-06-29 is half the one midoffice08's override carried and its weighted
+  check no longer flags. A child whose records carry no count -- Vylor, FedEx Freight -- takes
+  its parent's on the record date at the ratio until Polygon carries one; FedEx kept 19.9% of
+  FedEx Freight, so its seeded count is the shares distributed, 0.80 of its weighted count, and
+  flagged. `--spin-offs none` builds without them, `_listed` to the bit.
+- **The first-day check**, standing: on each security's first day in the panel, the members
+  whose raw price opened more than 1.5 points below SPY's, the three lowest, each with the ruling
+  or record that explains it. A spin-off's parent gaps by the child's value on its ex-date, and
+  the check shows each of the window's: every parent gap now explained, the other gaps news.
 
 - **A span ends where its security stops trading on an exchange** (midoffice09's ruling 2). A
   span's records say where its ticker trades: from its first sample whose market is not
@@ -1162,9 +1193,9 @@ cache holds the fetch:
   changes: the index holds only listed shares. A leaver that stays listed keeps forecasting
   from its own history.
 
-  Member-days without a count: 234 -- FedEx Freight's 109 and Vylor's 24, whose records carry
-  none in the window; the spin-offs' first days; Skydance's 21, by its ruling; and 37 days the
-  index carried a member past its last trade.
+  Member-days without a count: 101 on `_spinoffs` (234 on `_listed`, before FedEx Freight's 109
+  and Vylor's 24 took their parents') -- the spin-offs' first days, before their first records;
+  Skydance's 21, by its ruling; and 37 days the index carried a member past its last trade.
 
 Two standing checks report on the counts; neither is a source. Polygon's weighted share count
 is an earnings-per-share denominator, an average over a period, not the shares in existence; so
@@ -1172,12 +1203,13 @@ wherever a record carries one, it is set against the count the panel carries tha
 flagged beyond 10%. It confirms the 1:1 carries of OKE's and XOM's reorganisations (1.0001 and
 0.9920), and the repairs of Quest Diagnostics', Everest's and Starbucks' samples, whose own
 records' weighted counts sit within 0.6% of the count carried through them; it flags Carnival's
-unification (1.118) and Honeywell's contaminated records (0.50), and PG&E's, where both of
-Polygon's counts agree with the sample the error rule removed. Where a record's own share-class
-count is a single class of a company with several -- GOOGL, BRK.B, FOXA -- the weighted count
-spans them all, so those flag on every record. The second check reports every move of a carried
-count beyond 10% that no split explains: 86 after the rulings, mostly mergers' issuance, and
-the counts that alternate.
+unification (1.118), FedEx Freight's seeded count (1.253), and PG&E's, where both of Polygon's
+counts agree with the sample the error rule removed; on `_listed` it flagged Honeywell's records
+from 2026-07-14 (0.50), which its reverse split explains. Where a record's own share-class count
+is a single class of a company with several -- GOOGL, BRK.B, FOXA -- the weighted count spans
+them all, so those flag on every record. The second check reports every move of a carried count
+beyond 10% that no split explains: 88 on `_listed` and on `_spinoffs` (86 on midoffice09's
+`_repaired`), mostly mergers' issuance, and the counts that alternate.
 
 ### What it changes
 
@@ -1205,7 +1237,14 @@ from 5.80% to 6.22%. Total returns raise every industry's mean, from 0.65% (Serv
 lower Volatility's by 0.58%; the high yielders' specific risk falls most, Altria's by 0.58 of a
 point.
 
-Since midoffice10 the default panel is `_listed`: PCG's sample spared, which changes its count
+Since midoffice14 the default panel is `_spinoffs`: the 19 spin-off rulings change 19 member-day
+returns and 223 count member-days (FedEx Freight's 109 and Vylor's 24 seeded, Honeywell's 90
+halved by its reverse split), and nothing else. Mean R-squared moves from 0.293203 to 0.293826;
+specific risk is 16.56 / 28.99 / 48.89% at p10 / median / p90 (16.58 / 28.98 / 48.98%); the size
+pair 11.05% and 0.60% (10.99%, 0.57%); industry means move by up to 0.8% a year, the style
+factors' by under 0.2%. FedEx Freight and Vylor now have a weight, and still lack Momentum.
+
+Since midoffice10 the default panel was `_listed`: PCG's sample spared, which changes its count
 over 63 member-days, and the two spans ended off an exchange, which change 1,002 priced cells
 and no member-day. Mean R-squared moves from 0.293204 to 0.293203; Signature Bank's 395.72%
 forecast goes, and 966 specific returns measured outside the regressions with it.
@@ -1377,7 +1416,35 @@ the correlations' lags cost elsewhere -- the smallest eigenportfolios 1.48 again
 unconstrained minimum-variance portfolio 1.22 against 1.31. The variance-ratio volatilities with
 one-day correlations go further toward the one-day model (1.29 and 1.15, the forecast as steady
 as the one-day model's), but their two-year ratio over-forecasts the broad portfolios' 21-day
-risk more (the equally weighted index 0.856).
+risk more (the equally weighted index 0.856). It is the 21-day view's default since midoffice14
+(midoffice13's ruling 4).
+
+**The minimum-variance portfolios' realised volatility stands beside their statistic**
+(midoffice13's ruling 5): the bias report's tables give every portfolio's forecast volatility at
+its median and its realised volatility a year, at one day and the model's horizon; the optimiser's
+by half; and, under `--bias-eigen-scales`, each scale's -- the test the eigenfactor adjustment
+failed, which every covariance candidate after it meets.
+
+**On the rebuilt panel** (midoffice14, the spin-offs carried; the defaults' run D14 against
+midoffice13's D on `_listed`):
+
+| | `_listed` | `_spinoffs` |
+|---|---|---|
+| minimum variance, long-only / unconstrained, at one day | 1.167 / 1.220 | 1.059 / 1.101 |
+| their realised volatility, % a year (forecast 9.42 / 9.12) | 10.93 / 11.07 | 9.92 / 10.01 |
+| by half, the statistic: first / second | 1.246, 1.297 / 1.084, 1.139 | 1.247, 1.298 / 0.831, 0.862 |
+| at 21 days, the windows overlapping | 1.005 / 1.045 | 0.917 / 0.941 |
+| the index, cap-weighted / equally weighted, at one day | 1.015 / 0.965 | 1.015 / 0.966 |
+| members, median; mean abs(bias - 1) | 1.003; 0.090 | 1.003; 0.088 |
+
+The -13 sigma day is gone (CTVA's own outcome that day -41.9 to +2.0 sd, the optimiser's worst
+now the April 2025 shock's, -9.4 and -9.8 sd), and with it the optimiser's whole-test bias:
+the statistics are midoffice13's without that day (1.055, 1.097). What is left is the regime --
+1.25 and 1.30 in the first half, 0.83 and 0.86 in the second, the index 1.22 then 0.75 -- which
+the volatility regime adjustment is next to address (midoffice13's ruling 3). The broad
+portfolios, the industries, the random portfolios and the eigenportfolios move in the third
+decimal or not at all; the parents' own outcomes on their ex-dates go from -7.8 to -41.9 sd
+(J, WDC, BDX, FDX, CTVA) to within 2.4 sd.
 
 ## Status
 

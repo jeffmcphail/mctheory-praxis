@@ -1,7 +1,7 @@
 # Mid-office state
 
-**Updated:** 2026-11-12, at the end of midoffice13 (midoffice12's rulings; the eigenfactor risk
-adjustment and the reporting view's candidates, measured).
+**Updated:** 2026-11-12, at the end of midoffice14 (midoffice13's rulings; the spin-offs the
+total return does not carry, ruled, and the panel rebuilt).
 Brought up to date at the end of every piece, in the same commit as its retro (Rule 43). Not a
 history: the state a new session needs to carry on. The detail is in the retros named below.
 
@@ -10,7 +10,7 @@ history: the state a new session needs to carry on. The detail is in the retros 
 ## Start here
 
 1. Read `claude/CLAUDE_CODE_RULES.md` (Rule 43 above all), then this file, then the latest retro:
-   `claude/retros/RETRO_midoffice13_eigenvalue_adjustment.md`.
+   `claude/retros/RETRO_midoffice14_spin_offs.md`.
 2. **How the work runs.**
    - **The brief.** Each piece, `midofficeNN`, is a brief written in Chat and pasted into the Code
      session. Code transcribes it verbatim to `claude/handoffs/BRIEF_midofficeNN_<slug>.md`; its
@@ -30,8 +30,8 @@ history: the state a new session needs to carry on. The detail is in the retros 
    - Scratch goes to `claude/scratch/midofficeNN/` (gitignored), its outputs copied into the retro.
    - Python is ASCII and keeps the file's line endings (most `.py` here are CRLF in the working
      copy; the `claude/` briefs and retros LF).
-   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,356 passed
-     and 1 skipped at midoffice13. That file looks for `../core_repo/src`, which isn't on this
+   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,362 passed
+     and 1 skipped at midoffice14. That file looks for `../core_repo/src`, which isn't on this
      machine.
 4. **Working notes, from the pieces so far.**
    - A bash heredoc has failed in this harness on some apostrophes (06, 07, 08), though not
@@ -55,6 +55,14 @@ history: the state a new session needs to carry on. The detail is in the retros 
      in another order: a bias run's portfolio forecasts then differ from a single-threaded run's
      in the last bit (3.5e-18). The runners set `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and
      `MKL_NUM_THREADS` to 1, and every stored bias run was made so.
+   - **Line endings (14).** `core.autocrlf` is true: the index holds LF and the working copies of
+     the `.py` and `.md` files are CRLF (`git ls-files --eol` shows it); `config/*.json` is LF.
+     The Edit tool keeps a file's endings; text appended from an LF file leaves it mixed, so
+     normalise it (`claude/scratch/midoffice13/hygiene.py` catches it). A `grep -q $'\r'` test of
+     endings misreads in this shell: use the hygiene script.
+   - **Evaluation order (14).** `a * b / c` and `a * (b / c)` differ in the last bit: a rebuilt
+     panel's total-return index differed from the old in 656,657 cells, its daily returns by under
+     1e-12, until the old expression was kept for the days no ruling touches.
 
 ---
 
@@ -107,32 +115,35 @@ layer (c92d343 to e859b4e, 2026-11-01).
   specific side, the weighted share always.
 - 16f2fb2: **midoffice12** -- the horizon as a parameter, the bias statistics at any horizon,
   the new defaults.
-- Next: **midoffice13**. Jeff commits it after 16f2fb2 (`git log --oneline -3`).
+- cee34ca: **midoffice13** -- the one-day horizon, the eigenfactor adjustment measured, the
+  correlations' own lags.
+- Next: **midoffice14**. Jeff commits it after cee34ca (`git log --oneline -3`).
 
-**The current piece: midoffice13, COMPLETE (2026-11-12).**
+**The current piece: midoffice14, COMPLETE (2026-11-12).**
 
-- **midoffice12's rulings, measured.** The model's horizon is one day; the new defaults' bias
-  run equals midoffice12's H1 to the bit in every array, the guard on. A longer horizon is a
-  reporting view, and the report says so.
-- **The eigenfactor risk adjustment** (Menchero, Wang and Orr; USE4), built as an option, off
-  (`--eigen-adjustment`, `--bias-eigen-scales`): lambda by 1,000 simulated histories re-estimated
-  by the model's own estimator, 0.49 s a refit, stable to 0.002.
-  - **On the small eigenfactors it works:** ranks 16 to 25 from about 1.2 to about 1.07 at
-    a = 2, the scale its test chose on the first half (0.149 against 0.191) and kept on the
-    second (0.112 against 0.138).
-  - **It is not ready:** the minimum-variance portfolios rebuilt on it realise more risk at every
-    a (unconstrained 9.97% to 10.13% a year at a = 2), it shrinks eigenvalues the returns say are
-    under-forecast (rank 3), it raises the broad portfolios' forecasts (the smallest 85 out of the
-    band), and the optimiser's statistic barely moves (1.220 to 1.211).
-- **A data error found:** CTVA's 2026-10-01 total return is -83.8%, Corteva's separation, a
-  spin-off the panel does not carry; both minimum-variance portfolios held 9.4% of it, a -13
-  sigma outcome that dominates their statistics (1.055 and 1.097 without it, not 1.167 and 1.220).
-- **The reporting view at 21 days:** the lags on the volatilities alone (`--correlation-lags 0`)
-  read the broad portfolios as the 21-day model does (mean abs(bias - 1) 0.072 against 0.067) and
-  halve what its correlations' lags cost the small eigen-directions (1.48 against 2.69).
-- **Waiting on Jeff:** the decisions in the retro. My choices: the adjustment off; the CTVA data
-  fix first; then the adjustment one-sided and a volatility regime adjustment; the lags on the
-  volatilities alone as the reporting view's default.
+- **midoffice13's rulings.** At any horizon above one day the correlations take no lags by
+  default (ruling 4): the 21-day view's bias run equals midoffice13's V21N to the bit in all 24
+  arrays. The minimum-variance portfolios' realised volatility is a standing line of the bias
+  report beside their statistic, by half, and per scale under `--bias-eigen-scales` (ruling 5):
+  on midoffice13's stored E run it reproduces `minvar_realised.txt` to the hundredth.
+- **The spin-offs the total return does not carry**, 19 rulings in
+  `config/sp500_spin_off_overrides.json`: on each ex-date the parent's total return
+  (w (C_t + D_t) + k V) / C_s - 1, the child at its close. Of the 20 pairs the brief names, 12 not
+  carried and Lennar's carried wrongly (a third of the value), 7 carried by Polygon's fractional
+  ratios within 10%; CTVA's (item 1) and five the public record adds: Jacobs' second Amentum
+  distribution, BD's Waters shares, Aptiv's Versigent, Honeywell's Aerospace (with a 1-for-2
+  reverse split the cache does not record, which supersedes midoffice08's HON count ruling) and
+  S&P Global's Mobility. Vylor's and FedEx Freight's counts seeded from their parents'.
+- **The rebuilt panel, `_spinoffs`,** the run's default, `_listed` kept: 19 member-day returns
+  changed (CTVA's -83.8% to +4.1%, EXC's -25.9% to +4.7%, WDC's -28.7% to -5.1%, ...), 223 count
+  member-days (FDXF 109, HON 90, VYLR 24), nothing else.
+- **The defaults' bias run on it (D14)** against midoffice13's D: the minimum-variance
+  portfolios 1.167 and 1.220 to 1.059 and 1.101, their realised volatility 10.93% and 11.07% a
+  year to 9.92% and 10.01% (forecast 9.42% and 9.12%) -- the -13 sigma CTVA day gone; by half the
+  regime's, 1.25 and 1.30 then 0.83 and 0.86. The broad portfolios, members, industries, random
+  portfolios and eigenportfolios move in the third decimal or not at all.
+- **Waiting on Jeff:** the decisions in the retro -- the five rulings from the public record,
+  Honeywell's count, FedEx Freight's, Lennar's value, the seven Polygon carries, price returns.
 
 ---
 
@@ -204,6 +215,10 @@ in `docs/FACTOR_MODEL.md`.
   at that horizon, and the report says it is one (12 ruling 2). Its gain over the one-day model
   scaled rests on the mean reversion of one 2.7-year window with the April 2025 shock in it; it
   is re-tested as data accumulates.
+- **At any horizon above one day the correlations take no lags by default**, the lags on the
+  volatilities alone (13 ruling 4): the 21-day view's bias run equals V21N's to the bit (checked
+  in 14). `--correlation-lags horizon` gives them the horizon's, midoffice12's view; the
+  estimator's own default is still the horizon's.
 - **Noise shares** get one model-wide answer after the rebuild, never a deletion per factor (04
   ruling 1). Both are always computed and the run's factor table reports them side by side --
   at the one-day default, equal-weighted (Construction 29.2%, Wholesale 39.0%, Finance & Real
@@ -214,7 +229,10 @@ in `docs/FACTOR_MODEL.md`.
   a quadratic form -- sample, exponential or Newey-West -- and refuses the others; the
   two-half-life estimator's diagonal is one, so it has a weighted share but not the correction.
   (10; 10 ruling 1; 11 ruling 5) **The eigenvalue adjustment** came after the horizon was
-  settled, on the one-day matrix (11 ruling 4; 12 ruling 4): built in 13 as an option, off.
+  settled, on the one-day matrix (11 ruling 4; 12 ruling 4): built in 13 as an option, off (13
+  ruling 1). **The order after the data fix** (13 ruling 3): the volatility regime adjustment,
+  then the eigenvalue adjustment one-sided, re-tested on the regime-adjusted model -- a shape
+  adjustment is judged once the level is right.
 - **The variance-ratio variant** stays an option, off (12 ruling 5); **the specific history** a
   63-day half-life (12 ruling 6).
 - **The correction's specific side** (`leverage_correction`, `--leverage-correction`) is an
@@ -236,7 +254,11 @@ in `docs/FACTOR_MODEL.md`.
   the windows overlapping, their band found by simulation (`bias.overlapping_band`, normal
   returns, 10,000 draws, seeded); every h-th forecast apart beside it; at h = 1 the daily
   statistic itself. `--bias-horizons` evaluates more horizons the same way; midoffice11's 21-day
-  check is the 21-day statistic apart.
+  check is the 21-day statistic apart. **The minimum-variance portfolios' realised volatility**
+  stands beside their statistic (13 ruling 5): every portfolio's forecast (median) and realised
+  volatility a year in the tables, at one day and the model's horizon; the optimiser's by half;
+  each eigen scale's in its tables -- the test the eigen adjustment failed, kept for every
+  covariance candidate.
 - **A security's own specific-risk history** is every specific return it has, member or not:
   in each estimated period, the return of every security with a return and a complete
   characteristic row less its exposures times the members' factor returns, with no
@@ -297,7 +319,14 @@ in `docs/FACTOR_MODEL.md`.
   rulings on single securities, each a key, a range, "carry" a count or "none", and the
   evidence; samples inside a range are not read. The build lists every entry it uses. A new
   anomaly goes in the file with its evidence, not into a rule for one case. (08 ruling 3 for
-  midoffice09; `--overrides`)
+  midoffice09; `--overrides`) HON's entry (carry 635,675,701 from 2026-10-12) is superseded by
+  midoffice14's HON spin-off ruling, which applies Honeywell's 1-for-2 reverse split of
+  2026-06-29: the build does not read it while that ruling is read, and lists it; the file keeps
+  it as the record.
+- **A spin-off's child with no count of its own** takes its parent's carried count on the record
+  date at the ratio, from its first day on or after the ex-date until a sample of its own carries
+  one, never back: Vylor's (14 item 1) and FedEx Freight's (14 item 2), `child_count` in the
+  spin-off overrides file.
 - **The hindsight.** Rulings 1 and 2 recognise an error by a later sample: hindsight in cleaning
   the data, not in what the model knows, since the true counts were public at the time and a
   wrong count carries no information about the day's return. Real changes are adopted when the
@@ -339,6 +368,14 @@ in `docs/FACTOR_MODEL.md`.
   - an exact duplicate kept once, TEL's of 2024-11-22 the only one; SPY's distributions too;
   - in the comparison, identity first, then dividends. (06's second amendment; 06 ruling 5;
     07's brief)
+  - **every spin-off** (14's brief): on the ex-date the parent's total return is (its close + k
+    times the child's close) / its prior close - 1, plus any dividend -- in the build,
+    (w (C_t + D_t) + k V) / C_s - 1, w any split it applies between -- carried through
+    `config/sp500_spin_off_overrides.json`, each ruling with its evidence (`--spin-offs`). The
+    child's close is its first after the ex-date where it had none that day (Lennar's, 14). The
+    stitched prices keep Polygon's adjusted closes, so price returns carry a spin-off only where
+    Polygon records one. Polygon's fractional ratios within 10% of the brief's value stand as
+    carried (14).
 - **Volumes.** The panel on securities stores traded volumes, the raw bars', with the adjusted
   bars' beside them for comparison; the old panel stored the adjusted ones. (07; 08 ruling 3)
 - **LEN's 2025-01-21 adjustment** is left as Polygon has it, flagged. (06 ruling 6)
@@ -388,8 +425,8 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
   - Report: `data/external/polygon/sp500_rebuild_gate_2022-01-03_2026-11-03_amended.json`.
     midoffice07's is `_corrected`, midoffice06's unsuffixed. Run on another plan, it writes that
     plan's report: given the `_corrected` plan, it would overwrite midoffice07's.
-- **The panel on securities, current: `_listed`** (midoffice10):
-  `data/external/polygon/sp500_securities_2022-01-03_2026-11-03_listed.npz`, and its report
+- **The panel on securities, current: `_spinoffs`** (midoffice14):
+  `data/external/polygon/sp500_securities_2022-01-03_2026-11-03_spinoffs.npz`, and its report
   `.json`.
   - 592 securities -- each a share class, its key in `securities`, its label its last ticker --
     over the same 1,214 days.
@@ -398,14 +435,28 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
     market_total_returns, sic_codes and sic_dates, with the snapshot hash and the plan.
   - Regenerate: `python scripts/build_sp500_securities.py --offline`, about 40 s. It runs the gate
     offline first and builds only if it passes, and it refuses to write over an existing panel
-    without `--overwrite`.
-  - midoffice09's panel is `_repaired`: `--spare none --listed any --suffix _repaired` rebuilds
-    its arrays exactly (checked 2026-11-10).
+    without `--overwrite`. Against `_listed`: 19 member-day returns and 223 count member-days,
+    nothing else (`panel_changed.txt` in the midoffice14 retro).
+  - midoffice10's panel, the default to midoffice13, is `_listed`: `--spin-offs none --suffix
+    _listed` rebuilds its arrays exactly (checked 2026-11-12).
+  - midoffice09's panel is `_repaired`: that with `--spare none --listed any --suffix _repaired`
+    (checked 2026-11-10, before the spin-off rulings existed).
   - midoffice08's panel, before the count rulings, is the unsuffixed one: `--first-counts found
-    --repair none --overrides none --spare none --listed any --suffix ""`.
+    --repair none --overrides none --spin-offs none --spare none --listed any --suffix ""`.
 - **The overrides file**, in the repo: `config/sp500_share_count_overrides.json` -- HON from
-  2026-10-12 carries 635,675,701; SKYD from 2026-10-06 has no count. Each entry's `last` is the
-  last day its evidence reaches.
+  2026-10-12 carries 635,675,701 (superseded while the spin-off rulings are read); SKYD from
+  2026-10-06 has no count. Each entry's `last` is the last day its evidence reaches.
+- **The spin-off overrides file**, in the repo: `config/sp500_spin_off_overrides.json` -- 19
+  rulings (midoffice14), each the parent's key, the child, the ratio, the record, distribution
+  and ex-dates, any split with it (HON's 0.5), a seeded child count (VYLR, FDXF), the count
+  overrides it supersedes (HON's), and the evidence. Written by
+  `claude/scratch/midoffice14/make_spin_offs.py` from the public record and the data; read by
+  the build (`--spin-offs`, `none` for none).
+- **The cache gained** (midoffice14) the raw bars over the window of ten children that never
+  joined the index -- ZIMV, EMBC, FTRE, PHIN, KLG, RAL, MRP, VSNT, VGNT, MBGL -- and nine
+  reference records on their ex-dates (ZIMV's of 03-01 and 03-02, EMBC's, PHIN's, KLG's, MRP's
+  first day's, VSNT's, VGNT's, MBGL's; FTRE's and RAL's were there from midoffice06): 19 answers,
+  nothing overwritten.
 
 ---
 
@@ -415,12 +466,15 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
 python scripts/run_sp500_model.py --industries --membership
 ```
 
-That is the panel on securities with its counts repaired and its spans listed
-(`DEFAULT_PANEL`, `_listed`), total returns, traded volumes, covered histories weighted by a
-63-day half-life, the two-half-life covariance (90 / 504) and the horizon 11. The old panel, for
-comparison, runs as below, and with `--specific-history regression --specific-half-life none
---correlation-half-life none` too it takes midoffice08's code path, which reproduced its run A
-exactly (`none none` reproduces midoffice11's defaults to the bit on the panel on securities):
+That is the panel on securities with its counts repaired, its spans listed and its spin-offs
+carried (`DEFAULT_PANEL`, `_spinoffs`), total returns, traded volumes, covered histories weighted
+by a 63-day half-life, the two-half-life covariance (90 / 504) and the one-day horizon.
+midoffice13's panel runs with
+`data/external/polygon/sp500_securities_2022-01-03_2026-11-03_listed.npz` given first. The old
+panel, for comparison, runs as below, and with `--specific-history regression
+--specific-half-life none --correlation-half-life none` too it takes midoffice08's code path,
+which reproduced its run A exactly (`none none` reproduces midoffice11's defaults to the bit on
+the panel on securities):
 
 ```
 python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2026-11-04.npz --industries --membership --returns price
@@ -447,7 +501,8 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   the report says which (12 ruling 2). `--newey-west-lags L` overrides it, the horizon then
   L + 1; the report says which set it.
 - `--correlation-lags L` (13): the correlations' own Newey-West lags; 0 is the lags on the
-  volatilities alone, the correlations one-day. By default the horizon's for both.
+  volatilities alone, the correlations one-day -- the default at any horizon above one day (13
+  ruling 4); `horizon` gives them the horizon's lags, midoffice12's view.
 - `--eigen-adjustment A` (13): the eigenfactor risk adjustment at scale A, each eigenvalue
   scaled by (A (lambda - 1) + 1)^2, lambda simulated from `--eigen-draws` (1,000) histories
   re-estimated by the model's own estimator; 0 simulates and scales nothing. Off by default; not
@@ -469,14 +524,17 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
 **At the defaults:**
 
 - **Time:** about 50 to 65 s.
-- **Mean R-squared:** 0.293203 over 938 periods from 2023-02-08.
+- **Mean R-squared:** 0.293826 over 938 periods from 2023-02-08 (0.293203 on `_listed`).
 - **Members in the regression a period:** median 502, range 499 to 503.
-- **Specific risk:** p10 16.58%, median 28.98%, p90 48.98%, 550 forecasts (equal-weighted
-  histories, midoffice11's defaults: 15.58 / 24.76 / 40.49%).
-- **The size pair:** 10.99% for the smallest 85, 0.57% for the largest 50, 0.01% for the index
-  (at midoffice12's 11-day horizon 11.40 / 0.60 / 0.01%).
+- **Specific risk:** p10 16.56%, median 28.99%, p90 48.89%, 550 forecasts (on `_listed` 16.58 /
+  28.98 / 48.98%; equal-weighted histories, midoffice11's defaults: 15.58 / 24.76 / 40.49%).
+- **The size pair:** 11.05% for the smallest 85, 0.60% for the largest 50, 0.01% for the index
+  (on `_listed` 10.99 / 0.57 / 0.01%).
 - **The covariance:** the one-day covariance, 826.4 effective observations of 938, the
   correlation window's.
+- **Kept out of the regressions,** member-periods: no weight 93 (224 on `_listed`, before FDXF's
+  and VYLR's counts); an exposure missing 1,182, all Momentum (1,051) -- FDXF and VYLR now have
+  weights and lack a momentum history.
 
 The old panel, `--returns price --specific-history regression`, at midoffice11's defaults:
 0.298076, 451 (422-476), 11.94 / 0.38 / 0.01%.
@@ -520,7 +578,10 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
   against their weighted noise shares, the random portfolios, every member singly, the
   eigenportfolios, at both; every horizon `--bias-horizons` adds, side by side; and under
   `--bias-eigen-scales`, the simulation and each scale at one day over the whole test and each
-  half, a chosen on the first.
+  half, a chosen on the first. **Beside every portfolio's statistic, its forecast and realised
+  volatility a year** (13 ruling 5, built in 14), the minimum-variance portfolios' by half and,
+  under `--bias-eigen-scales`, each scale's: whether a covariance candidate's optimiser
+  portfolios realise more risk or less.
 - **Specific risk:**
   - the percentiles;
   - the shares of V-squared;
@@ -553,28 +614,41 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
   - every first count it passes over;
   - every isolated error it finds, removed or spared, with its weighted count;
   - every span it ends off an exchange, with the priced days removed;
-  - every override it uses.
+  - every override it uses, and every one a spin-off ruling supersedes;
+  - every spin-off ruling it applies: the ex-date's total return by the ruling and by the
+    adjusted closes, the child's close and record, the split it applies, the seeded counts.
 
   Its standing checks are:
-  - the weighted check -- carried counts listed in full, own records by security;
-  - every count move beyond 10% that no split explains, 86 now.
+  - the weighted check -- carried counts listed in full, own records by security (FDXF's seeded
+    count flags, 1.253: FedEx kept 19.9%);
+  - every count move beyond 10% that no split explains, 88 on `_listed` and `_spinoffs`;
+  - **the first-day check** (14): on each security's first day in the panel, the members whose
+    raw price opened more than 1.5 points below SPY's, the three lowest, each marked by the
+    ruling or record that explains it -- a spin-off's parent gaps by the child's value; every
+    parent gap is explained now, the rest is news.
 
 ---
 
 ## What is next
 
-1. **Jeff's rulings on midoffice13** (its retro, "Decisions left for Jeff"):
-   - **The eigenfactor risk adjustment:** off, an option (my choice); or on at a = 2, the scale
-     its test chose.
-   - **The CTVA spin-off of 2026-10-01:** a data piece carrying the distribution into the total
-     return, with a scan for others (my choice, first); or the test windows left as they are.
-   - **What comes after:** the adjustment one-sided (no eigenvalue shrunk) and a volatility
-     regime adjustment (my choice, in that order after the data fix); or neither.
-   - **The reporting view at 21 days:** the lags on the volatilities alone as its default (my
-     choice); or the 21-day model as it is.
-2. **The bias statistics are standing,** at one day and the model's horizon: every later
-   candidate is one `--bias --bias-horizons ...` run against the defaults (`--bias-eigen-scales`
-   for a covariance-side scale), one at a time through a runner like midoffice13's.
+1. **Jeff's rulings on midoffice14** (its retro, "Decisions left for Jeff"):
+   - **The five spin-off rulings from the public record** (Jacobs' second Amentum distribution,
+     BD's Waters shares, Aptiv's Versigent, Honeywell's Aerospace, S&P Global's Mobility): kept
+     (my choice), or dropped.
+   - **Honeywell's count:** midoffice08's ruling superseded by the 1-for-2 reverse split of
+     2026-06-29 (my choice); or restored.
+   - **FedEx Freight's count:** the shares distributed, as ruled (0.80 of its weighted count);
+     or grossed up by FedEx's retained 19.9%.
+   - **Lennar's value:** at Millrose's first close (my choice); or Polygon's 1.033.
+   - **The seven Polygon carries:** left (my choice); or every spin-off by the formula.
+   - **Price returns:** left as Polygon's adjusted closes (my choice); or the rulings applied to
+     the prices too.
+2. **Next by midoffice13's ruling 3:** the volatility regime adjustment, then the eigenvalue
+   adjustment one-sided, re-tested on the regime-adjusted model.
+3. **The bias statistics are standing,** at one day and the model's horizon, the optimiser's
+   realised volatility beside its statistic: every later candidate is one `--bias --bias-horizons
+   ...` run against D14 (`--bias-eigen-scales` for a covariance-side scale), one at a time through
+   a runner like midoffice14's (`claude/scratch/midoffice14/runner.py`).
 
 **Open, not queued:**
 
@@ -585,12 +659,18 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 - six ruff findings at HEAD in files no mid-office piece has touched since --
   `characteristics.py` (an E501, an unused `Sequence`), `exposure_basis.py` (an unused
   `Mapping`, two N806 `T`), `timeseries.py` (an unused `Sequence`); checked in 11
-  (`ruff_head_untouched.txt`), untouched in 12 and 13;
-- other unadjusted spin-offs: the scan in 13 looked only past +/-35% a day (twelve member-days,
-  CTVA's the one with a corporate-action signature); a smaller spin-off would show as a raw price
-  gap with an unchanged share count and no split, dividend or event on record (13);
-- the regime: by half the index's one-day statistic is 1.22 and then 0.75, every portfolio with
-  it; nothing in the model adjusts for it yet (13);
+  (`ruff_head_untouched.txt`), untouched in 12, 13 and 14;
+- spin-offs no check sees: the first-day check sees only children that joined the index, and the
+  public lists are not exhaustive (one omits Constellation); a child that never joined and that no
+  list names would be missed (14);
+- price returns (`--returns price`) carry a spin-off only where Polygon records one (14);
+- the spin-offs' children's first days without a count -- AMTM 5, CEG 1, GEHC 1, GEV 4, Q 13,
+  SOLS 13, SOLV 1, VLTO 2, WBD 1 member-days -- which the seeding rule would fill as Vylor's (14);
+- FedEx Freight and Vylor now have weights and still lack Momentum, so they enter no regression
+  (14);
+- the regime: by half the index's one-day statistic is 1.22 and then 0.75, the optimiser's 1.25
+  and 1.30 then 0.83 and 0.86, every portfolio with it; nothing in the model adjusts for it yet
+  (13, 14);
 - the specific history's half-life past 42: the trend from equal weights to 42 has flattened
   (members 1.075, 1.057, 1.045, 1.042, then on the new defaults 1.034 at 63, 1.031 at 42) (12);
 - the small caps mean-revert more than any model's lags hold them to (a realised 0.64 at 21
@@ -600,5 +680,4 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 - the sampling covariance is the classical `sigma^2 (X'WX)^-1`; a heteroskedasticity-robust
   sandwich would say whether it misstates a thin industry's noise (10);
 - a member floor is not a noise floor: SIC20, with 21 members, is 55% noise, weighted (10);
-- FDXF and Vylor carry no share-class count in the window, so they enter no regression;
 - PCG's alternating counts, which no rule repairs.
