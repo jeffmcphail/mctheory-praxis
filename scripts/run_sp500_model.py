@@ -69,7 +69,12 @@ from praxis.midoffice.model.descriptors import (  # noqa: E402
 )
 from praxis.midoffice.model.eigen import EIGEN_DRAWS  # noqa: E402
 from praxis.midoffice.model.panel import Frequency, ReturnPanel  # noqa: E402
-from praxis.midoffice.model.regime import REGIME_MIN_DAYS, RegimeHistory  # noqa: E402
+from praxis.midoffice.model.regime import (  # noqa: E402
+    REGIME_MIN_DAYS,
+    RegimeHistory,
+    factor_history,
+    factor_history_guard,
+)
 from praxis.midoffice.model.specificrisk import RESIDUAL_SPREADS  # noqa: E402
 from praxis.midoffice.refdata import sp500  # noqa: E402
 from praxis.midoffice.refdata.industries import (  # noqa: E402
@@ -123,6 +128,12 @@ volatilities -- a reporting view of broad portfolios' risk over a holding period
 the model (midoffice12's ruling 2) -- and none on the correlations, by default: the lags on the
 volatilities alone (midoffice13's ruling 4). `--correlation-lags horizon` gives the correlations
 the horizon's lags too, as before."""
+
+REGIME_GUARD = 5
+"""How many refits, spread over the history, a plain run's regime adjustment checks the full fit
+against before reading the factor side's history from it (ruling 4 of midoffice17's brief): the
+first forecast date, the last and three between, each refit's factor returns and factor
+volatilities the full fit's through its date, to the bit, or the run stops."""
 
 REGIME_FACTOR_HALF_LIFE = 21.0
 """The volatility regime adjustment's factor side, on by default at a half-life of 21 trading
@@ -901,21 +912,50 @@ def report_regime_forecast(model, history, pair, last) -> None:
           f"{np.percentile(spec, 10) * specific:.2%} / {np.median(spec) * specific:.2%} / "
           f"{np.percentile(spec, 90) * specific:.2%}")
     print(f"  the last day's B_F^2 {history.factor_squared[-1]:.3f} over {history.factors[-1]} "
-          f"factors, B_S^2 {history.specific_squared[-1]:.3f} over {history.members[-1]} members "
-          f"(an effective number of {history.effective[-1]:.0f})")
+          f"factors, "
+          + (f"B_S^2 {history.specific_squared[-1]:.3f} over {history.members[-1]} members "
+             f"(an effective number of {history.effective[-1]:.0f})" if history.has_specific
+             else "the specific side not read"))
 
 
 def regime_section(args, panel, membership, inputs, model, options) -> None:
     """The volatility regime adjustment on the run's own forecast, without --bias (midoffice15):
-    the model refitted as of each day from the bias test's first, as the test refits it, each
-    day's bias statistics read from the forecast the day before, and the multipliers as of the
-    last date from them."""
+    each day's bias statistics from the bias test's first, read from the forecast the day before,
+    and the multipliers as of the last date from them.
+
+    The factor side alone is read from the full fit (ruling 4 of midoffice17's brief): each
+    refit's factor returns are the full fit's through its date, so the history is the model's
+    estimator on the full fit's factor returns through each day before (`regime.factor_history`)
+    -- after a guard of `REGIME_GUARD` refits spread over the history, each the full fit's
+    through its date to the bit, or the run stops. The specific side, and a covariance not its
+    estimator's alone (the sampling correction, the eigenfactor adjustment), need the model
+    refitted as of every day, as the bias test refits it, and take that path."""
     dates, securities = panel.dates, panel.securities
     rows = forecast_rows(model, dates)
+    pair = (args.regime_factor_half_life, args.regime_specific_half_life)
+    began = time.monotonic()
+    if pair[1] is None and not args.sampling_correction and args.eigen_adjustment is None:
+        estimator = options["covariance_estimator"]
+        picks = sorted(set(np.linspace(0, len(rows) - 1, REGIME_GUARD).round().astype(int)))
+        checked = [dates[rows[i]] for i in picks]
+        refits = cross_sectional_models_as_of(inputs.return_panel, inputs.indices, checked,
+                                              **options)
+        problems = factor_history_guard(model, estimator, refits)
+        if problems:
+            raise SystemExit("  the run stops: the regime adjustment's guard -- the model refitted "
+                             "as of a date is not the full fit through it: " + "; ".join(problems))
+        guarded = time.monotonic()
+        history = factor_history(model, estimator, [dates[t] for t in rows] + [dates[-1]])
+        report_regime_forecast(model, history, pair, dates[-1])
+        print(f"  the factor side read from the full fit, without refitting: the model's estimator "
+              f"on its factor returns through each day before, {len(history)} days, "
+              f"{time.monotonic() - guarded:.1f} s; guard: as of {', '.join(map(str, checked))}, "
+              f"the model refitted as of the date has the full fit's factor returns through it "
+              f"and its factor volatilities to the bit ({guarded - began:.1f} s)")
+        return
     returns = inputs.return_panel.returns
     histories = {None: RegimeHistory()}
     previous = None
-    began = time.monotonic()
     models = cross_sectional_models_as_of(
         inputs.return_panel, inputs.indices, [dates[t] for t in rows], **options
     )
@@ -927,9 +967,8 @@ def regime_section(args, panel, membership, inputs, model, options) -> None:
                   f"{(time.monotonic() - began) / 60:.1f} min", file=sys.stderr, flush=True)
     regime_step(histories, previous, model, len(dates) - 1, dates, returns, inputs.caps,
                 membership)
-    report_regime_forecast(model, histories[None], (args.regime_factor_half_life,
-                                                    args.regime_specific_half_life), dates[-1])
-    # What the adjustment costs a plain run (midoffice16): the refits are nearly all of it.
+    report_regime_forecast(model, histories[None], pair, dates[-1])
+    # What the adjustment costs a plain run this way (midoffice16): the refits are nearly all.
     print(f"  the model refitted as of each of {len(rows)} days for it, {dates[rows[0]]} to "
           f"{dates[rows[-1]]}: {(time.monotonic() - began) / 60:.1f} min")
 
@@ -1019,24 +1058,31 @@ def bias_section(
                  if regime_pairs else "")
               + ("; each eigen scale's factor side from its own forecasts' history, so each is "
                  "levelled again before it is tested" if scales else ""))
-    # The factor correlations' half-life (midoffice16): each refit's own factor returns
-    # re-estimated by the model's estimator with its correlations on another half-life, the
-    # volatilities' kept -- the covariance is estimated last, from the factor returns alone, so
-    # one pass serves every half-life -- each setting on its own forecasts' regime adjustment.
-    own_correlation = args.correlation_half_life
+    # The factor covariance's half-lives (midoffice16 the correlations', midoffice17 the
+    # volatilities'): each refit's own factor returns re-estimated by the model's estimator with
+    # the one half-life changed -- the covariance is estimated last, from the factor returns
+    # alone, so one pass serves every setting -- each on its own forecasts' regime adjustment.
+    kind = ("correlation" if args.bias_correlation_half_lives
+            else "volatility" if args.bias_volatility_half_lives else None)
+    own_setting = {"correlation": args.correlation_half_life,
+                   "volatility": args.half_life}.get(kind)
+    kept = {"correlation": "volatilities'", "volatility": "correlations'"}.get(kind)
+    kept_value = {"correlation": args.half_life,
+                  "volatility": args.correlation_half_life}.get(kind)
     estimators = {
-        _correlation_key(h): dataclasses.replace(options["covariance_estimator"],
-                                                 correlation_half_life=h)
-        for h in args.bias_correlation_half_lives if h != own_correlation
-    }
+        _setting_key(kind, h): dataclasses.replace(options["covariance_estimator"],
+                                                   **{f"{kind}_half_life": h})
+        for h in (args.bias_correlation_half_lives or args.bias_volatility_half_lives)
+        if h != own_setting
+    } if kind else {}
     if estimators:
-        print(f"  the factor correlations on half-lives of "
-              f"{', '.join(f'{e.correlation_half_life:g}' for e in estimators.values())} trading "
-              f"days tested beside the model's {own_correlation:g}, the volatilities' "
-              f"{args.half_life:g} kept: each refit's own factor returns re-estimated by the "
-              f"model's estimator with its correlations on the half-life, one pass serving every "
-              f"setting, each on the volatility regime adjustment of its own forecasts, "
-              f"{regime_label(own_regime)}; chosen by {CORRELATION_RULE}")
+        print(f"  the factor {PLURAL[kind]} on half-lives of "
+              f"{', '.join(key[1:] for key in estimators)} trading days tested beside the "
+              f"model's {own_setting:g}, the {kept} {kept_value:g} kept: each refit's own factor "
+              f"returns re-estimated by the model's estimator with its {PLURAL[kind]} on the "
+              f"half-life, one pass serving every setting, each on the volatility regime "
+              f"adjustment of its own forecasts, {regime_label(own_regime)}; chosen by "
+              f"{COVARIANCE_RULE}")
 
     # The guard: the forecast as of a date, rebuilt from the panel cut at that date through
     # the run's own pipeline, the scheme held, is the full run's -- its inputs bit for bit
@@ -1113,15 +1159,16 @@ def bias_section(
     test = BiasTest(**setup)
     variants = {a: BiasTest(**setup) for a in scales}
     regime_variants = {pair: BiasTest(**setup) for pair in regime_pairs}
-    correlation_variants = {key: BiasTest(**setup) for key in estimators}
+    setting_variants = {key: BiasTest(**setup) for key in estimators}
     # Each regime history reads the forecasts its tests start from: the model's (None), each
-    # eigen scale's and each correlation half-life's; the specific side is the model's for every
+    # eigen scale's and each covariance setting's; the specific side is the model's for every
     # one.
     histories = ({key: RegimeHistory() for key in (None, *scales, *estimators)} if regime_on
                  else {})
-    # The factor covariance each test forecast with, by date (midoffice16): the model's, and each
-    # correlation half-life's; and each setting's factor volatilities against the model's.
-    covariances: dict = {key: [] for key in (None, *estimators)}
+    # The factor covariance each test forecast with, by date (midoffice16): the model's, each
+    # eigen scale's (midoffice17) and each covariance setting's; and each setting's factor
+    # volatilities against the model's.
+    covariances: dict = {key: [] for key in (None, *scales, *estimators)}
     volatilities = {key: [0, 0, 0.0] for key in estimators}
     returns = inputs.return_panel.returns
     previous = None
@@ -1149,12 +1196,13 @@ def bias_section(
         test.add(t, model_forecast)
         covariances[None].append(model_forecast.covariance)
         for a, variant in variants.items():
-            variant.add(t, forecasts[a].regime_adjusted(*regime_multipliers(histories, a,
-                                                                            own_regime)))
+            adjusted = forecasts[a].regime_adjusted(*regime_multipliers(histories, a, own_regime))
+            variant.add(t, adjusted)
+            covariances[a].append(adjusted.covariance)
         for pair, variant in regime_variants.items():
             variant.add(t, forecasts[None].regime_adjusted(*regime_multipliers(histories, None,
                                                                                pair)))
-        for key, variant in correlation_variants.items():
+        for key, variant in setting_variants.items():
             adjusted = forecasts[key].regime_adjusted(*regime_multipliers(histories, key,
                                                                           own_regime))
             variant.add(t, adjusted)
@@ -1166,7 +1214,7 @@ def bias_section(
     run = test.result()
     eigen_runs = {a: variant.result() for a, variant in variants.items()}
     regime_runs = {pair: variant.result() for pair, variant in regime_variants.items()}
-    correlation_runs = {key: variant.result() for key, variant in correlation_variants.items()}
+    setting_runs = {key: variant.result() for key, variant in setting_variants.items()}
     minutes = (time.monotonic() - began) / 60
     run_caps = inputs.caps[[at[d] for d in run.dates]]
     tests = 1 + len(scales) + len(regime_pairs) + len(estimators)
@@ -1308,9 +1356,9 @@ def bias_section(
     if regime_runs:
         _report_regime(run, regime_runs, histories[None], own_regime, tested, groups,
                        member_stats or [], securities)
-    if correlation_runs:
-        _report_correlation(run, correlation_runs, histories, own_regime, own_correlation,
-                            groups, member_stats or [], securities, run_caps, volatilities)
+    if setting_runs:
+        _report_settings(run, setting_runs, kind, own_setting, histories, own_regime, groups,
+                         member_stats or [], securities, run_caps, volatilities)
     if own_regime != (None, None):
         # The run's own forecast, as of the last date: the last day's statistics from the last
         # forecast tested and the full run's own factor returns that day.
@@ -1320,7 +1368,7 @@ def bias_section(
         report_regime_forecast(model, final[None], own_regime, dates[-1])
     if args.bias_out:
         _save_bias(args.bias_out, run, run_caps, horizon, eigen_runs, simulated, regime_runs,
-                   histories, correlation_runs, covariances)
+                   histories, setting_runs, covariances)
 
 
 def ordinal(n: int) -> str:
@@ -1751,21 +1799,30 @@ def _report_regime(run, regime_runs, history, own, tested, groups, member_stats,
               f"{regime_label(min(alone, key=lambda p: second[p][key]))}")
 
 
-CORRELATION_RULE = ("the minimum-variance portfolios' realised volatility first -- a setting under "
-                    "which either, long-only or unconstrained, realises more over the whole test "
-                    "than the model's own correlation half-life, each in % a year to the "
-                    "hundredth of a point, is out -- then the regime criterion, chosen on the "
-                    "first half among the settings left and checked on the second")
-"""How the factor correlations' half-life is chosen (midoffice16's brief), written before its run:
-as midoffice15 judged the eigen scales, the optimiser's realised risk first -- a covariance whose
+COVARIANCE_RULE = ("the minimum-variance portfolios' realised volatility first -- a setting under "
+                   "which either, long-only or unconstrained, realises more over the whole test "
+                   "than the model's own setting, each in % a year to the hundredth of a point, "
+                   "is out -- then the regime criterion, chosen on the first half among the "
+                   "settings left and checked on the second")
+"""How a factor covariance's half-life is chosen, written before its run: the correlations'
+(midoffice16's brief, as `CORRELATION_RULE`), the volatilities' (midoffice17's). As midoffice15
+judged the eigen scales, the optimiser's realised risk first -- a covariance whose
 minimum-variance portfolios realise more is not a better covariance whatever its statistics say
 -- then `REGIME_CRITERION`, the level of each year's forecasts, on the test's first half."""
 
+CORRELATION_RULE = COVARIANCE_RULE
+"""midoffice16's name for the rule, kept."""
 
-def _correlation_key(half_life: float) -> str:
-    """A correlation half-life's key: its forecasts, its test, its history, and in --bias-out
-    its arrays' suffix after an underscore -- c<h>."""
-    return f"c{half_life:g}"
+
+PLURAL = {"correlation": "correlations", "volatility": "volatilities"}
+"""The covariance settings' kinds, in the plural."""
+
+
+def _setting_key(kind: str, half_life: float) -> str:
+    """A covariance setting's key -- its forecasts, its test, its history, and in --bias-out its
+    arrays' suffix after an underscore: c<h> for a correlation half-life, v<h> for a
+    volatility half-life."""
+    return f"{kind[0]}{half_life:g}"
 
 
 def _member_quintiles(test, member_stats, securities, caps, part=slice(None)) -> list[float]:
@@ -1786,28 +1843,50 @@ def _member_quintiles(test, member_stats, securities, caps, part=slice(None)) ->
     return out
 
 
-def _report_correlation(run, correlation_runs, histories, own_regime, own_correlation, groups,
-                        member_stats, securities, caps, volatilities) -> None:
-    """The factor correlations' half-life at every setting tested, at one day (midoffice16): the
-    regime multiplier each setting's own forecasts give against the model's; the minimum-variance
-    portfolios' realised volatility, by which a setting is out; the regime criterion, a half-life
-    chosen on the first half by `CORRELATION_RULE`; then the shape it is for -- the eigenportfolios
-    by rank and half, each setting's own -- the index and the optimiser by half, the members by
-    capitalisation quintile, and how much each setting moves the index's forecast a day."""
-    keys = sorted(correlation_runs, key=lambda key: float(key[1:]))
+def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime, groups,
+                     member_stats, securities, caps, volatilities) -> None:
+    """The factor covariance's correlation half-life (midoffice16) or volatility half-life
+    (midoffice17) at every setting tested, at one day: the regime multiplier each setting's own
+    forecasts give against the model's; the minimum-variance portfolios' realised volatility, by
+    which a setting is out; the regime criterion, a half-life chosen on the first half by
+    `COVARIANCE_RULE`; then the shape -- the eigenportfolios by rank and half, each setting's own
+    -- the index and the optimiser by half, the members by capitalisation quintile, and how much
+    each setting moves the index's forecast a day."""
+    keys = sorted(setting_runs, key=lambda key: float(key[1:]))
     order = [*keys, None]
-    tests = {None: run, **correlation_runs}
-    label = {**{key: key[1:] for key in keys}, None: f"{own_correlation:g} *"}
+    tests = {None: run, **setting_runs}
+    label = {**{key: key[1:] for key in keys}, None: f"{own_setting:g} *"}
     n = len(run.dates)
-    parts = {f"the whole test ({run.dates[0]} to {run.dates[-1]}, {n})": slice(0, n),
-             **_halves(run)}
-    print(f"\n  The factor correlations' half-life at one day: the model's {own_correlation:g} "
-          f"(*) and {', '.join(key[1:] for key in keys)} trading days, the volatilities on their "
-          f"own half-life throughout, every setting on its own forecasts' volatility regime "
+    halves = _halves(run)
+    parts = {f"the whole test ({run.dates[0]} to {run.dates[-1]}, {n})": slice(0, n), **halves}
+    other = "volatilities" if kind == "correlation" else "correlations"
+    print(f"\n  The factor {PLURAL[kind]}' half-life at one day: the model's {own_setting:g} (*) "
+          f"and "
+          f"{', '.join(key[1:] for key in keys)} trading days, the {other} on their own "
+          f"half-life throughout, every setting on its own forecasts' volatility regime "
           f"adjustment, {regime_label(own_regime)}")
 
     model_history = histories.get(None)
-    if model_history is not None and own_regime[0] is not None:
+    if model_history is not None and own_regime[0] is not None and kind == "volatility":
+        # The volatilities set B_F, so each setting's multiplier is its own (midoffice17).
+        at = {d: i for i, d in enumerate(run.dates)}
+        print(f"  Each setting's regime multiplier, read from its own forecasts' history: the mean "
+              f"of B_F^2, and lambda_F on {own_regime[0]:g} days -- its mean (min to max) -- by "
+              f"part")
+        print(f"  {'':<8} " + "   ".join(f"{p.split(' (')[0]:>30}" for p in parts))
+        for key in order:
+            history = histories[key]
+            squared = np.array(history.factor_squared)
+            path = regime_path(history, "factor", own_regime[0], n)
+            rows_of = np.array([at[d] for d in history.dates])
+            cells = []
+            for part in parts.values():
+                inside = (rows_of >= part.start) & (rows_of < part.stop)
+                lam = path[part]
+                cells.append(f"{squared[inside].mean():.3f}  {lam.mean():.3f} "
+                             f"({lam.min():.3f}-{lam.max():.3f})")
+            print(f"  {label[key]:<8} " + "   ".join(f"{c:>30}" for c in cells))
+    if model_history is not None and own_regime[0] is not None and kind == "correlation":
         print(f"  The factor volatilities do not depend on the correlations, so each setting's "
               f"regime multiplier should be the model's: each setting's own against the model's "
               f"-- its factor volatilities, its daily B_F^2 and lambda_F on "
@@ -1842,7 +1921,7 @@ def _report_correlation(run, correlation_runs, histories, own_regime, own_correl
            for key in order}
     print(f"\n  First, the minimum-variance portfolios' realised volatility, % a year, whole / "
           f"first half / second half; a setting under which either realises more over the whole "
-          f"test than at {own_correlation:g}, to the hundredth of a point, is out")
+          f"test than at {own_setting:g}, to the hundredth of a point, is out")
     print(f"  {'':<8} {'long-only':>21}   {'unconstrained':>21}")
     for key in order:
         cells = "   ".join(" / ".join(f"{readings[p][key][c]:>5.2f}" for p in readings)
@@ -1856,7 +1935,7 @@ def _report_correlation(run, correlation_runs, histories, own_regime, own_correl
     for key in order:
         print(f"  {label[key]:<8} " + " / ".join(f"{readings[p][key][criterion]:.3f}"
                                                 for p in readings))
-    print(f"  chosen on the first half by {CORRELATION_RULE}: {label[chosen]} "
+    print(f"  chosen on the first half by {COVARIANCE_RULE}: {label[chosen]} "
           f"({first[chosen][criterion]:.3f}; the model's {first[None][criterion]:.3f}); on the "
           f"second half it reads {second[chosen][criterion]:.3f} against the model's "
           f"{second[None][criterion]:.3f}, the best there {label[best]}")
@@ -1882,7 +1961,7 @@ def _report_correlation(run, correlation_runs, histories, own_regime, own_correl
         return reading[run.names[key]] if isinstance(key, int) else reading[key]
 
     for plabel, by_setting in readings.items():
-        print(f"\n  {plabel}, by correlation half-life ({own_correlation:g} the model, *): the "
+        print(f"\n  {plabel}, by {kind} half-life ({own_setting:g} the model, *): the "
               f"statistics, the optimiser's realised volatility % a year, the MRADs and the "
               f"criterion")
         print(f"  {'':<8}" + "".join(f" {name:>7}" for name, _ in REGIME_COLUMNS))
@@ -1947,21 +2026,22 @@ def _bias_arrays(run, suffix: str = "", members: bool = True) -> dict[str, np.nd
 
 
 def _save_bias(path, run, caps, horizon, eigen_runs=None, simulated=None, regime_runs=None,
-               histories=None, correlation_runs=None, covariances=None) -> None:
+               histories=None, setting_runs=None, covariances=None) -> None:
     """Every forecast and outcome, for comparing runs: the daily ones, and each horizon's
     outcomes with the windows overlapping (its forecast the daily one times sqrt(h); apart,
     every h-th date's from the first). Under the eigenfactor adjustment's other scales, each
     test's arrays too, keyed `_a<scale>` -- but its members' outcomes, which are the model's --
     and the simulation by date; under the volatility regime adjustment's settings, each one's
     keyed `_rF<h>S<h>` the same way, and every history's daily statistics, squared; under the
-    correlation half-lives, each one's keyed `_c<h>`, its history too (midoffice16). And the
-    factor covariance each test forecast with, by date, annualised: the model's, and each
-    correlation half-life's (midoffice16)."""
+    correlation half-lives, each one's keyed `_c<h>`, its history too (midoffice16), and under
+    the volatility half-lives `_v<h>` (midoffice17). And the factor covariance each test forecast
+    with, by date, annualised: the model's, each covariance setting's (midoffice16) and each eigen
+    scale's (midoffice17)."""
     extra: dict[str, np.ndarray] = {}
     keyed = [(f"a = {a:g}", f"_a{a:g}", v) for a, v in (eigen_runs or {}).items()]
     keyed += [(regime_label(p), _regime_suffix(p), v) for p, v in (regime_runs or {}).items()]
-    keyed += [(f"correlations on {key[1:]}", f"_{key}", v)
-              for key, v in (correlation_runs or {}).items()]
+    keyed += [(f"the half-life {key[1:]}", f"_{key}", v)
+              for key, v in (setting_runs or {}).items()]
     for label, suffix, variant in keyed:
         # The same members on the same days, only the forecast changed.
         if not (_same(variant.member_realised, run.member_realised)
@@ -1975,11 +2055,14 @@ def _save_bias(path, run, caps, horizon, eigen_runs=None, simulated=None, regime
     if regime_runs:
         extra["regime_settings"] = np.array([[np.nan if h is None else h for h in p]
                                              for p in regime_runs], dtype=float)
-    if correlation_runs:
-        extra["correlation_half_lives"] = np.array([float(key[1:]) for key in correlation_runs])
+    for prefix, kind in (("c", "correlation"), ("v", "volatility")):
+        values = [float(key[1:]) for key in (setting_runs or {}) if key[0] == prefix]
+        if values:
+            extra[f"{kind}_half_lives"] = np.array(values)
     for key, covariance in (covariances or {}).items():
         if covariance:
-            extra["factor_covariance" + ("" if key is None else f"_{key}")] = np.array(covariance)
+            tag = "" if key is None else (f"_{key}" if isinstance(key, str) else f"_a{key:g}")
+            extra["factor_covariance" + tag] = np.array(covariance)
     for key, history in (histories or {}).items():
         tag = "" if key is None else (f"_{key}" if isinstance(key, str) else f"_a{key:g}")
         extra[f"regime_dates{tag}"] = np.array([str(d) for d in history.dates])
@@ -2181,8 +2264,15 @@ def main(argv: list[str] | None = None) -> int:
                              "own factor returns re-estimated by the model's estimator, each "
                              "setting tested beside the model on its own forecasts' regime "
                              "adjustment, one pass serving them all; read at one day over the "
-                             "whole test and each half, chosen by CORRELATION_RULE, and kept in "
+                             "whole test and each half, chosen by COVARIANCE_RULE, and kept in "
                              "--bias-out")
+    parser.add_argument("--bias-volatility-half-lives", type=half_life_list, default=(),
+                        metavar="H,H",
+                        help="with --bias, the factor covariance with its volatilities on these "
+                             "half-lives too, the correlations' kept (midoffice17): as "
+                             "--bias-correlation-half-lives, each setting on the regime "
+                             "adjustment of its own forecasts, which the volatilities move; "
+                             "chosen by COVARIANCE_RULE, and kept in --bias-out")
     parser.add_argument("--bias-horizons", type=horizon_list, default=(), metavar="H,H",
                         help="with --bias, more horizons in trading days to evaluate every "
                              "forecast at, beside one day and the model's own, comma-separated; "
@@ -2217,19 +2307,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--bias-regime-half-lives and --bias-eigen-scales are separate passes: "
                      "test the regime half-lives first, then the eigen scales on the model's "
                      "own --regime-factor-half-life and --regime-specific-half-life")
-    if args.bias_correlation_half_lives:
+    for name, given in (("--bias-correlation-half-lives", args.bias_correlation_half_lives),
+                        ("--bias-volatility-half-lives", args.bias_volatility_half_lives)):
+        if not given:
+            continue
         if not args.bias:
-            parser.error("--bias-correlation-half-lives tests beside the model in --bias")
+            parser.error(f"{name} tests beside the model in --bias")
         if args.correlation_half_life is None:
-            parser.error("--bias-correlation-half-lives needs the two-half-life covariance, not "
-                         "--correlation-half-life none")
+            parser.error(f"{name} needs the two-half-life covariance, not "
+                         f"--correlation-half-life none")
         if args.sampling_correction or args.eigen_adjustment is not None:
-            parser.error("--bias-correlation-half-lives re-estimates the covariance from the "
-                         "factor returns alone: not with --sampling-correction or "
-                         "--eigen-adjustment")
-        if args.bias_eigen_scales or args.bias_regime_half_lives:
-            parser.error("--bias-correlation-half-lives is a pass of its own: not with "
-                         "--bias-eigen-scales or --bias-regime-half-lives")
+            parser.error(f"{name} re-estimates the covariance from the factor returns alone: not "
+                         f"with --sampling-correction or --eigen-adjustment")
+        if (args.bias_eigen_scales or args.bias_regime_half_lives
+                or (args.bias_correlation_half_lives and args.bias_volatility_half_lives)):
+            parser.error(f"{name} is a pass of its own: not with --bias-eigen-scales, "
+                         f"--bias-regime-half-lives or the other half-lives")
     if args.correlation_lags is not None and args.correlation_half_life is None:
         parser.error("--correlation-lags needs the two-half-life covariance, not "
                      "--correlation-half-life none")

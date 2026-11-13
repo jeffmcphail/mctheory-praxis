@@ -1,8 +1,9 @@
 # Mid-office state
 
-**Updated:** 2026-11-13, at the end of midoffice16 (midoffice15's rulings: the regime adjustment's
-factor side the default, S&P Global's ruling released, the panel with every ruling applied; the
-correlation half-life on the regime-adjusted model, measured in one pass).
+**Updated:** 2026-11-13, at the end of midoffice17 (midoffice16's rulings: the plain run's regime
+history from the full fit behind a guard; the calm half's shape, two levers -- the eigenvalue
+adjustment on the 63-day correlations, the volatilities' half-life -- and what the calm half's
+market direction is made of).
 Brought up to date at the end of every piece, in the same commit as its retro (Rule 43). Not a
 history: the state a new session needs to carry on. The detail is in the retros named below.
 
@@ -11,7 +12,7 @@ history: the state a new session needs to carry on. The detail is in the retros 
 ## Start here
 
 1. Read `claude/CLAUDE_CODE_RULES.md` (Rule 43 above all), then this file, then the latest retro:
-   `claude/retros/RETRO_midoffice16_correlation_half_life.md`.
+   `claude/retros/RETRO_midoffice17_calm_half_two_levers.md`.
 2. **How the work runs.**
    - **The brief.** Each piece, `midofficeNN`, is a brief written in Chat and pasted into the Code
      session. Code transcribes it verbatim to `claude/handoffs/BRIEF_midofficeNN_<slug>.md`; its
@@ -31,8 +32,8 @@ history: the state a new session needs to carry on. The detail is in the retros 
    - Scratch goes to `claude/scratch/midofficeNN/` (gitignored), its outputs copied into the retro.
    - Python is ASCII and keeps the file's line endings (most `.py` here are CRLF in the working
      copy; the `claude/` briefs and retros LF).
-   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,374 passed
-     and 1 skipped at midoffice16. That file looks for `../core_repo/src`, which isn't on this
+   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,375 passed
+     and 1 skipped at midoffice17. That file looks for `../core_repo/src`, which isn't on this
      machine.
 4. **Working notes, from the pieces so far.**
    - A bash heredoc has failed in this harness on some apostrophes (06, 07, 08), though not
@@ -72,6 +73,9 @@ history: the state a new session needs to carry on. The detail is in the retros 
      its regime section in about a minute and a half.
    - **Waiting (16).** The harness blocks a foreground `sleep`: wait on a runner with the Monitor
      tool on its log, or a background `until grep -q ...; do sleep 10; done`.
+   - **Memory, waited on (17).** The machine's other applications (an IDE, WSL, a browser) can
+     hold free memory just under the runner's 3 GB for minutes; the runner waits, as designed, and
+     starts when it crosses. Don't lower the bar to save the minutes.
    - **Naming a ruling (16).** This file's "NN ruling k" is Jeff's ruling k on piece NN's
      decisions, at the top of the next brief, and the code's docstrings mean the same by
      "midofficeNN's ruling k". midoffice15's docs and rulings file used "midoffice15's ruling k"
@@ -142,50 +146,43 @@ layer (c92d343 to e859b4e, 2026-11-01).
   correlations above one day; the optimiser's realised volatility standing.
 - 355b772 (11-12): **midoffice15** -- the volatility regime adjustment measured; held rulings; the
   revised panel.
-- Next: **midoffice16**. Jeff commits it after 355b772 (`git log --oneline -3`).
+- eb2b7f9 (11-13): **midoffice16** -- the regime adjustment on, the released panel, correlation
+  half-lives measured.
+- Next: **midoffice17**. Jeff commits it after eb2b7f9 (`git log --oneline -3`).
 
-**The current piece: midoffice16, COMPLETE (2026-11-13).**
+**The current piece: midoffice17, COMPLETE (2026-11-13).**
 
-- **midoffice15's rulings.**
-  - **Ruling 1:** the regime adjustment's factor side is the model's default at 21 days
-    (`REGIME_FACTOR_HALF_LIFE`, `--regime-factor-half-life none` for off).
-  - **The identity:** a whole test's statistic is the root mean square of its halves', checked
-    for every family at one day and put beside the bias statistics in the docs. It holds within
-    0.001 for the broad, optimiser, industry and random long-only portfolios. It fails by a few
-    thousandths where a mean outcome turns between the halves, for a member whose halves differ
-    in size (JNPR, 0.545 against 1.562), and for a family's summary.
-  - **Rulings 2 and 3:** the specific side and the eigenvalue adjustment stay off.
-  - **Ruling 4:** S&P Global's ruling stands and its hold is released. Every line of the
-    ruling's arithmetic checks against the cache's bars; Kalkine's 436.69 is an intraday price
-    of 07-02.
-- **The released panel, `_released`,** the run's default, `_revised` kept. Against `_revised`,
-  SPGI's 2026-07-01 alone; against `_spinoffs`, FDXF's counts alone. The model on it reads mean
-  R-squared 0.293825.
-- **The new defaults (item 1).**
-  - **On `_revised` (N16):** V15's F 21, S off test to the bit in every array.
-  - **On `_released` (D16):** nothing before 2026-07-01 moves; SPGI's outcome that day goes
-    from +1.0 to +3.7 sd; everything else is unchanged to the third decimal.
-  - **The plain run's cost:** the factor side costs it 6.7 minutes (7.5 against 0.8), the
-    refits 6.8. The refits are not needed: each refit's factor returns are the full fit's through its date, to the bit, on all 686 days, so the history read from the full fit alone is the refits' to the bit, in 0.3 s (`check_fast_regime.py`); not built, for Jeff.
-- **The correlation half-lives (items 2 to 4, C16, one pass).** 63, 126 and 252 days beside
-  504, each refit's factor returns re-estimated (`reestimated_covariance`); the model test is
-  D16's to the bit. Each setting's own regime multiplier is the model's to rounding (2.2e-16),
-  not to the bit: the two-half-life diagonal's last bit (a working note above).
-  - **The rule, written before the run:** realised volatility first, then the regime criterion
-    on the first half. It keeps 504: 63 is out (the unconstrained optimiser 10.23% a year
-    against 10.19%), and 126 and 252 are worse on the first half (0.104 and 0.100 against
-    0.098).
-  - **Each half prefers the other end.** At 63 the calm half's criterion goes from 0.123 to
-    0.083, and the first half's from 0.098 to 0.116.
-  - **The shape:** fixed in part. The calm half's market direction 0.814 to 0.858 at 63, the
-    index 0.785 to 0.833 -- the 63-day correlations take 6% off its forecast volatility where
-    it would need 19% (1 - 0.814).
-  - **The optimiser pays in the small eigen-directions:** ranks 21-25 1.195 to 1.303, and its
-    forecast variance in ranks 16-25 rises from 20.6% to 23.8%, those parts under-forecast more
-    (1.25 against 1.17).
-  - **Proposed, not run:** the one-sided eigenvalue adjustment on the 63-day correlations.
-- **What I would choose:** the correlations on 504 days, as the rule has it. No default changed
-  beyond rulings 1 and 4.
+- **midoffice16's rulings.**
+  - **Rulings 1 to 3:** the correlations stay on 504; item 4's test is run (item 1 below); the
+    exact diagonal waits for the first default change that moves every covariance.
+  - **Ruling 4, built:** a plain run reads the regime adjustment's factor side from the full fit
+    (`regime.factor_history`) behind `regime.factor_history_guard`'s five refits, the run refusing
+    on any difference. A plain run takes 0.9 minutes against 7.5 by the refits, its report the
+    refits' but for the last two lines (lambda_F 0.9640 both ways).
+  - **Ruling 5:** the calm half once more (this piece), then the largest members' specific risk.
+- **Item 1, the one-sided eigenvalue adjustment on the 63-day correlations (E17).** Its model test
+  is C16's 63-day setting to the bit. Every a is out: the optimiser realises more at every a
+  (unconstrained 10.28%, 10.36% and 10.46% a year against D16's 10.19%).
+  - **It fixes the statistics it is for:** ranks 21-25 1.30 to 1.04 at a = 2, the optimiser's
+    part in ranks 16-25 1.25 to 1.01.
+  - **It moves the optimiser's risk into the market direction,** which the volatile first half
+    cost.
+- **Item 2, the volatilities' half-life (V17, `--bias-volatility-half-lives`).** 21, 42 and 63
+  against 90; its model test is D16's to the bit. Every one is out (unconstrained 10.26%, 10.36%
+  and 10.61%). The calm half's market direction barely moves (0.814 to 0.843 at 21), and the
+  eigenportfolios' shape worsens there.
+- **Item 3, what the calm half's market direction is made of (no run):** the correlations, not
+  the volatilities.
+  - **The correlations:** realised 0.316 between factors over the second half against the
+    forecast's 0.432.
+  - **Rebuilt:** on the realised correlations rank 1 goes from 0.814 to 0.946; on realised
+    volatilities only to 0.861.
+  - **midoffice16's "volatility side" was wrong,** corrected in the docs.
+- **Item 4:** neither lever passed; nothing to combine.
+- **What I would choose:** the factor covariance as it stands -- correlations 504, volatilities
+  90, no eigenvalue adjustment. The calm half's shape is left for now: every lever that follows
+  the correlations faster trades the shock half for the calm and costs the optimiser. Next, the
+  largest members' specific risk.
 - **Waiting on Jeff:** the decisions in the retro.
 
 ---
@@ -287,6 +284,20 @@ in `docs/FACTOR_MODEL.md`.
   in both halves, set by the largest members, a fix by size in the specific risk model), **the
   eigenvalue adjustment off**, one-sided as two-sided (15 ruling 3: the optimiser realises more
   at every a).
+- **The correlations stay on 504 days** (16 ruling 1): at 63 the broad portfolios improve in both
+  halves and the whole cost is the optimiser's, in the small eigen-directions. **The one-sided
+  eigenvalue adjustment on the 63-day correlations** was that cost's test (16 ruling 2), run in 17
+  and out: it fixes the small eigen-directions' statistics, and the optimiser realises more at
+  every a. **The estimator's exact diagonal** (the short window's variances, so nothing moves the
+  volatilities' last bit) waits for the first default change that moves every covariance anyway,
+  so the stored runs' baseline breaks once (16 ruling 3).
+- **A plain run reads the regime adjustment's factor side from the full fit** (16 ruling 4, built
+  in 17): `regime.factor_history`, the model's estimator on the full fit's factor returns through
+  each day before, behind a guard of five refits spread over the history
+  (`regime.factor_history_guard`, `REGIME_GUARD`) -- each refit's factor returns and factor
+  volatilities the full fit's through its date, to the bit, or the run stops. The specific side,
+  the sampling correction and the eigenvalue adjustment still refit every day; the bias test keeps
+  its refits.
 - **The variance-ratio variant** stays an option, off (12 ruling 5); **the specific history** a
   63-day half-life (12 ruling 6).
 - **The correction's specific side** (`leverage_correction`, `--leverage-correction`) is an
@@ -624,10 +635,14 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   correlations on those half-lives beside the model's, the volatilities' kept, each refit's own
   factor returns re-estimated (`crosssectional.reestimated_covariance`) and each setting on its
   own forecasts' regime adjustment, one pass (0.69 s a refit with four tests), chosen by
-  `CORRELATION_RULE` -- not with the eigen-scale or regime passes, the sampling correction or the
-  eigen adjustment; `--bias-out PATH` keeps every forecast and outcome in an `.npz`, each regime
-  setting's keyed `_rF<h>S<h>`, each correlation setting's `_c<h>`, the daily statistics'
-  history, every test's factor covariance by date and the optimiser's factor exposures;
+  `COVARIANCE_RULE` (midoffice16's `CORRELATION_RULE`, the same rule); `--bias-volatility-half-lives
+  H,H` (17) the same for the volatilities' half-life, the correlations' kept, each setting reading
+  the regime adjustment from its own forecasts, which the volatilities move -- either pass alone,
+  not with the eigen-scale or regime passes, the sampling correction or the eigen adjustment;
+  `--bias-out PATH` keeps every forecast and outcome in an `.npz`, each regime setting's keyed
+  `_rF<h>S<h>`, each correlation setting's `_c<h>`, each volatility setting's `_v<h>`, the daily
+  statistics' history, every test's factor covariance by date (the eigen scales' too, since 17)
+  and the optimiser's factor exposures;
   `--bias-guard N` (default 5, 0 skips) is the guard's date count, two to four minutes at five.
 - On the panel on securities, `--membership` is its own, checked against the newest snapshot's
   hash, and `--industries` reads its own SIC codes and needs no key.
@@ -636,8 +651,9 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
 
 **At the defaults:**
 
-- **Time:** about 7.5 minutes, 6.8 of them the regime adjustment's refits; 0.8 minutes with
-  `--regime-factor-half-life none`.
+- **Time:** about 0.9 minutes, the regime adjustment's factor side read from the full fit behind
+  its guard (the five refits 3.2 s, the history 0.2 s); 0.8 minutes with
+  `--regime-factor-half-life none` (17; 7.5 minutes by the refits, 16).
 - **Mean R-squared:** 0.293825 over 938 periods from 2023-02-08 (0.293821 on `_revised`, 0.293826
   on `_spinoffs`, 0.293203 on `_listed`).
 - **Members in the regression a period:** median 502, range 499 to 503.
@@ -704,14 +720,18 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
   bias statistics, their mean square by half and by quarter; each multiplier's path by quarter,
   its range and its mean by half; how much each setting moves the forecasts from day to day; and
   every setting over the whole test and each half, chosen on the first by `REGIME_CRITERION`.
-  **Under `--bias-correlation-half-lives`** (16): each setting's factor volatilities, B_F^2 and
-  lambda_F against the model's, bit for bit; the optimiser's realised volatility by part and who
-  is out; the regime criterion by part and the choice by `CORRELATION_RULE`; each setting's own
+  **Under `--bias-correlation-half-lives`** (16) or **`--bias-volatility-half-lives`** (17):
+  each correlation setting's factor volatilities, B_F^2 and lambda_F against the model's, bit for
+  bit, or each volatility setting's B_F^2 and lambda_F by part; the optimiser's realised
+  volatility by part and who is out; the regime criterion by part and the choice by
+  `COVARIANCE_RULE`; each setting's own
   eigenportfolios by rank and part; the statistics, realised volatility and MRADs by part; the
   members by capitalisation quintile; the forecasts' day-to-day moves. **The regime adjustment's
   own lines** (15; by default since 16): the multipliers the run's own forecast carries as of the
-  last date, and the factor volatilities and specific risk they make; in a plain run the refits'
-  minutes; under `--bias-eigen-scales`, each scale's own factor multiplier.
+  last date, and the factor volatilities and specific risk they make; in a plain run, since 17,
+  the factor side read from the full fit, the guard's five dates and both times (with the
+  specific side on, or a covariance not its estimator's alone, the refits' minutes as before);
+  under `--bias-eigen-scales`, each scale's own factor multiplier.
 - **Specific risk:**
   - the percentiles;
   - the shares of V-squared;
@@ -763,29 +783,26 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 
 ## What is next
 
-1. **Jeff's rulings on midoffice16** (its retro, "Decisions left for Jeff"):
-   - **The correlation half-life:** 504 days, as it is (my choice, the rule's); or a shorter one.
-   - **The test item 4 proposes:** the one-sided eigenvalue adjustment on the 63-day
-     correlations, judged by the same rule -- whether the optimiser's price in the small
-     eigen-directions can be taken back while the calm half keeps its gain. Run it, or not.
-   - **The two-half-life estimator's diagonal:** set to the short window's variances, so the
-     volatilities (and the regime multiplier) no longer depend on the correlation half-life in
-     the last bit, every stored run then reproducing to rounding only; or left as it is (my
-     choice for now).
-   - **The plain run's regime history from the full fit alone:** each refit's factor returns are the full fit's through its date, to the bit (all 686), so the history and the multiplier read from the full fit's factor returns -- the model's estimator on their prefixes -- are the refits' to the bit, in 0.3 s instead of about seven minutes. Build it for the plain run (my choice), or keep the refits. The bias test refits anyway, and the specific side, off, would still need them.
-   - **The next piece.**
-2. **Next, as I would order it:** the largest members' specific risk (15 ruling 5), forecast too
-   low at every setting (the top quintile 1.028 under the new defaults), in the specific risk
-   model, by size -- and at the other end the optimiser's specific part, over-forecast (0.88 by
-   eigen-split), which may be the same shrinkage seen from the low-risk names. The calm half's
-   remaining shape -- the market direction's volatility, not its correlations -- after that, if
-   Jeff wants it pursued.
+1. **Jeff's rulings on midoffice17** (its retro, "Decisions left for Jeff"):
+   - **The factor covariance:** as it stands (my choice) -- correlations 504, volatilities 90, no
+     eigenvalue adjustment -- every lever tried on the calm half having failed the optimiser's
+     test.
+   - **The calm half's market direction:** left for now (my choice), or pursued later by a design
+     that reads it on its own -- a regime multiplier of its own for the market direction, read
+     from its own out-of-sample record, the small directions left on the long window.
+   - **The next piece:** the largest members' specific risk (15 ruling 5 and 16 ruling 5's order;
+     my choice).
+2. **Next, as I would order it:** the largest members' specific risk, forecast too low at every
+   setting (the top quintile 1.028 under the defaults), in the specific risk model, by size --
+   and at the other end the optimiser's specific part, over-forecast (0.87 to 0.91 by
+   eigen-split), which may be the same shrinkage seen from the low-risk names.
 3. **The bias statistics are standing,** at one day and the model's horizon, the optimiser's
    realised volatility beside its statistic: every later candidate is one `--bias --bias-horizons
    ...` run against D16 (`--bias-eigen-scales` for a covariance-side scale,
-   `--bias-regime-half-lives` for the regime adjustment's, `--bias-correlation-half-lives` for the
-   correlations'), one at a time through a runner like midoffice16's
-   (`claude/scratch/midoffice16/runner.py`, which runs plain runs too).
+   `--bias-regime-half-lives` for the regime adjustment's, `--bias-correlation-half-lives` and
+   `--bias-volatility-half-lives` for the covariance's), one at a time through a runner like
+   midoffice17's (`claude/scratch/midoffice17/runner.py`, which runs plain runs too), and judged
+   against D16 by a script written before the run (`claude/scratch/midoffice17/judge.py`).
 
 **Open, not queued:**
 
@@ -810,8 +827,10 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
   half to 1.06 and the optimiser to 1.11 and 1.16, the second only to 0.785: the calm half's
   over-forecast is the market direction's, a shape (15). A shorter correlation half-life fixes
   only part of it -- at 63 days the market direction 0.814 to 0.858 -- and the optimiser pays for
-  it in the small eigen-directions (16). What is left is on the volatility side: one multiplier
-  over 25 factors, which the market direction and the rest pull apart (16);
+  it in the small eigen-directions (16). What is left is the correlations, not the volatilities
+  (17, correcting 16): realised 0.25 to 0.33 between factors from 2025 Q3, the forecast 0.40 to
+  0.46; a 63-day window follows a quarter late, and the eigenvalue adjustment on it (17) and
+  shorter volatility windows (17) each trade the shock half for the calm and cost the optimiser;
 - the index's whole-test statistic under the factor side, 0.934, below its band: the calm half's
   shape, not a cost of the adjustment (15 ruling 1); its forecast moves four times as much from
   day to day as the unadjusted model's (15);

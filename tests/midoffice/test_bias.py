@@ -402,7 +402,8 @@ def test_a_covariance_reestimated_from_the_factor_returns_is_the_fit_with_that_e
     model's covariance re-estimated by another estimator is the fit with that estimator, to the
     bit, and a forecast with it is that fit's forecast -- the bias test's correlation half-lives
     share one pass's refits. The volatilities do not depend on the correlations' half-life but
-    for the last bit. Refused where the covariance is not the estimator's estimate alone."""
+    for the last bit; a volatility half-life moves the volatilities and not the correlations
+    (midoffice17). Refused where the covariance is not the estimator's estimate alone."""
     from praxis.midoffice.model.characteristics import CharacteristicPanel
     from praxis.midoffice.model.covariance import ExponentialCovariance, HorizonCovariance
     from praxis.midoffice.model.crosssectional import (
@@ -439,6 +440,15 @@ def test_a_covariance_reestimated_from_the_factor_returns_is_the_fit_with_that_e
     # Other correlations, the short window's volatilities under both but for the last bit.
     assert not np.allclose(again, model.covariance.matrix)
     assert np.allclose(np.diag(again), np.diag(model.covariance.matrix), rtol=1e-15, atol=0.0)
+    # The volatilities' half-life likewise (midoffice17): its volatilities move, not its
+    # correlations.
+    shorter = dataclasses.replace(long, volatility_half_life=8.0)
+    vols = reestimated_covariance(model, shorter)
+    assert np.array_equal(vols, fit(shorter).covariance.matrix)
+    sd, own_sd = np.sqrt(np.diag(vols)), np.sqrt(np.diag(model.covariance.matrix))
+    assert not np.allclose(sd, own_sd)
+    assert np.allclose(vols / np.outer(sd, sd), model.covariance.matrix / np.outer(own_sd, own_sd),
+                       rtol=1e-12, atol=1e-15)
     with pytest.raises(ValueError, match="factors"):
         RiskForecast.from_model(model, secs, covariance=again[:2, :2])
     with pytest.raises(ValueError, match="sampling correction"):

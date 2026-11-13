@@ -435,7 +435,24 @@ by its own forecasts' history.
   and the model's 0.172), and it was the best on the second (0.123, against 0.131 and 0.141). Its
   price is noise: the index's forecast moves 1.00% a day at the median against 0.27%, still less
   than a member's moves under the model (1.34%). In a plain run its refits cost about seven
-  minutes: 7.5 minutes against 0.8 with the side off, 6.8 of them the 686 refits.
+  minutes: 7.5 minutes against 0.8 with the side off, 6.8 of them the 686 refits (midoffice16).
+- **A plain run reads the factor side from the full fit** (ruling 4 of midoffice17's brief).
+  - **Why it can:** each period's regression reads only what was known before it, so a model
+    refitted as of a date has the full fit's factor returns through that date, to the bit
+    (midoffice16 checked all 686).
+  - **How:** the history is the model's estimator on the full fit's factor returns through each
+    day before (`regime.factor_history`), as the risk engine uses them.
+  - **The guard:** five refits spread over the history -- the first forecast date, the last and
+    three between -- each checked against the full fit through its date to the bit, its factor
+    returns and its factor volatilities (`regime.factor_history_guard`). The run refuses on any
+    difference.
+  - **Where it still refits:** the specific side, and a covariance not its estimator's alone
+    (the sampling correction, the eigenvalue adjustment), need the model refitted as of every
+    day. The bias test keeps its refits.
+  - **The time:** a plain run at the defaults takes 0.9 minutes, against 0.8 with the factor
+    side off and 7.5 by the refits: the guard's five refits 3.2 s, the history 0.2 s. Its
+    report is the refits' line for line but the last two, lambda_F 0.9640 as of 2026-11-03
+    both ways.
 - **The specific side is off** (ruling 2): a level, 1.09 in both halves, set by the largest
   members, whose fix is by size, in the specific risk model.
 
@@ -1676,10 +1693,11 @@ to the hundredth of a point, is out -- then the regime criterion on the first ha
     ranks come down.
   - **The market direction stays over-forecast:** rank 1 0.814 to 0.858, the index 0.785 to
     0.833. The 63-day correlations take only 6% off the market direction's forecast volatility,
-    where it would need about 19% (1 - 0.814). The calm half's mean correlation between factors is
-    0.398 at 63 days against 0.432 at 504: the correlations had fallen, but not by much.
-  - **What is left is on the volatility side:** one multiplier over 25 factors, which the market
-    direction and the rest pull apart.
+    where it would need about 19% (1 - 0.814). The calm half's mean correlation between factors,
+    as forecast, is 0.398 at 63 days against 0.432 at 504.
+  - **What is left was read here as the volatility side,** one multiplier over 25 factors which the
+    market direction and the rest pull apart. midoffice17 measured it, and it is not: it is the
+    correlations, which fell much further than either window's forecast followed (below).
 - **The optimiser pays for it in the small eigen-directions, in both halves.** At 63 days, of
   its own covariance's eigen-directions:
   - ranks 21-25 read 1.303 against 1.195;
@@ -1694,6 +1712,58 @@ to the hundredth of a point, is out -- then the regime criterion on the first ha
 The 504-day correlations stay. The test that would tell whether the optimiser's price can be
 taken back is the one-sided eigenvalue adjustment on the 63-day correlations, judged by the same
 rule; proposed, not run (midoffice16's retro).
+
+**What the calm half's market direction is made of** (midoffice17, from D16's stored forecasts
+and the model's factor returns, no run). It is the correlations, not the volatilities as
+midoffice16 read it.
+- **The correlations fell after the shock and stayed down:** realised 0.316 between factors over
+  the second half against the forecast's 0.432, and the market direction's share of the factor
+  variance 0.472 against 0.636. By quarter the realised correlations went from 0.55 (2025 Q2) to
+  0.25 (Q3) and stayed near 0.30 through 2026. The 504-day forecast held at 0.40 to 0.46; a 63-day
+  window followed about a quarter late (0.481 in 2025 Q3, 0.315 by 2026 Q4, against realised 0.25
+  and 0.29).
+- **The volatilities barely moved:** the market direction's industries -- banks, brokers,
+  electronics, machinery and transport equipment the heaviest -- read 0.945 by their own
+  statistics in the calm half, weighted by their shares of it.
+- **Rebuilt on the realised correlations,** rank 1 in the calm half goes from 0.814 to 0.946; with
+  each factor's volatility at its realised level, only to 0.861; with both, to 1.000. The first
+  half is the mirror: correlations above the forecast (0.488 against 0.402), and on them rank 1's
+  1.064 goes to 0.976.
+
+**The one-sided eigenvalue adjustment on the 63-day correlations** (midoffice17, E17): a = 1, 2,
+3 beside the 63-day model, one pass, its model test C16's 63-day setting to the bit, judged by the
+rule against the defaults (D16).
+- **The simulation finds more to correct** on the 63-day matrix: the smallest five eigenvalues'
+  bias about 1.17, against about 1.06 on the 504-day one.
+- **The adjustment fixes the statistics it is for:** ranks 21-25 from 1.30 to 1.04 at a = 2, and
+  the minimum-variance portfolios' part in ranks 16-25 from 1.25 to 1.01.
+- **It fails the optimiser's test, and more at every a.** Long-only realises 10.12%, 10.18%,
+  10.28% and 10.40% a year at a = 0 to 3; unconstrained 10.23%, 10.28%, 10.36% and 10.46%,
+  against the defaults' 10.13% and 10.19%. Every setting is out, and the defaults stay.
+- **Why:** raised small eigenvalues move the optimiser's risk out of the small directions and
+  into the market direction (38% of its forecast variance to 44% at a = 3). There the volatile
+  first half cost it, 12.10% to 12.66% a year; the calm half gained a little, 7.67% to 7.52%.
+- **On the criterion** every scale is worse than the defaults on the first half (0.118 to 0.134
+  against 0.098) and better on the second (0.088 to 0.092 against 0.123): the halves pull apart as
+  at 63 days alone.
+
+**The volatilities' half-life on the regime-adjusted model** (midoffice17, V17): 21, 42 and 63
+days beside 90 -- never before tested on this model -- the correlations on 504, one pass
+(`--bias-volatility-half-lives`). Each setting reads the regime adjustment from its own forecasts;
+its model test is the defaults' to the bit.
+- **The shorter the window, the less is left for the multiplier:** at 21 days the factors'
+  squared statistic is 1.18 and 1.01 by half, against 90's 1.33 and 0.90, and the multiplier
+  moves less.
+- **Every shorter half-life fails the optimiser's test:** long-only 10.15%, 10.22% and 10.37% a
+  year at 63, 42 and 21, unconstrained 10.26%, 10.36% and 10.61%, against 10.13% and 10.19%. 90
+  stays.
+- **The calm half's market direction barely moves:** rank 1 0.814 to 0.843 at 21 days. The
+  eigenportfolios' shape worsens there (mean abs(bias - 1) 0.222 to 0.272): a shorter volatility
+  window follows each factor's own level, not the correlations, which is where the calm half's
+  over-forecast is.
+- **The halves trade once more:** the criterion worse on the first half at every setting (0.099
+  to 0.113 against 0.098), better on the second (0.098 to 0.117 against 0.123). The index's
+  forecast moves 1.66% a day at the median at 21 days, against 1.00%.
 
 ## Status
 

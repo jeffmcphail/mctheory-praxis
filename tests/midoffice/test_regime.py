@@ -16,11 +16,17 @@ import pytest
 from praxis.midoffice.model.bias import RiskForecast, eigenportfolios
 from praxis.midoffice.model.characteristics import CharacteristicPanel
 from praxis.midoffice.model.covariance import ExponentialCovariance
+from praxis.midoffice.model.crosssectional import (
+    cross_sectional_models_as_of,
+    estimate_cross_sectional_model,
+)
 from praxis.midoffice.model.panel import Frequency, ReturnPanel
 from praxis.midoffice.model.regime import (
     REGIME_MIN_DAYS,
     RegimeHistory,
     factor_bias,
+    factor_history,
+    factor_history_guard,
     regime_history,
     regime_multiplier,
     specific_bias,
@@ -207,3 +213,47 @@ def test_nothing_after_a_date_moves_the_multiplier_as_of_it():
     with pytest.raises(ValueError, match="consecutive"):
         regime_history(returns, chars, [as_of[0], as_of[2]], capitalisations=caps,
                        membership=members, **_options(caps))
+
+
+def test_the_factor_side_read_from_one_fit_is_the_refits_and_its_guard_names_a_difference():
+    """midoffice17: the factor side's history read from one fit -- the estimator on the fit's own
+    factor returns through each day before -- equals the history the model refitted as of every
+    day gives, to the bit. The guard finds nothing on true refits, and names a refit whose factor
+    returns differ in one bit and an estimator not the model's. A factor-only history refuses
+    the specific side; a model whose covariance is not its estimator's alone is refused."""
+    returns, chars, caps, members = _daily_world()
+    as_of = returns.dates[24:52]
+    options = _options(caps)
+    estimator = options["covariance_estimator"]
+    refitted = regime_history(returns, chars, as_of, capitalisations=caps, membership=members,
+                              min_days=3, **options)
+    full = estimate_cross_sectional_model(returns, chars, capitalisations=caps,
+                                          membership=members, **options)
+    fast = factor_history(full, estimator, as_of, min_days=3)
+    assert fast.dates == refitted.dates == list(as_of[1:])
+    assert fast.factor_squared == refitted.factor_squared
+    assert fast.factors == refitted.factors
+    assert np.array_equal(fast.path("factor", 8.0), refitted.path("factor", 8.0))
+    assert refitted.has_specific and not fast.has_specific
+    with pytest.raises(ValueError, match="specific"):
+        fast.multiplier("specific", 8.0)
+    assert fast.multiplier("specific", None) == 1.0
+    picks = [as_of[0], as_of[13], as_of[-1]]
+    refits = list(cross_sectional_models_as_of(returns, chars, picks, capitalisations=caps,
+                                               membership=members, **options))
+    assert factor_history_guard(full, estimator, refits) == []
+    day, refit = refits[1]
+    bent = refit.notes.factor_returns.returns.copy()
+    bent[0, 0] = np.nextafter(bent[0, 0], np.inf)
+    factors = dataclasses.replace(refit.notes.factor_returns, returns=bent)
+    changed = dataclasses.replace(refit, notes=dataclasses.replace(refit.notes,
+                                                                   factor_returns=factors))
+    assert factor_history_guard(full, estimator, [(day, changed)]) == [
+        f"{day}: its factor returns are not the full fit's through it"]
+    problems = factor_history_guard(full, ExponentialCovariance(half_life=10.0), refits)
+    assert len(problems) == 3 and all("factor volatilities" in p for p in problems)
+    adjusted = estimate_cross_sectional_model(returns, chars, capitalisations=caps,
+                                              membership=members, eigen_adjustment=1.0,
+                                              eigen_draws=20, **options)
+    with pytest.raises(ValueError, match="estimator's alone"):
+        factor_history(adjusted, estimator, as_of)

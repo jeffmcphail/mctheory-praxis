@@ -38,17 +38,27 @@ the first forecast the model makes, and a side's multiplier waits for `REGIME_MI
 it: before then the forecast is the model's own, unadjusted. The exponential weights are
 normalised over the days there are, so from then on lambda is a weighted mean however short the
 history; a half-life long against the history is near equal weights over it.
+
+**The factor side from one fit** (midoffice17). Each period's regression reads only what was
+known before it, so a model refitted as of a date has the full fit's factor returns through that
+date, and its factor covariance is its estimator's on them: the factor side's history can be read
+from one fit (`factor_history`), the estimator re-run on the factor returns through each day
+before. That is checked, not assumed: `factor_history_guard` sets refits as of chosen dates
+against the full fit, and the S&P 500 run refuses on any difference. The specific side needs each
+refit's specific risk, and has no such shortcut.
 """
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Sequence
+from typing import Iterable, Sequence
 
 import numpy as np
 
+from ..risk.basis import nearest_psd
 from .bias import RiskForecast
 from .crosssectional import cross_sectional_models_as_of
 from .panel import ReturnPanel
@@ -96,6 +106,15 @@ def specific_bias(
     weight = w[ok] / w[ok].sum()
     z = u[ok] / s[ok]
     return float(weight @ (z * z)), int(ok.sum()), float(1.0 / (weight @ weight))
+
+
+def forecast_volatilities(covariance: np.ndarray, periods: float) -> np.ndarray:
+    """A forecast's factor volatilities at a period's scale, as the bias statistic reads them: the
+    annualised factor covariance as the risk engine uses it (`nearest_psd`), the root of its
+    diagonal over the periods a year -- what `RiskForecast.from_model` and `RegimeHistory.add`
+    make of a model's covariance."""
+    engine, _ = nearest_psd(np.asarray(covariance, dtype=float))
+    return np.sqrt(np.clip(np.diag(engine), 0.0, None) / periods)
 
 
 def regime_multiplier(
@@ -190,21 +209,51 @@ class RegimeHistory:
         self.add(day, previous, factors.returns[-1], returns, capitalisations, membership)
         return True
 
+    def add_factor(self, day: date, volatilities: np.ndarray, factor_returns: np.ndarray) -> None:
+        """Day t's factor statistic alone (midoffice17): `volatilities` the factor volatilities
+        forecast at t - 1's close at the period's scale (`forecast_volatilities`),
+        `factor_returns` day t's, in the same order. The specific side is not read: it is left
+        nan, and its multiplier is refused (`multiplier`)."""
+        if self.dates and day <= self.dates[-1]:
+            raise ValueError(f"the history runs forward: {day} after {self.dates[-1]}")
+        factor, k = factor_bias(factor_returns, volatilities)
+        if not np.isfinite(factor):
+            raise ValueError(f"{day}: no factor to read a bias statistic from")
+        self.dates.append(day)
+        self.factor_squared.append(factor)
+        self.specific_squared.append(float("nan"))
+        self.factors.append(k)
+        self.members.append(0)
+        self.effective.append(0.0)
+
     def __len__(self) -> int:
         return len(self.dates)
+
+    @property
+    def has_specific(self) -> bool:
+        """Whether every day's specific statistic was read: not where the factor side was read
+        alone (`add_factor`)."""
+        return bool(np.all(np.isfinite(self.specific_squared)))
 
     def squared(self, side: str) -> list[float]:
         if side not in SIDES:
             raise ValueError(f"a side is one of {SIDES}, not {side!r}")
         return self.factor_squared if side == "factor" else self.specific_squared
 
+    def _readable(self, side: str, half_life: float | None) -> None:
+        if side == "specific" and half_life is not None and not self.has_specific:
+            raise ValueError("this history read the factor side alone; the specific side needs "
+                             "each day's specific statistic, from the model refitted as of it")
+
     def multiplier(self, side: str, half_life: float | None) -> float:
         """lambda on `side` as of the last day added, on `half_life` (None: the side off, one)."""
+        self._readable(side, half_life)
         return regime_multiplier(self.squared(side), half_life, self.min_days)
 
     def path(self, side: str, half_life: float | None) -> np.ndarray:
         """lambda on `side` as of each day added, in order: the multiplier each day's forecast
         would carry had it been made at that day's close."""
+        self._readable(side, half_life)
         values = self.squared(side)
         return np.array([regime_multiplier(values[: i + 1], half_life, self.min_days)
                          for i in range(len(values))])
@@ -242,3 +291,74 @@ def regime_history(
                               None if membership is None else membership[t - 1])
         previous = (t, RiskForecast.from_model(model, returns.securities))
     return history
+
+
+def _engine_volatilities(model) -> np.ndarray:
+    """The factor volatilities a fitted model's own forecast carries, at the period's scale."""
+    notes = model.notes
+    periods = notes.frequency.periods_per_year if notes.annualised else 1.0
+    return forecast_volatilities(model.covariance.matrix, periods)
+
+
+def _prefix_volatilities(model, estimator, k: int) -> np.ndarray:
+    """The factor volatilities `estimator` gives on a fitted model's first k periods of factor
+    returns, annualised as the model is and taken to the period's scale as its forecast is."""
+    notes = model.notes
+    scale = notes.frequency.variance_scale if notes.annualised else 1.0
+    periods = notes.frequency.periods_per_year if notes.annualised else 1.0
+    covariance = estimator.estimate(notes.factor_returns.returns[:k]).matrix * scale
+    return forecast_volatilities(covariance, periods)
+
+
+def factor_history(
+    model, estimator, as_of: Sequence[date], *, min_days: int = REGIME_MIN_DAYS
+) -> RegimeHistory:
+    """The factor side's history over `as_of` -- consecutive trading dates, the first with no
+    statistic -- read from one fit, `model`, and its covariance estimator, without refitting
+    (midoffice17): each day's B_F^2 from the model's own factor return that day and the factor
+    volatilities `estimator` gives on the model's factor returns through the day before, as the
+    risk engine uses them. That is what `regime_history` reads from the model refitted as of
+    every day wherever a refit's factor returns are the full fit's through its date --
+    `factor_history_guard` checks it on refits the caller makes. A day the model did not estimate
+    has no statistic. The specific side is not read. Refused for a model whose covariance is not
+    its estimator's alone: one with the sampling correction, or the eigenfactor adjustment
+    scaling it."""
+    notes = model.notes
+    if getattr(notes, "sampling_correction", False) or getattr(notes, "eigen_adjustment", None):
+        raise ValueError("this model's covariance is not its estimator's alone (the sampling "
+                         "correction, or the eigenfactor adjustment); read its history from refits")
+    factors = notes.factor_returns
+    at = {d: i for i, d in enumerate(factors.dates)}
+    history = RegimeHistory(min_days=min_days)
+    for before, day in zip(as_of, as_of[1:]):
+        if before >= day:
+            raise ValueError(f"the dates run forward: {day} after {before}")
+        if day not in at:
+            continue
+        k = bisect.bisect_right(factors.dates, before)
+        history.add_factor(day, _prefix_volatilities(model, estimator, k),
+                           factors.returns[at[day]])
+    return history
+
+
+def factor_history_guard(model, estimator, refits: Iterable[tuple[date, object]]) -> list[str]:
+    """Refits as of chosen dates against the full fit, `model` (midoffice17): each refit's
+    estimated periods and factor returns the full fit's through its date, to the bit, and the
+    factor volatilities its own forecast carries the ones `factor_history` reads for that date --
+    the estimator on the full fit's factor returns through it. What differs, by date; empty if
+    nothing does."""
+    full = model.notes.factor_returns
+    out: list[str] = []
+    for day, refit in refits:
+        own = refit.notes.factor_returns
+        k = len(own.dates)
+        if tuple(own.dates) != tuple(full.dates[:k]) or (k < len(full.dates)
+                                                         and full.dates[k] <= day):
+            out.append(f"{day}: its estimated periods are not the full fit's through it")
+        elif not np.array_equal(own.returns, full.returns[:k]):
+            out.append(f"{day}: its factor returns are not the full fit's through it")
+        elif not np.array_equal(_engine_volatilities(refit),
+                                _prefix_volatilities(model, estimator, k)):
+            out.append(f"{day}: its factor volatilities are not the estimator's on the full fit's "
+                       f"factor returns through it")
+    return out
