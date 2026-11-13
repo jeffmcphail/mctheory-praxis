@@ -45,6 +45,11 @@ from praxis.midoffice.model.bias import (  # noqa: E402
     bias_statistics,
 )
 from praxis.midoffice.model.characteristics import CharacteristicPanel  # noqa: E402
+from praxis.midoffice.model.country import (  # noqa: E402
+    country_covariance,
+    country_weights,
+    to_country_basis,
+)
 from praxis.midoffice.model.covariance import (  # noqa: E402
     HorizonCovariance,
     NeweyWestCovariance,
@@ -74,6 +79,7 @@ from praxis.midoffice.model.regime import (  # noqa: E402
     RegimeHistory,
     factor_history,
     factor_history_guard,
+    forecast_volatilities,
 )
 from praxis.midoffice.model.specificrisk import RESIDUAL_SPREADS  # noqa: E402
 from praxis.midoffice.refdata import sp500  # noqa: E402
@@ -1083,6 +1089,28 @@ def bias_section(
               f"half-life, one pass serving every setting, each on the volatility regime "
               f"adjustment of its own forecasts, {regime_label(own_regime)}; chosen by "
               f"{COVARIANCE_RULE}")
+    # The country factor as a covariance basis (midoffice18; USE4 section 3.1): each refit's own
+    # factor returns taken to the country basis -- the country the cap-weighted mean of the
+    # industries' returns, each industry less it, the styles as they are -- the covariance
+    # estimated there by the model's estimator and mapped back to the model's factors, the
+    # setting on the regime adjustment of its own forecasts, B_F over the basis's factors.
+    country = bool(args.bias_country)
+    if country:
+        kind, own_setting = "country", None
+        factor_names = [model.factor_names[fid] for fid in model.factor_ids]
+        industry_columns = [k for k, name in enumerate(factor_names) if name in held.industries]
+        country_by_date = country_weights(
+            inputs.return_panel, inputs.indices, options.get("capitalisations", inputs.caps),
+            industry_columns, regression_weights=options.get("regression_weights"),
+            membership=options.get("membership"), lag=options.get("lag", 1))
+        print(f"  the country factor as a covariance basis (USE4): each refit's own factor returns "
+              f"taken to the country basis -- the country the cap-weighted mean of the "
+              f"{len(industry_columns)} industries' returns, the weights each period's "
+              f"regression's capitalisation shares, each industry less it, the styles as they are "
+              f"-- the "
+              f"covariance estimated there by the model's estimator, its {len(factor_names) + 1} "
+              f"factors, and mapped back; on the regime adjustment of its own forecasts, B_F over "
+              f"the basis's factors, {regime_label(own_regime)}; chosen by {COVARIANCE_RULE}")
 
     # The guard: the forecast as of a date, rebuilt from the panel cut at that date through
     # the run's own pipeline, the scheme held, is the full run's -- its inputs bit for bit
@@ -1160,6 +1188,8 @@ def bias_section(
     variants = {a: BiasTest(**setup) for a in scales}
     regime_variants = {pair: BiasTest(**setup) for pair in regime_pairs}
     setting_variants = {key: BiasTest(**setup) for key in estimators}
+    if country:
+        setting_variants["country"] = BiasTest(**setup)
     # Each regime history reads the forecasts its tests start from: the model's (None), each
     # eigen scale's and each covariance setting's; the specific side is the model's for every
     # one.
@@ -1168,8 +1198,14 @@ def bias_section(
     # The factor covariance each test forecast with, by date (midoffice16): the model's, each
     # eigen scale's (midoffice17) and each covariance setting's; and each setting's factor
     # volatilities against the model's.
-    covariances: dict = {key: [] for key in (None, *scales, *estimators)}
+    covariances: dict = {key: [] for key in (None, *scales, *setting_variants)}
     volatilities = {key: [0, 0, 0.0] for key in estimators}
+    # The country basis (midoffice18): its own regime history over the basis's factors, read
+    # from the basis's forecast the day before, and its covariance by date.
+    basis_history = RegimeHistory() if country else None
+    basis_covariances: list[np.ndarray] = []
+    previous_basis = None
+    periods = notes.frequency.periods_per_year if notes.annualised else 1.0
     returns = inputs.return_panel.returns
     previous = None
     simulated: list[tuple[np.ndarray, np.ndarray, float]] = []
@@ -1187,6 +1223,20 @@ def bias_section(
             check[0] += int(np.count_nonzero(mine != model_own))
             check[1] += int(mine.size)
             check[2] = max(check[2], float(np.max(np.abs(mine / model_own - 1.0))))
+        if country:
+            basis, mapped = country_covariance(fitted, options["covariance_estimator"],
+                                               country_by_date, industry_columns)
+            forecasts["country"] = RiskForecast.from_model(fitted, securities, covariance=mapped)
+            own = fitted.notes.factor_returns
+            if regime_on and previous_basis is not None and own.dates[-1] == dates[t]:
+                if previous_basis[0] != t - 1:
+                    raise SystemExit(f"  the run stops: the country basis's day {dates[t]} "
+                                     f"follows a forecast as of {dates[previous_basis[0]]}")
+                day_return = to_country_basis(own.returns[-1:], industry_columns,
+                                              country_by_date[dates[t]][None])[0]
+                basis_history.add_factor(dates[t], forecast_volatilities(previous_basis[1],
+                                                                         periods), day_return)
+            previous_basis = (t, basis)
         # Day t's statistics from the forecasts as of t - 1, so the multipliers as of t read
         # nothing after t's close.
         regime_step(histories, previous, fitted, t, dates, returns, inputs.caps, membership)
@@ -1203,10 +1253,18 @@ def bias_section(
             variant.add(t, forecasts[None].regime_adjusted(*regime_multipliers(histories, None,
                                                                                pair)))
         for key, variant in setting_variants.items():
-            adjusted = forecasts[key].regime_adjusted(*regime_multipliers(histories, key,
-                                                                          own_regime))
+            if key != "country":
+                pair = regime_multipliers(histories, key, own_regime)
+            elif regime_on:
+                pair = (basis_history.multiplier("factor", own_regime[0]),
+                        histories[None].multiplier("specific", own_regime[1]))
+            else:
+                pair = (1.0, 1.0)
+            adjusted = forecasts[key].regime_adjusted(*pair)
             variant.add(t, adjusted)
             covariances[key].append(adjusted.covariance)
+            if key == "country":
+                basis_covariances.append(basis * pair[0] ** 2)
         if fitted.notes.eigen is not None:
             eigen = fitted.notes.eigen
             simulated.append((eigen.bias, eigen.standard_error, eigen.seconds))
@@ -1217,13 +1275,13 @@ def bias_section(
     setting_runs = {key: variant.result() for key, variant in setting_variants.items()}
     minutes = (time.monotonic() - began) / 60
     run_caps = inputs.caps[[at[d] for d in run.dates]]
-    tests = 1 + len(scales) + len(regime_pairs) + len(estimators)
+    tests = 1 + len(scales) + len(regime_pairs) + len(setting_variants)
     print(f"  {len(run.dates)} refits in {minutes:.1f} min"
           + (f", {60 * minutes / len(run.dates):.2f} s a refit with its eigenfactor simulation "
              f"({np.mean([s for _, _, s in simulated]):.2f} s of it) and {tests} "
              f"tests" if simulated else "")
           + (f", {60 * minutes / len(run.dates):.2f} s a refit with {tests} tests"
-             if (regime_pairs or estimators) and not simulated else "")
+             if (regime_pairs or setting_variants) and not simulated else "")
           + f"; the factor covariance as the engine uses it, repaired to positive semi-definite "
           f"at the configured floor, on {int(run.repaired.sum())} of the {len(run.dates)} dates; "
           f"{run.dropped} member-day(s) with a forecast and no next-day return left out of every "
@@ -1356,9 +1414,10 @@ def bias_section(
     if regime_runs:
         _report_regime(run, regime_runs, histories[None], own_regime, tested, groups,
                        member_stats or [], securities)
+    report_histories = {**histories, "country": basis_history} if country else histories
     if setting_runs:
-        _report_settings(run, setting_runs, kind, own_setting, histories, own_regime, groups,
-                         member_stats or [], securities, run_caps, volatilities)
+        _report_settings(run, setting_runs, kind, own_setting, report_histories, own_regime,
+                         groups, member_stats or [], securities, run_caps, volatilities)
     if own_regime != (None, None):
         # The run's own forecast, as of the last date: the last day's statistics from the last
         # forecast tested and the full run's own factor returns that day.
@@ -1368,7 +1427,13 @@ def bias_section(
         report_regime_forecast(model, final[None], own_regime, dates[-1])
     if args.bias_out:
         _save_bias(args.bias_out, run, run_caps, horizon, eigen_runs, simulated, regime_runs,
-                   histories, setting_runs, covariances)
+                   report_histories, setting_runs, covariances,
+                   ({"basis_covariance_country": np.array(basis_covariances),
+                     "country_weights": np.array([country_by_date[d]
+                                                  for d in notes.estimated_dates]),
+                     "country_weight_dates": np.array([str(d) for d in notes.estimated_dates]),
+                     "country_industry_columns": np.array(industry_columns)}
+                    if country else None))
 
 
 def ordinal(n: int) -> str:
@@ -1852,27 +1917,38 @@ def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime
     `COVARIANCE_RULE`; then the shape -- the eigenportfolios by rank and half, each setting's own
     -- the index and the optimiser by half, the members by capitalisation quintile, and how much
     each setting moves the index's forecast a day."""
-    keys = sorted(setting_runs, key=lambda key: float(key[1:]))
+    country = kind == "country"
+    keys = list(setting_runs) if country else sorted(setting_runs, key=lambda key: float(key[1:]))
     order = [*keys, None]
     tests = {None: run, **setting_runs}
-    label = {**{key: key[1:] for key in keys}, None: f"{own_setting:g} *"}
+    label = ({"country": "country", None: "model *"} if country
+             else {**{key: key[1:] for key in keys}, None: f"{own_setting:g} *"})
+    own_text = "the model's" if country else f"at {own_setting:g}"
     n = len(run.dates)
     halves = _halves(run)
     parts = {f"the whole test ({run.dates[0]} to {run.dates[-1]}, {n})": slice(0, n), **halves}
     other = "volatilities" if kind == "correlation" else "correlations"
-    print(f"\n  The factor {PLURAL[kind]}' half-life at one day: the model's {own_setting:g} (*) "
-          f"and "
-          f"{', '.join(key[1:] for key in keys)} trading days, the {other} on their own "
-          f"half-life throughout, every setting on its own forecasts' volatility regime "
-          f"adjustment, {regime_label(own_regime)}")
+    if country:
+        print(f"\n  The country factor as a covariance basis at one day (midoffice18): the model "
+              f"(*) and its factor returns in the country basis, the covariance estimated there "
+              f"and mapped back, on its own forecasts' volatility regime adjustment, "
+              f"{regime_label(own_regime)}")
+    else:
+        print(f"\n  The factor {PLURAL[kind]}' half-life at one day: the model's {own_setting:g} "
+              f"(*) and {', '.join(key[1:] for key in keys)} trading days, the {other} on their "
+              f"own half-life throughout, every setting on its own forecasts' volatility regime "
+              f"adjustment, {regime_label(own_regime)}")
 
     model_history = histories.get(None)
-    if model_history is not None and own_regime[0] is not None and kind == "volatility":
-        # The volatilities set B_F, so each setting's multiplier is its own (midoffice17).
+    if (model_history is not None and own_regime[0] is not None
+            and kind in ("volatility", "country")):
+        # The volatilities set B_F, so each setting's multiplier is its own (midoffice17); the
+        # country basis reads it over its own factors (midoffice18).
         at = {d: i for i, d in enumerate(run.dates)}
         print(f"  Each setting's regime multiplier, read from its own forecasts' history: the mean "
               f"of B_F^2, and lambda_F on {own_regime[0]:g} days -- its mean (min to max) -- by "
-              f"part")
+              f"part" + (" -- the country basis's B_F over its own factors, the country among "
+                         "them" if country else ""))
         print(f"  {'':<8} " + "   ".join(f"{p.split(' (')[0]:>30}" for p in parts))
         for key in order:
             history = histories[key]
@@ -1921,7 +1997,7 @@ def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime
            for key in order}
     print(f"\n  First, the minimum-variance portfolios' realised volatility, % a year, whole / "
           f"first half / second half; a setting under which either realises more over the whole "
-          f"test than at {own_setting:g}, to the hundredth of a point, is out")
+          f"test than {own_text}, to the hundredth of a point, is out")
     print(f"  {'':<8} {'long-only':>21}   {'unconstrained':>21}")
     for key in order:
         cells = "   ".join(" / ".join(f"{readings[p][key][c]:>5.2f}" for p in readings)
@@ -1961,9 +2037,10 @@ def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime
         return reading[run.names[key]] if isinstance(key, int) else reading[key]
 
     for plabel, by_setting in readings.items():
-        print(f"\n  {plabel}, by {kind} half-life ({own_setting:g} the model, *): the "
-              f"statistics, the optimiser's realised volatility % a year, the MRADs and the "
-              f"criterion")
+        print(f"\n  {plabel}, " + ("by basis (the model, *)" if country else
+                                     f"by {kind} half-life ({own_setting:g} the model, *)")
+              + ": the statistics, the optimiser's realised volatility % a year, the MRADs and "
+                "the criterion")
         print(f"  {'':<8}" + "".join(f" {name:>7}" for name, _ in REGIME_COLUMNS))
         for key in order:
             print(f"  {label[key]:<8}" + "".join(f" {cell(by_setting[key], c):>7.3f}"
@@ -2026,7 +2103,8 @@ def _bias_arrays(run, suffix: str = "", members: bool = True) -> dict[str, np.nd
 
 
 def _save_bias(path, run, caps, horizon, eigen_runs=None, simulated=None, regime_runs=None,
-               histories=None, setting_runs=None, covariances=None) -> None:
+               histories=None, setting_runs=None, covariances=None,
+               extra_arrays=None) -> None:
     """Every forecast and outcome, for comparing runs: the daily ones, and each horizon's
     outcomes with the windows overlapping (its forecast the daily one times sqrt(h); apart,
     every h-th date's from the first). Under the eigenfactor adjustment's other scales, each
@@ -2036,7 +2114,9 @@ def _save_bias(path, run, caps, horizon, eigen_runs=None, simulated=None, regime
     correlation half-lives, each one's keyed `_c<h>`, its history too (midoffice16), and under
     the volatility half-lives `_v<h>` (midoffice17). And the factor covariance each test forecast
     with, by date, annualised: the model's, each covariance setting's (midoffice16) and each eigen
-    scale's (midoffice17)."""
+    scale's (midoffice17). Under the country basis, its test keyed `_country` and its history,
+    the basis's own covariance by date and each estimated period's industry weights
+    (midoffice18, `extra_arrays`)."""
     extra: dict[str, np.ndarray] = {}
     keyed = [(f"a = {a:g}", f"_a{a:g}", v) for a, v in (eigen_runs or {}).items()]
     keyed += [(regime_label(p), _regime_suffix(p), v) for p, v in (regime_runs or {}).items()]
@@ -2056,7 +2136,8 @@ def _save_bias(path, run, caps, horizon, eigen_runs=None, simulated=None, regime
         extra["regime_settings"] = np.array([[np.nan if h is None else h for h in p]
                                              for p in regime_runs], dtype=float)
     for prefix, kind in (("c", "correlation"), ("v", "volatility")):
-        values = [float(key[1:]) for key in (setting_runs or {}) if key[0] == prefix]
+        values = [float(key[1:]) for key in (setting_runs or {})
+                  if key[0] == prefix and key[1:].replace(".", "", 1).isdigit()]
         if values:
             extra[f"{kind}_half_lives"] = np.array(values)
     for key, covariance in (covariances or {}).items():
@@ -2070,6 +2151,7 @@ def _save_bias(path, run, caps, horizon, eigen_runs=None, simulated=None, regime
         extra[f"regime_specific_squared{tag}"] = np.array(history.specific_squared)
         extra[f"regime_members{tag}"] = np.array(history.members)
         extra[f"regime_effective{tag}"] = np.array(history.effective)
+    extra.update(extra_arrays or {})
     if simulated:
         extra["eigen_bias"] = np.array([b for b, _, _ in simulated])
         extra["eigen_standard_error"] = np.array([e for _, e, _ in simulated])
@@ -2273,6 +2355,14 @@ def main(argv: list[str] | None = None) -> int:
                              "--bias-correlation-half-lives, each setting on the regime "
                              "adjustment of its own forecasts, which the volatilities move; "
                              "chosen by COVARIANCE_RULE, and kept in --bias-out")
+    parser.add_argument("--bias-country", action="store_true",
+                        help="with --bias and --industries, the country factor as a covariance "
+                             "basis tested beside the model (midoffice18; USE4): each refit's "
+                             "factor returns taken to the country basis -- the country the "
+                             "cap-weighted mean of the industries' returns, each industry less "
+                             "it -- the covariance estimated there and mapped back, on the regime "
+                             "adjustment of its own forecasts; chosen by COVARIANCE_RULE, and kept "
+                             "in --bias-out")
     parser.add_argument("--bias-horizons", type=horizon_list, default=(), metavar="H,H",
                         help="with --bias, more horizons in trading days to evaluate every "
                              "forecast at, beside one day and the model's own, comma-separated; "
@@ -2319,10 +2409,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.sampling_correction or args.eigen_adjustment is not None:
             parser.error(f"{name} re-estimates the covariance from the factor returns alone: not "
                          f"with --sampling-correction or --eigen-adjustment")
-        if (args.bias_eigen_scales or args.bias_regime_half_lives
+        if (args.bias_eigen_scales or args.bias_regime_half_lives or args.bias_country
                 or (args.bias_correlation_half_lives and args.bias_volatility_half_lives)):
             parser.error(f"{name} is a pass of its own: not with --bias-eigen-scales, "
-                         f"--bias-regime-half-lives or the other half-lives")
+                         f"--bias-regime-half-lives, --bias-country or the other half-lives")
+    if args.bias_country:
+        if not args.bias:
+            parser.error("--bias-country tests beside the model in --bias")
+        if not args.industries:
+            parser.error("--bias-country needs the industries (--industries): the country is "
+                         "their capitalisation-weighted mean")
+        if args.sampling_correction or args.eigen_adjustment is not None:
+            parser.error("--bias-country re-estimates the covariance from the factor returns "
+                         "alone: not with --sampling-correction or --eigen-adjustment")
+        if args.bias_eigen_scales or args.bias_regime_half_lives:
+            parser.error("--bias-country is a pass of its own: not with --bias-eigen-scales or "
+                         "--bias-regime-half-lives")
     if args.correlation_lags is not None and args.correlation_half_life is None:
         parser.error("--correlation-lags needs the two-half-life covariance, not "
                      "--correlation-half-life none")

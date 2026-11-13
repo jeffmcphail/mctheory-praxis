@@ -283,6 +283,57 @@ sit nearer it (0.98 of it on average, against 0.93), which a test pins. At no la
 one, and on the volatility half-life it is the plain split. Its diagonal is a product of two
 estimates over a third, no quadratic form in the returns, so it has no weighted noise share.
 
+### A country factor is a change of basis
+
+USE4 (section 3.1) puts a country factor in the regression beside the industries -- every member
+exposed to it, one each -- and constrains the industries' factor returns so that their
+capitalisation-weighted sum is zero. On this model that is the same fit in another basis
+(`country.py`, midoffice18):
+
+- **The same fit.** Each classified member's industry exposures sum to one, so the country's
+  column lies in the industries' span: the fitted values and the specific returns are the industry
+  model's. Its factor returns are a change of basis:
+  - the country's return is the industries' returns averaged by capitalisation, f_c = sum_i c_i
+    f_i, c_i industry i's share of the capitalisation of the period's regression
+    (`country_weights`);
+  - each industry's is its own less the country's, f_i' = f_i - f_c;
+  - the styles are as they were.
+
+  They map back by a fixed matrix whatever the weights, f_i = f_c + f_i' (`country_map`), so a
+  covariance S in the basis maps back as T S T'. Checked on the model's own regressions on nine
+  dates: the constrained fit gives the transformed factor returns to 5.0e-14 of the largest and
+  the same residuals to 1.8e-14 (the midoffice18 retro).
+- **Three members are in no industry factor:** CTVA, FRCB and SBNY, the S&P 500 scheme's "Other
+  Industries", a group of three below its floor of five, with no industry exposure (996 of
+  470,527 member-periods). Exposed to the country through the industries' sum, they get none, and
+  the fit is the model's. USE4's literal country -- every member exposed -- gives them one, a
+  slightly different fit wherever one of them is in the regression: on the nine dates up to
+  6.2e-3 of the largest factor return and 0.83 of the largest residual, and no difference on the
+  two dates without them. The country here is the industries' sum.
+- **What the basis changes is the covariance, and only under an estimator that is not a quadratic
+  form.**
+  - **The quadratic forms are invariant.** A sample, exponential or Newey-West covariance,
+    estimated in the country basis and mapped back, is the model's own: to 1.3e-15 of the
+    largest over the last 30 forecast dates on one half-life, the regime adjustment off.
+  - **The two-half-life estimator is not.** In the country basis the market's variance is the
+    country's own, on the volatilities' 90 days, and the industries' correlations net of the
+    market stay on 504. In the model's basis the market's variance rides on the industries'
+    correlations, the 504-day window.
+
+  A test pins both.
+- **The constraint's direction.** sum_i c_i f_i' is nil in every period, and the two-half-life
+  recombination does not know it. It forecasts that direction a volatility of 0.64% a year at the
+  median, 0.043 of the country's -- small, and spurious, carried by every portfolio near the
+  market's industry mix.
+- **In the run it is a test, not the model.** `--bias-country`, with `--bias` and `--industries`:
+  - each refit's covariance estimated in the country basis beside the model's, and mapped back;
+  - the regime adjustment read from its own forecasts, B_F over the basis's 26 factors;
+  - judged by `COVARIANCE_RULE`;
+  - `--bias-out` keeps its forecasts (`_country`), the basis's own covariance by date and each
+    period's industry weights.
+
+  The model's covariance is unchanged.
+
 ### Newey-West, and what Bartlett weighting costs
 
 The other two covariance corrections assume each period is an independent draw. Returns are
@@ -1764,6 +1815,45 @@ its model test is the defaults' to the bit.
 - **The halves trade once more:** the criterion worse on the first half at every setting (0.099
   to 0.113 against 0.098), better on the second (0.098 to 0.117 against 0.123). The index's
   forecast moves 1.66% a day at the median at 21 days, against 1.00%.
+
+**The country factor as a covariance basis** (midoffice18, C18; the basis above): one pass beside
+the model, its model test the defaults' to the bit, judged by the rule against the defaults (D16).
+- **The optimiser's test: in.** It is the first candidate judged against D16 under which the
+  optimiser realises less in both halves.
+  - **Long-only:** 9.98% a year against 10.13%; by half 11.66% and 7.96%, against 11.88% and
+    8.02%.
+  - **Unconstrained:** 9.97% against 10.19%; by half 11.65% and 7.95%, against 11.95% and 8.08%.
+- **The shape, fixed:**
+  - the eigenportfolios' mean abs(bias - 1) 0.064 against 0.131;
+  - in the calm half 0.075 against 0.222, ranks 2-25 reading 1.044 against 1.223;
+  - ranks 21-25 1.117 against 1.195.
+- **The criterion: out on the first half,** 0.103 against 0.098 (the calm half 0.176 against
+  0.123). The broad portfolios' MRAD is 0.083 against 0.068 in the first half and 0.244 against
+  0.159 in the calm half. The defaults stay.
+- **The expectation held for the index's forecast and failed for its level.**
+  - **The forecast:** the index's is nearly the country's own, 1.03 times it at the median in both
+    halves.
+  - **The level:** its statistic went the wrong way in both halves -- 1.063 to 1.100 in the first,
+    0.785 to 0.718 in the calm half. Rank 1 too: 1.064 and 0.814 to 1.095 and 0.747.
+- **Why: the regime multiplier, not the basis** (from C18's stored arrays, no run; the midoffice18
+  retro's `multiplier_split.txt`).
+  - **The basis alone** moves the market direction a little toward one in both halves. With the
+    multiplier divided out, rank 1 reads 1.226 and 0.780 under the model, 1.207 and 0.811 in the
+    country basis. The country's 90-day volatility carries the April 2025 shock into the calm
+    half much as the 504-day correlations did (its forecast 16.45% a year at the median there,
+    13.43% in the first half).
+  - **The multiplier, read over the basis's 26 factors, stops following the market.** The
+    country's squared statistic is 1.50 and 0.65 by half, but the 20 industries less the country
+    read 1.11 and 1.17 and the styles 1.20 and 1.21. So lambda_F is about 1.06 in both halves
+    (1.063 and 1.067), where the model's is 1.121 and 0.956 -- its 20 industries each carry the
+    market (1.37 and 0.82). The market direction loses the adjustment it had, and the non-market
+    directions gain one they lacked: that is the shape's fix.
+  - **On another multiplier.** On the model's, the basis's rank 1 would read 1.052 and 0.843,
+    better than the model's in both halves, but the shape goes back to the model's (0.176 in the
+    calm half). On two -- the country's own, and the other 25 basis factors' -- rank 1 reads
+    1.033 and 0.988 and the shape 0.076 and 0.063: both fixed. That is a reading of the factor
+    side alone; what the optimiser does under it needs a run.
+- **The noise:** the index's forecast moves 0.80% a day at the median, against 1.00%.
 
 ## Status
 
