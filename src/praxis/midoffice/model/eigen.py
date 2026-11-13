@@ -23,6 +23,11 @@ covariance scales each of the day's eigenvalues and keeps its eigenvectors:
 a = 1 is the simulation alone. USE4 found real data needs a above one: the simulation knows only
 sampling error from a stationary normal history, and a real one is neither. One simulation a day
 serves every a, so a can be chosen by testing.
+
+**One-sided** (midoffice15's brief), gamma(k) = max(1, a (lambda(k) - 1) + 1): only the eigenvalues
+the simulation finds too small are raised, and none is lowered -- the largest, which it finds too
+large, are left as estimated. midoffice13's two-sided adjustment lowered them, and the
+minimum-variance portfolios realised more risk under it.
 """
 
 from __future__ import annotations
@@ -66,22 +71,23 @@ class EigenBias:
     degenerate: int = 0
     seconds: float = field(default=0.0, compare=False)
 
-    def scales(self, a: float) -> np.ndarray:
+    def scales(self, a: float, one_sided: bool = False) -> np.ndarray:
         """gamma(k) = a (lambda(k) - 1) + 1, rank by rank: what each eigenfactor's volatility is
-        multiplied by."""
-        return a * (self.bias - 1.0) + 1.0
+        multiplied by; one-sided, never below one."""
+        gamma = a * (self.bias - 1.0) + 1.0
+        return np.maximum(gamma, 1.0) if one_sided else gamma
 
-    def adjusted(self, a: float) -> np.ndarray:
+    def adjusted(self, a: float, one_sided: bool = False) -> np.ndarray:
         """The covariance with each eigenvalue scaled by gamma(k)^2 and its eigenvectors kept.
         At a = 0 every gamma is one, and the covariance is returned as given, to the bit."""
         if a == 0.0:
             return self.covariance
-        return (self.vectors * (self.scales(a) ** 2 * self.values)) @ self.vectors.T
+        return (self.vectors * (self.scales(a, one_sided) ** 2 * self.values)) @ self.vectors.T
 
-    def basis(self, a: float) -> tuple[np.ndarray, np.ndarray]:
+    def basis(self, a: float, one_sided: bool = False) -> tuple[np.ndarray, np.ndarray]:
         """The adjusted covariance's eigenvalues and eigenvectors in the unadjusted order: rank k
         stays the same eigenfactor at every a, its variance scaled by gamma(k)^2."""
-        return self.scales(a) ** 2 * self.values, self.vectors
+        return self.scales(a, one_sided) ** 2 * self.values, self.vectors
 
 
 def eigen_bias(

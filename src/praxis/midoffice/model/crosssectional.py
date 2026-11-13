@@ -186,6 +186,8 @@ class CrossSectionalNotes:
     # simulated and nothing scaled; and the simulation, on the covariance before annualising.
     eigen_adjustment: float | None = None
     eigen: EigenBias | None = field(default=None, repr=False, compare=False)
+    # One-sided: every gamma at least one, no eigenvalue lowered (midoffice15).
+    eigen_one_sided: bool = False
     factor_names: tuple[str, ...] = ()
     covariance: CovarianceEstimate | None = None
     # Per factor, over the estimated periods: how many had at least one security in the
@@ -418,10 +420,12 @@ class CrossSectionalNotes:
                    if self.sampling_filled else "")
             )
         if self.eigen is not None and self.eigen_adjustment:
-            gamma = self.eigen.scales(self.eigen_adjustment)
+            gamma = self.eigen.scales(self.eigen_adjustment, self.eigen_one_sided)
             out.append(
                 f"the factor covariance's eigenvalues are scaled by the eigenfactor risk "
-                f"adjustment, a = {self.eigen_adjustment:g}, from {self.eigen.draws} simulated "
+                f"adjustment, a = {self.eigen_adjustment:g}"
+                + (", one-sided" if self.eigen_one_sided else "")
+                + f", from {self.eigen.draws} simulated "
                 f"histories: each eigenfactor's volatility multiplied by "
                 f"{float(gamma.min()):.3f} to {float(gamma.max()):.3f}, the smallest "
                 f"eigenvalue's by {float(gamma[-1]):.3f}"
@@ -895,6 +899,7 @@ def estimate_cross_sectional_model(
     eigen_adjustment: float | None = None,
     eigen_draws: int = EIGEN_DRAWS,
     eigen_seed: int = EIGEN_SEED,
+    eigen_one_sided: bool = False,
 ) -> FactorModel:
     """Regress returns cross-sectionally on characteristics, period by period.
 
@@ -1002,8 +1007,12 @@ def estimate_cross_sectional_model(
     and nothing scaled -- the covariance is unchanged to the bit, and the notes carry the
     simulation for any other a. The noise shares stay the estimate's. It and the sampling-error
     correction are alternative remedies for estimation error, and are not combined. None, the
-    default, is no simulation.
+    default, is no simulation. `eigen_one_sided` makes it one-sided, gamma = max(1, a (lambda - 1)
+    + 1): no eigenvalue is lowered (midoffice15). Off by default, and only with the adjustment.
     """
+    if eigen_one_sided and eigen_adjustment is None:
+        raise ValueError("eigen_one_sided shapes the eigenfactor risk adjustment, which is off; "
+                         "give eigen_adjustment")
     if eigen_adjustment is not None:
         if not eigen_adjustment >= 0.0:
             raise ValueError(
@@ -1296,7 +1305,7 @@ def estimate_cross_sectional_model(
             seed=eigen_seed,
         )
         if eigen_adjustment > 0.0:
-            covariance_matrix = eigen.adjusted(eigen_adjustment) * scale
+            covariance_matrix = eigen.adjusted(eigen_adjustment, eigen_one_sided) * scale
     mean_sampling = (
         tuple(float(v) for v in (sampling / sampling_periods) * scale)
         if sampling_periods
@@ -1483,6 +1492,7 @@ def estimate_cross_sectional_model(
         leverage_unweighted=leverage_unweighted,
         eigen_adjustment=eigen_adjustment,
         eigen=eigen,
+        eigen_one_sided=eigen_one_sided,
         factor_names=tuple(names),
         covariance=estimate,
         present_periods=tuple(int(v) for v in periods_present),

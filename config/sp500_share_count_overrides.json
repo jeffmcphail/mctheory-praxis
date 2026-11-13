@@ -10,7 +10,8 @@
       "action": "carry",
       "count": 635675701,
       "evidence": "A contaminated record. Polygon's HON records halve from 2026-10-12 -- 316,940,010 that day and 317,358,518 on 2026-11-03, against 635,675,701 on 2026-04-13 -- to within 0.06% of Honeywell Aerospace's own count (HONA: 316,826,559 on 2026-06-29, weighted 316,952,725 and 317,031,836 after), and HON's weighted count of 2026-07-14 is HONA's first count exactly. No split event under HON but 2025-10-30's price-only one, no raw close moving more than 15% in a day, and on HONA's first day HON opened higher: nothing halved Honeywell's shares. The last sample before the contamination, 2026-04-13, is carried.",
-      "ruled": "midoffice08, decision 3 (Jeff, 2026-11-10)"
+      "ruled": "midoffice08, decision 3 (Jeff, 2026-11-10)",
+      "superseded": "By midoffice14's HON spin-off ruling, which applies Honeywell's 1-for-2 reverse split of 2026-06-29, made one minute after its Aerospace distribution: the halved records were Honeywell's own post-split count, not Honeywell Aerospace's, and this ruling, which read them as contamination, was wrong. The reverse split stands and this ruling is superseded: midoffice15's ruling 2 (Jeff, 2026-11-12). Kept as the record: the build reads it only under --spin-offs none, so midoffice10's panel rebuilds."
     },
     {
       "key": "BBG01VS5NK99",

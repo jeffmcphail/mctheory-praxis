@@ -27,6 +27,7 @@ The t-statistic is reported third, as information about returns rather than risk
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import datetime as dt
 import sys
@@ -67,6 +68,7 @@ from praxis.midoffice.model.descriptors import (  # noqa: E402
 )
 from praxis.midoffice.model.eigen import EIGEN_DRAWS  # noqa: E402
 from praxis.midoffice.model.panel import Frequency, ReturnPanel  # noqa: E402
+from praxis.midoffice.model.regime import REGIME_MIN_DAYS, RegimeHistory  # noqa: E402
 from praxis.midoffice.model.specificrisk import RESIDUAL_SPREADS  # noqa: E402
 from praxis.midoffice.refdata import sp500  # noqa: E402
 from praxis.midoffice.refdata.industries import (  # noqa: E402
@@ -81,12 +83,13 @@ from praxis.midoffice.refdata.polygon import (  # noqa: E402
     read_api_key,
 )
 
-DEFAULT_PANEL = "data/external/polygon/sp500_securities_2022-01-03_2026-11-03_spinoffs.npz"
+DEFAULT_PANEL = "data/external/polygon/sp500_securities_2022-01-03_2026-11-03_revised.npz"
 """The panel on securities: its share counts repaired by midoffice08's rulings, a sample its own
 weighted count confirms spared and every span ended where it leaves an exchange by midoffice09's,
 and every spin-off the cache does not carry carried in the total return by midoffice14's rulings
-(`config/sp500_spin_off_overrides.json`). The run's panel when none is given; midoffice13's,
-before the spin-offs, is `_listed`."""
+(`config/sp500_spin_off_overrides.json`) as midoffice15's revised them -- S&P Global's held, FedEx
+Freight's count grossed up by FedEx's retained share. The run's panel when none is given;
+midoffice14's is `_spinoffs`, midoffice13's, before the spin-offs, `_listed`."""
 
 UNBLENDED = {
     "SERDP": "its residual series is kept for the last window alone, so it has a value on the "
@@ -161,6 +164,17 @@ def scale_list(text: str) -> tuple[float, ...]:
         raise argparse.ArgumentTypeError(f"scales are numbers; got {text!r}")
     if not values or min(values) <= 0.0:
         raise argparse.ArgumentTypeError(f"each scale must be positive; got {text!r}")
+    return values
+
+
+def half_life_list(text: str) -> tuple[float, ...]:
+    """Half-lives in trading days, comma-separated, each positive."""
+    try:
+        values = tuple(sorted({float(part) for part in text.split(",") if part.strip()}))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"half-lives are numbers of trading days; got {text!r}")
+    if not values or min(values) <= 0.0:
+        raise argparse.ArgumentTypeError(f"each half-life must be positive; got {text!r}")
     return values
 
 
@@ -810,6 +824,102 @@ def _models_differ(a, b) -> list[str]:
     return out
 
 
+def forecast_rows(model, dates) -> list[int]:
+    """The rows the bias test forecasts as of: each trading day from the first whose covariance has
+    a year (`BIAS_YEAR`) of estimated periods to the last with a next day to realise in. The
+    volatility regime adjustment's history runs over the same days."""
+    at = {d: i for i, d in enumerate(dates)}
+    estimated_rows = [at[d] for d in model.notes.estimated_dates]
+    if len(estimated_rows) <= BIAS_YEAR:
+        raise SystemExit(f"  the bias test and the regime adjustment need more than a year "
+                         f"({BIAS_YEAR}) of estimated periods; this run has {len(estimated_rows)}")
+    return list(range(estimated_rows[BIAS_YEAR - 1], len(dates) - 1))
+
+
+def regime_step(histories, previous, fitted, t, dates, returns, caps, membership) -> None:
+    """Day t's two bias statistics into each history (midoffice15): read from the forecasts made at
+    t - 1's close, unadjusted -- `previous`, (t - 1, forecasts by key) -- the factor returns the
+    refit as of t estimated for day t, the returns of day t, and t - 1's capitalisations and
+    membership. Nothing at the first forecast date, which has no forecast before it."""
+    if not histories or previous is None:
+        return
+    row, forecasts = previous
+    if row != t - 1:
+        raise SystemExit(f"  the run stops: the regime adjustment's day {dates[t]} follows a "
+                         f"forecast as of {dates[row]}, not the day before")
+    members = None if membership is None else membership[t - 1]
+    # A day not estimated has no factor return, and no statistic (`add_refit`).
+    for key, history in histories.items():
+        history.add_refit(dates[t], forecasts[key], fitted, returns[t], caps[t - 1], members)
+
+
+def regime_multipliers(histories, key, pair) -> tuple[float, float]:
+    """A setting's two multipliers as of the last day in the histories: the factor side's from the
+    history of the forecasts `key` names (an eigen scale's own, or the model's, None), the
+    specific side's from the model's, on the setting's half-lives (None: that side off)."""
+    if not histories:
+        return 1.0, 1.0
+    factor_half_life, specific_half_life = pair
+    return (histories[key].multiplier("factor", factor_half_life),
+            histories[None].multiplier("specific", specific_half_life))
+
+
+def regime_label(pair) -> str:
+    """A setting's half-lives, factor and specific, '-' for a side off."""
+    f, s = ("-" if h is None else f"{h:g}" for h in pair)
+    return f"F {f:>3} S {s:>3}"
+
+
+def report_regime_forecast(model, history, pair, last) -> None:
+    """The run's own forecast under its volatility regime adjustment: the multipliers as of the last
+    date, from the history through it, and what they make of the factor volatilities and the
+    specific risk."""
+    factor, specific = (history.multiplier(side, h) for side, h in zip(("factor", "specific"),
+                                                                         pair))
+    vols = np.sqrt(np.diag(model.covariance.matrix))
+    spec = np.array([ev.specific.by_issuer[code] for code, ev in model.exposures.items()])
+    print(f"\nThe volatility regime adjustment (Menchero, Orr and Wang; USE4), "
+          f"{regime_label(pair)}: the history of each day's bias statistics from "
+          f"{history.dates[0]} to "
+          f"{history.dates[-1]}, {len(history)} days, each read from the forecast made the day "
+          f"before, unadjusted; a side's multiplier one until it has {history.min_days} days")
+    print(f"  as of {last}: lambda_F {factor:.4f}, lambda_S {specific:.4f}; the factor "
+          f"volatilities' median {np.median(vols):.2%} to {np.median(vols) * factor:.2%}, the "
+          f"specific risk's p10 / median / p90 {np.percentile(spec, 10):.2%} / "
+          f"{np.median(spec):.2%} / {np.percentile(spec, 90):.2%} to "
+          f"{np.percentile(spec, 10) * specific:.2%} / {np.median(spec) * specific:.2%} / "
+          f"{np.percentile(spec, 90) * specific:.2%}")
+    print(f"  the last day's B_F^2 {history.factor_squared[-1]:.3f} over {history.factors[-1]} "
+          f"factors, B_S^2 {history.specific_squared[-1]:.3f} over {history.members[-1]} members "
+          f"(an effective number of {history.effective[-1]:.0f})")
+
+
+def regime_section(args, panel, membership, inputs, model, options) -> None:
+    """The volatility regime adjustment on the run's own forecast, without --bias (midoffice15):
+    the model refitted as of each day from the bias test's first, as the test refits it, each
+    day's bias statistics read from the forecast the day before, and the multipliers as of the
+    last date from them."""
+    dates, securities = panel.dates, panel.securities
+    rows = forecast_rows(model, dates)
+    returns = inputs.return_panel.returns
+    histories = {None: RegimeHistory()}
+    previous = None
+    began = time.monotonic()
+    models = cross_sectional_models_as_of(
+        inputs.return_panel, inputs.indices, [dates[t] for t in rows], **options
+    )
+    for count, (t, (_, fitted)) in enumerate(zip(rows, models)):
+        regime_step(histories, previous, fitted, t, dates, returns, inputs.caps, membership)
+        previous = (t, {None: RiskForecast.from_model(fitted, securities)})
+        if (count + 1) % 50 == 0 or count + 1 == len(rows):
+            print(f"  [regime] {count + 1} of {len(rows)} refits, "
+                  f"{(time.monotonic() - began) / 60:.1f} min", file=sys.stderr, flush=True)
+    regime_step(histories, previous, model, len(dates) - 1, dates, returns, inputs.caps,
+                membership)
+    report_regime_forecast(model, histories[None], (args.regime_factor_half_life,
+                                                    args.regime_specific_half_life), dates[-1])
+
+
 def bias_section(
     args, panel, market, membership, codes, merges, inputs, model, options, horizon
 ) -> None:
@@ -823,7 +933,7 @@ def bias_section(
     if len(estimated_rows) <= BIAS_YEAR:
         raise SystemExit(f"  --bias needs more than a year ({BIAS_YEAR}) of estimated periods; "
                          f"this run has {len(estimated_rows)}")
-    rows = list(range(estimated_rows[BIAS_YEAR - 1], len(dates) - 1))
+    rows = forecast_rows(model, dates)
     held = inputs.built_scheme
     print("\nOut-of-sample bias statistics")
     print(f"  {len(rows)} forecasts, as of each trading day from {dates[rows[0]]} -- the first "
@@ -867,12 +977,34 @@ def bias_section(
     scales = [a for a in args.bias_eigen_scales if a != (options.get("eigen_adjustment") or 0.0)]
     if scales and options.get("eigen_adjustment") is None:
         options = dict(options, eigen_adjustment=0.0, eigen_draws=args.eigen_draws)
+    one_sided = bool(args.eigen_one_sided)
     if scales:
         print(f"  the eigenfactor risk adjustment tested beside the model at a = "
-              f"{', '.join(f'{a:g}' for a in scales)}: on each forecast date its bias simulated "
+              f"{', '.join(f'{a:g}' for a in scales)}"
+              + (", one-sided, gamma = max(1, a (lambda - 1) + 1)" if one_sided else "")
+              + f": on each forecast date its bias simulated "
               f"once, {options['eigen_draws']} histories from the day's factor covariance "
               f"re-estimated by its own estimator, every scale read from it -- the model's own "
               f"a = {options['eigen_adjustment']:g}")
+    # The volatility regime adjustment (midoffice15): the model's own half-lives, and every
+    # pairing of those tested on each side, either side off among them, one pass serving all.
+    own_regime = (args.regime_factor_half_life, args.regime_specific_half_life)
+    tested = list(args.bias_regime_half_lives)
+    regime_pairs = ([(f, s) for f in (None, *tested) for s in (None, *tested)
+                     if (f, s) != own_regime] if tested else [])
+    regime_on = own_regime != (None, None) or bool(regime_pairs)
+    if regime_on:
+        print(f"  the volatility regime adjustment (Menchero, Orr and Wang; USE4): each day's "
+              f"factor and specific cross-sectional bias statistics read from the forecasts made "
+              f"the day before, unadjusted, and each forecast scaled by the square root of their "
+              f"exponentially weighted mean square through its date, the factor covariance by "
+              f"lambda_F^2 and each specific variance by lambda_S^2 -- one until a side has "
+              f"{REGIME_MIN_DAYS} days of history; the model's own {regime_label(own_regime)}"
+              + (f", every pairing of {', '.join(f'{h:g}' for h in tested)} days on each side, "
+                 f"either side off among them, tested beside it ({len(regime_pairs)} settings)"
+                 if regime_pairs else "")
+              + ("; each eigen scale's factor side from its own forecasts' history, so each is "
+                 "levelled again before it is tested" if scales else ""))
 
     # The guard: the forecast as of a date, rebuilt from the panel cut at that date through
     # the run's own pipeline, the scheme held, is the full run's -- its inputs bit for bit
@@ -948,23 +1080,46 @@ def bias_section(
     )
     test = BiasTest(**setup)
     variants = {a: BiasTest(**setup) for a in scales}
+    regime_variants = {pair: BiasTest(**setup) for pair in regime_pairs}
+    # Each regime history reads the forecasts its tests start from: the model's (None) and each
+    # eigen scale's; the specific side is the model's for every one.
+    histories = {key: RegimeHistory() for key in (None, *scales)} if regime_on else {}
+    returns = inputs.return_panel.returns
+    previous = None
     simulated: list[tuple[np.ndarray, np.ndarray, float]] = []
     for count, (t, (_, fitted)) in enumerate(zip(rows, models)):
-        test.add(t, RiskForecast.from_model(fitted, securities))
+        forecasts = {None: RiskForecast.from_model(fitted, securities)}
+        for a in scales:
+            forecasts[a] = RiskForecast.from_model(fitted, securities, eigen_scale=a,
+                                                   eigen_one_sided=one_sided)
+        # Day t's statistics from the forecasts as of t - 1, so the multipliers as of t read
+        # nothing after t's close.
+        regime_step(histories, previous, fitted, t, dates, returns, inputs.caps, membership)
+        previous = (t, forecasts)
+        test.add(t, forecasts[None].regime_adjusted(*regime_multipliers(histories, None,
+                                                                        own_regime)))
         for a, variant in variants.items():
-            variant.add(t, RiskForecast.from_model(fitted, securities, eigen_scale=a))
+            variant.add(t, forecasts[a].regime_adjusted(*regime_multipliers(histories, a,
+                                                                            own_regime)))
+        for pair, variant in regime_variants.items():
+            variant.add(t, forecasts[None].regime_adjusted(*regime_multipliers(histories, None,
+                                                                               pair)))
         if fitted.notes.eigen is not None:
             eigen = fitted.notes.eigen
             simulated.append((eigen.bias, eigen.standard_error, eigen.seconds))
         progress(count + 1, len(rows))
     run = test.result()
     eigen_runs = {a: variant.result() for a, variant in variants.items()}
+    regime_runs = {pair: variant.result() for pair, variant in regime_variants.items()}
     minutes = (time.monotonic() - began) / 60
     run_caps = inputs.caps[[at[d] for d in run.dates]]
+    tests = 1 + len(scales) + len(regime_pairs)
     print(f"  {len(run.dates)} refits in {minutes:.1f} min"
           + (f", {60 * minutes / len(run.dates):.2f} s a refit with its eigenfactor simulation "
-             f"({np.mean([s for _, _, s in simulated]):.2f} s of it) and {len(scales) + 1} "
+             f"({np.mean([s for _, _, s in simulated]):.2f} s of it) and {tests} "
              f"tests" if simulated else "")
+          + (f", {60 * minutes / len(run.dates):.2f} s a refit with {tests} tests"
+             if regime_pairs and not simulated else "")
           + f"; the factor covariance as the engine uses it, repaired to positive semi-definite "
           f"at the configured floor, on {int(run.repaired.sum())} of the {len(run.dates)} dates; "
           f"{run.dropped} member-day(s) with a forecast and no next-day return left out of every "
@@ -1093,9 +1248,20 @@ def bias_section(
         _report_horizons(run, groups, member_stats or [], securities)
     if eigen_runs:
         _report_eigen(run, eigen_runs, simulated, options["eigen_adjustment"], groups,
-                      member_stats or [], securities)
+                      member_stats or [], securities, one_sided, own_regime)
+    if regime_runs:
+        _report_regime(run, regime_runs, histories[None], own_regime, tested, groups,
+                       member_stats or [], securities)
+    if own_regime != (None, None):
+        # The run's own forecast, as of the last date: the last day's statistics from the last
+        # forecast tested and the full run's own factor returns that day.
+        final = {None: copy.deepcopy(histories[None])}
+        regime_step(final, (previous[0], {None: previous[1][None]}), model, len(dates) - 1, dates,
+                    returns, inputs.caps, membership)
+        report_regime_forecast(model, final[None], own_regime, dates[-1])
     if args.bias_out:
-        _save_bias(args.bias_out, run, run_caps, horizon, eigen_runs, simulated)
+        _save_bias(args.bias_out, run, run_caps, horizon, eigen_runs, simulated, regime_runs,
+                   histories)
 
 
 def ordinal(n: int) -> str:
@@ -1260,12 +1426,26 @@ def _halves(run) -> dict[str, slice]:
     }
 
 
-def _eigen_reading(run, part, groups, columns) -> dict[str, float]:
-    """One test's one-day statistics over a part of its forecast dates (a slice)."""
+REGIME_CRITERION = ("the mean of three MRADs -- each the mean absolute deviation from one of the "
+                    "rolling 12-month windows' statistics, over the part's own windows: the broad "
+                    "portfolios' (the index cap-weighted and equally weighted, the smallest 85 "
+                    "and the largest 50, their mean), the minimum-variance portfolios' (long-only "
+                    "and unconstrained, their mean) and every member's singly (their median)")
+"""How the volatility regime adjustment's half-lives are chosen (midoffice15's brief), written
+before its run: at one day, on the test's first half, the second half reported beside it -- a
+regime adjustment is for the level of each year's forecasts, which the rolling windows read."""
+
+
+def _reading(run, part, groups, columns) -> dict[str, float]:
+    """One test's one-day statistics over a part of its forecast dates (a slice): what the eigen
+    and the regime reports read."""
     names = list(run.names)
 
+    def full(row):
+        return bias_statistics(run.forecast[row, part], run.realised[row, part])
+
     def stat(row):
-        return bias_statistics(run.forecast[row, part], run.realised[row, part]).statistic
+        return full(row).statistic
 
     k = run.eigen_forecast.shape[0]
     eigen = np.array([bias_statistics(run.eigen_forecast[r, part],
@@ -1283,11 +1463,13 @@ def _eigen_reading(run, part, groups, columns) -> dict[str, float]:
             run, f"minimum variance, {label}", part)[1]
     out["the criterion"] = 0.5 * (out["eigenportfolios, mean abs(bias - 1)"]
                                   + out["minimum variance, mean abs(bias - 1)"])
-    for name in run.names[:4]:
-        out[name] = stat(names.index(name))
-    members = [bias_statistics(run.member_forecast[part, j], run.member_realised[part, j])
-               for j in columns]
-    members = np.array([s.statistic for s in members if s.n >= BIAS_MIN_FORECASTS])
+    broad = [full(names.index(name)) for name in run.names[:4]]
+    for name, stats in zip(run.names[:4], broad):
+        out[name] = stats.statistic
+    tested = [bias_statistics(run.member_forecast[part, j], run.member_realised[part, j])
+              for j in columns]
+    tested = [s for s in tested if s.n >= BIAS_MIN_FORECASTS]
+    members = np.array([s.statistic for s in tested])
     out["members, median"] = float(np.median(members)) if members.size else float("nan")
     out["members, mean abs(bias - 1)"] = (float(np.mean(np.abs(members - 1.0)))
                                           if members.size else float("nan"))
@@ -1297,21 +1479,37 @@ def _eigen_reading(run, part, groups, columns) -> dict[str, float]:
     for family in ("long-only", "long-short"):
         rows = [i for i, n in enumerate(names) if n.startswith(f"random {family} ")]
         out[f"random {family}, median"] = float(np.median([stat(i) for i in rows]))
+    # The rolling 12-month windows' mean absolute deviation from one (midoffice15).
+    optimisers = [full(names.index(f"minimum variance, {label}"))
+                  for label in ("long-only", "unconstrained")]
+    rolled = np.array([s.mrad for s in tested if np.isfinite(s.mrad)])
+    out["broad portfolios, mean MRAD"] = float(np.mean([s.mrad for s in broad]))
+    out["minimum variance, mean MRAD"] = float(np.mean([s.mrad for s in optimisers]))
+    out["members, median MRAD"] = float(np.median(rolled)) if rolled.size else float("nan")
+    out["the regime criterion"] = float(np.mean([out["broad portfolios, mean MRAD"],
+                                                 out["minimum variance, mean MRAD"],
+                                                 out["members, median MRAD"]]))
     return out
 
 
-def _report_eigen(run, eigen_runs, simulated, own, groups, member_stats, securities) -> None:
+def _report_eigen(run, eigen_runs, simulated, own, groups, member_stats, securities,
+                  one_sided=False, own_regime=(None, None)) -> None:
     """The eigenfactor risk adjustment at every scale tested, at one day: what it is for -- the
     eigenportfolios and the minimum-variance portfolios -- and what it should leave alone, over
-    the whole test and each half; a chosen on the first half."""
+    the whole test and each half; a chosen on the first half. Under the model's own volatility
+    regime adjustment each scale is levelled again by its own forecasts' history (midoffice15)."""
     lam = np.array([b for b, _, _ in simulated])
     errors = np.array([e for _, e, _ in simulated])
     seconds = np.array([s for _, _, s in simulated])
     k = lam.shape[1]
+    shape = "max(1, a (lambda - 1) + 1)^2, one-sided" if one_sided else "(a (lambda - 1) + 1)^2"
     print(f"\n  The eigenfactor risk adjustment (Menchero, Wang and Orr; USE4) at one day: each "
-          f"eigenvalue of the day's factor covariance scaled by (a (lambda - 1) + 1)^2, the "
+          f"eigenvalue of the day's factor covariance scaled by {shape}, the "
           f"eigenportfolios tested in the unadjusted covariance's eigenbasis; the simulation "
-          f"{seconds.mean():.2f} s a refit ({seconds.min():.2f} to {seconds.max():.2f})")
+          f"{seconds.mean():.2f} s a refit ({seconds.min():.2f} to {seconds.max():.2f})"
+          + (f"; on the model's volatility regime adjustment, {regime_label(own_regime)}, each "
+             f"scale's factor multiplier from the history of its own forecasts' bias statistics"
+             if own_regime != (None, None) else ""))
     print(f"  lambda by rank over the {len(lam)} dates, the mean (min to max): "
           + ", ".join(f"{r + 1}: {lam[:, r].mean():.3f} ({lam[:, r].min():.3f}-"
                       f"{lam[:, r].max():.3f})" for r in (0, 1, 2, 4, 9, 14, 19))
@@ -1324,22 +1522,180 @@ def _report_eigen(run, eigen_runs, simulated, own, groups, member_stats, securit
     parts = {f"the whole test ({run.dates[0]} to {run.dates[-1]}, {n})": slice(0, n),
              **_halves(run)}
     columns = [list(securities).index(code) for code, _ in member_stats]
-    readings = {label: {a: _eigen_reading(tests[a], part, groups, columns) for a in order}
+    readings = {label: {a: _reading(tests[a], part, groups, columns) for a in order}
                 for label, part in parts.items()}
     rows = list(next(iter(next(iter(readings.values())).values())))
     for label, by_scale in readings.items():
         print(f"\n  {label}, by a ({own:g} the model):")
-        print(f"  {'':<42}" + "".join(f" {f'a = {a:g}':>9}" for a in order))
+        print(f"  {'':<48}" + "".join(f" {f'a = {a:g}':>9}" for a in order))
         for row in rows:
-            print(f"  {row:<42}" + "".join(f" {by_scale[a][row]:>9.3f}" for a in order))
+            print(f"  {row:<48}" + "".join(f" {by_scale[a][row]:>9.3f}" for a in order))
     first, second = list(readings.values())[1], list(readings.values())[2]
-    chosen = min(order, key=lambda a: first[a]["the criterion"])
-    print(f"\n  a chosen on the first half by the criterion -- {EIGEN_CRITERION}: a = "
-          f"{chosen:g} ({first[chosen]['the criterion']:.3f}; the model's "
-          f"{first[own]['the criterion']:.3f}); on the second half it reads "
-          f"{second[chosen]['the criterion']:.3f} against the model's "
-          f"{second[own]['the criterion']:.3f}, the best there a = "
-          f"{min(order, key=lambda a: second[a]['the criterion']):g}")
+    for criterion, key in ((EIGEN_CRITERION, "the criterion"),
+                           (REGIME_CRITERION, "the regime criterion")):
+        chosen = min(order, key=lambda a: first[a][key])
+        print(f"\n  a chosen on the first half by {key} -- {criterion}: a = "
+              f"{chosen:g} ({first[chosen][key]:.3f}; the model's "
+              f"{first[own][key]:.3f}); on the second half it reads "
+              f"{second[chosen][key]:.3f} against the model's "
+              f"{second[own][key]:.3f}, the best there a = "
+              f"{min(order, key=lambda a: second[a][key]):g}")
+
+    # The minimum-variance portfolios' realised volatility, first (midoffice15's brief): the
+    # optimiser realising less risk is what a shape adjustment is for.
+    def realised(reading):
+        return 0.5 * (reading["minimum variance, long-only: realised vol, %"]
+                      + reading["minimum variance, unconstrained: realised vol, %"])
+
+    chosen = min(order, key=lambda a: realised(first[a]))
+    print(f"\n  a chosen on the first half by the minimum-variance portfolios' realised "
+          f"volatility, the mean of the two: a = {chosen:g} ({realised(first[chosen]):.2f}% a "
+          f"year; the model's {realised(first[own]):.2f}%); on the second half "
+          f"{realised(second[chosen]):.2f}% against the model's {realised(second[own]):.2f}%, "
+          f"the lowest there a = {min(order, key=lambda a: realised(second[a])):g}")
+
+
+REGIME_COLUMNS = (
+    ("index", 0), ("equal", 1), ("small", 2), ("large", 3),
+    ("mv LO", "minimum variance, long-only"),
+    ("vol", "minimum variance, long-only: realised vol, %"),
+    ("mv U", "minimum variance, unconstrained"),
+    ("vol", "minimum variance, unconstrained: realised vol, %"),
+    ("members", "members, median"), ("eigen", "eigenportfolios, mean abs(bias - 1)"),
+    ("MRAD b", "broad portfolios, mean MRAD"), ("MRAD mv", "minimum variance, mean MRAD"),
+    ("MRAD m", "members, median MRAD"), ("crit", "the regime criterion"),
+)
+"""The regime report's columns: the broad portfolios (by position in the run's names), the
+minimum-variance portfolios with their realised volatility, the members' median statistic, the
+eigenportfolios' mean abs(bias - 1), the three MRADs and the criterion."""
+
+
+def regime_path(history, side, half_life, n) -> np.ndarray:
+    """The multiplier each of a test's n forecast dates carried on `side`: one on the first, which
+    has no history, and as of each later date from the history through it."""
+    path = history.path(side, half_life)[: n - 1]
+    return np.concatenate([[1.0], path])
+
+
+def _daily_moves(values: np.ndarray) -> np.ndarray:
+    """|d ln x| between consecutive forecast dates, along the first axis, nan where either is."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.abs(np.diff(np.log(values), axis=0))
+
+
+def _report_regime(run, regime_runs, history, own, tested, groups, member_stats,
+                   securities) -> None:
+    """The volatility regime adjustment at every setting tested, at one day (midoffice15): each
+    day's two bias statistics, the multipliers' path over the test, how much each setting moves
+    the forecasts from day to day, and every setting over the whole test and each half; the
+    half-lives chosen on the first half by `REGIME_CRITERION`, the second half beside it."""
+    tests = {own: run, **regime_runs}
+    order = sorted(tests, key=lambda p: tuple(-1.0 if h is None else h for h in p))
+    n = len(run.dates)
+    halves = _halves(run)
+    parts = {f"the whole test ({run.dates[0]} to {run.dates[-1]}, {n})": slice(0, n), **halves}
+    at = {d: i for i, d in enumerate(run.dates)}
+    rows_of = np.array([at[d] for d in history.dates])
+    squared = {side: np.array(history.squared(side)) for side in ("factor", "specific")}
+    print(f"\n  The volatility regime adjustment (Menchero, Orr and Wang; USE4) at one day: each "
+          f"day's factor cross-sectional bias statistic B_F, the root mean square over the "
+          f"{int(np.median(history.factors))} factors of each factor's return over its volatility "
+          f"forecast the day before, unadjusted, and the specific B_S over the members' specific "
+          f"returns, cap-weighted ({int(np.median(history.members))} members a day at the "
+          f"median, an effective number of {np.median(history.effective):.0f}); each side's "
+          f"multiplier the square root of B^2's exponentially weighted mean through the forecast "
+          f"date, one until a side has {history.min_days} days of history -- the test's first "
+          f"{history.min_days} forecast dates, {run.dates[0]} to "
+          f"{run.dates[history.min_days - 1]}, unadjusted")
+    print(f"  the history: {len(history)} days, {history.dates[0]} to {history.dates[-1]} -- "
+          f"each forecast date's own, but the first's")
+    print(f"  {'mean of B^2':<18} {'F':>7} {'S':>7}")
+    for label, part in parts.items():
+        inside = (rows_of >= part.start) & (rows_of < part.stop)
+        print(f"  {label.split(' (')[0]:<18} {squared['factor'][inside].mean():>7.3f} "
+              f"{squared['specific'][inside].mean():>7.3f}")
+    quarters: dict[str, list[int]] = {}
+    for k, d in enumerate(history.dates):
+        quarters.setdefault(f"{d.year} Q{(d.month - 1) // 3 + 1}", []).append(k)
+    print("  by calendar quarter, B_F^2 / B_S^2: " + "; ".join(
+        f"{q} {squared['factor'][ks].mean():.2f}/{squared['specific'][ks].mean():.2f}"
+        for q, ks in quarters.items()))
+
+    sides = [("factor", h) for h in tested] + [("specific", h) for h in tested]
+    paths = {(side, h): regime_path(history, side, h, n) for side, h in sides}
+    print("\n  The multipliers' path: as of each calendar quarter's last forecast date, lambda on "
+          "each side at each half-life")
+    print(f"  {'':<17}" + "".join(f" {('F ' if side == 'factor' else 'S ') + f'{h:g}':>7}"
+                                  for side, h in sides))
+    last_of: dict[str, int] = {}
+    for i, d in enumerate(run.dates):
+        last_of[f"{d.year} Q{(d.month - 1) // 3 + 1}"] = i
+    for i in last_of.values():
+        print(f"  {str(run.dates[i]):<17}" + "".join(f" {paths[key][i]:>7.3f}" for key in sides))
+    for label, pick in (("min", np.argmin), ("max", np.argmax)):
+        where = [int(pick(paths[key])) for key in sides]
+        print(f"  {label:<17}" + "".join(f" {paths[key][i]:>7.3f}" for key, i in zip(sides, where))
+              + "   on " + ", ".join(str(run.dates[i]) for i in where))
+    for label, part in halves.items():
+        name = "mean, " + label.split(" (")[0].removeprefix("the ")
+        print(f"  {name:<17}" + "".join(f" {paths[key][part].mean():>7.3f}" for key in sides))
+
+    index_row = run.names.index("the index, cap-weighted")
+    print("\n  Day to day: how much each setting moves the forecasts -- the median absolute change "
+          "in log forecast volatility from one forecast date to the next (and its 95th "
+          "percentile), for the cap-weighted index and for every member singly (the median of "
+          "each one's median), and the multipliers' own")
+    print(f"  {'':<14} {'index':>7} {'p95':>7} {'members':>8} {'p95':>7} {'lambda_F':>9} "
+          f"{'lambda_S':>9}")
+    for pair in order:
+        r = tests[pair]
+        idx = _daily_moves(r.forecast[index_row])
+        idx = idx[np.isfinite(idx)]
+        moves = _daily_moves(r.member_forecast)
+        enough = np.isfinite(moves).sum(axis=0) >= 2
+        per = np.nanmedian(moves[:, enough], axis=0)
+        p95 = np.nanpercentile(moves[:, enough], 95, axis=0)
+        lam = [regime_path(history, side, h, n) if h is not None else np.ones(n)
+               for side, h in zip(("factor", "specific"), pair)]
+        print(f"  {regime_label(pair) + (' *' if pair == own else ''):<14} "
+              f"{np.median(idx):>7.2%} {np.percentile(idx, 95):>7.2%} {np.median(per):>8.2%} "
+              f"{np.median(p95):>7.2%} "
+              + " ".join(f"{np.median(_daily_moves(x)[history.min_days:]):>9.2%}" for x in lam))
+
+    columns = [list(securities).index(code) for code, _ in member_stats]
+    readings = {label: {p: _reading(tests[p], part, groups, columns) for p in order}
+                for label, part in parts.items()}
+
+    def cell(reading, key):
+        return reading[run.names[key]] if isinstance(key, int) else reading[key]
+
+    for label, by_setting in readings.items():
+        print(f"\n  {label}, by setting ({regime_label(own)} the model, *): the statistics, the "
+              f"optimiser's realised volatility % a year, the MRADs and the criterion")
+        print(f"  {'':<14}" + "".join(f" {name:>7}" for name, _ in REGIME_COLUMNS))
+        for pair in order:
+            print(f"  {regime_label(pair) + (' *' if pair == own else ''):<14}"
+                  + "".join(f" {cell(by_setting[pair], key):>7.3f}" for _, key in REGIME_COLUMNS))
+    first, second = list(readings.values())[1], list(readings.values())[2]
+    key = "the regime criterion"
+    chosen = min(order, key=lambda p: first[p][key])
+    best = min(order, key=lambda p: second[p][key])
+    print(f"\n  half-lives chosen on the first half by the criterion -- {REGIME_CRITERION}: "
+          f"{regime_label(chosen)} ({first[chosen][key]:.3f}; the model's {first[own][key]:.3f}); "
+          f"on the second half it reads {second[chosen][key]:.3f} against the model's "
+          f"{second[own][key]:.3f}, the best there {regime_label(best)}")
+    for side, index in (("factor", 0), ("specific", 1)):
+        alone = [p for p in order if p[1 - index] is None]
+        best = min(alone, key=lambda p: first[p][key])
+        print(f"  the {side} side alone, the other off: {regime_label(best)} on the first half "
+              f"({first[best][key]:.3f}), {second[best][key]:.3f} on the second, the best there "
+              f"{regime_label(min(alone, key=lambda p: second[p][key]))}")
+
+
+def _regime_suffix(pair) -> str:
+    """A setting's key in --bias-out: _rF<h>S<h>, x for a side off."""
+    f, s = ("x" if h is None else f"{h:g}" for h in pair)
+    return f"_rF{f}S{s}"
 
 
 def _bias_arrays(run, suffix: str = "", members: bool = True) -> dict[str, np.ndarray]:
@@ -1364,23 +1720,37 @@ def _bias_arrays(run, suffix: str = "", members: bool = True) -> dict[str, np.nd
     return out
 
 
-def _save_bias(path, run, caps, horizon, eigen_runs=None, simulated=None) -> None:
+def _save_bias(path, run, caps, horizon, eigen_runs=None, simulated=None, regime_runs=None,
+               histories=None) -> None:
     """Every forecast and outcome, for comparing runs: the daily ones, and each horizon's
     outcomes with the windows overlapping (its forecast the daily one times sqrt(h); apart,
     every h-th date's from the first). Under the eigenfactor adjustment's other scales, each
     test's arrays too, keyed `_a<scale>` -- but its members' outcomes, which are the model's --
-    and the simulation by date."""
+    and the simulation by date; under the volatility regime adjustment's settings, each one's
+    keyed `_rF<h>S<h>` the same way, and every history's daily statistics, squared."""
     extra: dict[str, np.ndarray] = {}
-    for a, variant in (eigen_runs or {}).items():
-        # The same members on the same days, only the covariance changed.
+    keyed = [(f"a = {a:g}", f"_a{a:g}", v) for a, v in (eigen_runs or {}).items()]
+    keyed += [(regime_label(p), _regime_suffix(p), v) for p, v in (regime_runs or {}).items()]
+    for label, suffix, variant in keyed:
+        # The same members on the same days, only the forecast changed.
         if not (_same(variant.member_realised, run.member_realised)
                 and all(_same(variant.member_horizon_realised[h], run.member_horizon_realised[h])
                         for h in run.horizons)):
-            raise SystemExit(f"  the run stops: the members' outcomes at a = {a:g} are not the "
+            raise SystemExit(f"  the run stops: the members' outcomes at {label} are not the "
                              f"model's")
-        extra.update(_bias_arrays(variant, f"_a{a:g}", members=False))
+        extra.update(_bias_arrays(variant, suffix, members=False))
     if eigen_runs:
         extra["eigen_scales"] = np.array(sorted(eigen_runs), dtype=float)
+    if regime_runs:
+        extra["regime_settings"] = np.array([[np.nan if h is None else h for h in p]
+                                             for p in regime_runs], dtype=float)
+    for key, history in (histories or {}).items():
+        tag = "" if key is None else f"_a{key:g}"
+        extra[f"regime_dates{tag}"] = np.array([str(d) for d in history.dates])
+        extra[f"regime_factor_squared{tag}"] = np.array(history.factor_squared)
+        extra[f"regime_specific_squared{tag}"] = np.array(history.specific_squared)
+        extra[f"regime_members{tag}"] = np.array(history.members)
+        extra[f"regime_effective{tag}"] = np.array(history.effective)
     if simulated:
         extra["eigen_bias"] = np.array([b for b, _, _ in simulated])
         extra["eigen_standard_error"] = np.array([e for _, e, _ in simulated])
@@ -1534,11 +1904,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--eigen-draws", type=int, default=EIGEN_DRAWS, metavar="M",
                         help=f"the eigenfactor simulation's histories per covariance (default "
                              f"{EIGEN_DRAWS})")
+    parser.add_argument("--eigen-one-sided", action="store_true",
+                        help="the eigenfactor risk adjustment one-sided, each eigenvalue scaled "
+                             "by max(1, A (lambda - 1) + 1)^2, so none is lowered (midoffice15): "
+                             "for --eigen-adjustment and --bias-eigen-scales alike")
+    parser.add_argument("--regime-factor-half-life", type=half_life_or_none, default=None,
+                        metavar="H",
+                        help="the volatility regime adjustment's factor side (Menchero, Orr and "
+                             "Wang; USE4): the factor covariance scaled by lambda_F^2, the "
+                             "exponentially weighted mean on this half-life of each day's squared "
+                             "factor cross-sectional bias statistic, read from the forecasts made "
+                             "the day before; one until it has "
+                             f"{REGIME_MIN_DAYS} days of history; needs the model's forecast as of "
+                             "every day from the bias test's first, so a refit of each, about "
+                             "eight minutes; off by default")
+    parser.add_argument("--regime-specific-half-life", type=half_life_or_none, default=None,
+                        metavar="H",
+                        help="the volatility regime adjustment's specific side: each specific "
+                             "variance scaled by lambda_S^2, the same over the members' specific "
+                             "returns, cap-weighted; off by default")
     parser.add_argument("--bias-eigen-scales", type=scale_list, default=(), metavar="A,A",
                         help="with --bias, the eigenfactor risk adjustment at these scales too, "
                              "each tested beside the model and one simulation per forecast date "
                              "serving them all; read at one day over the whole test and each "
                              "half, and kept in --bias-out")
+    parser.add_argument("--bias-regime-half-lives", type=half_life_list, default=(),
+                        metavar="H,H",
+                        help="with --bias, the volatility regime adjustment at these half-lives "
+                             "too, every pairing of a factor side and a specific side -- either "
+                             "off among them -- each tested beside the model, one pass serving "
+                             "them all; read at one day over the whole test and each half, and "
+                             "kept in --bias-out")
     parser.add_argument("--bias-horizons", type=horizon_list, default=(), metavar="H,H",
                         help="with --bias, more horizons in trading days to evaluate every "
                              "forecast at, beside one day and the model's own, comma-separated; "
@@ -1564,6 +1960,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--eigen-draws must be at least two; got {args.eigen_draws}")
     if args.bias_eigen_scales and args.sampling_correction:
         parser.error("--bias-eigen-scales needs the covariance without --sampling-correction")
+    if args.eigen_one_sided and args.eigen_adjustment is None and not args.bias_eigen_scales:
+        parser.error("--eigen-one-sided shapes the eigenfactor risk adjustment: give "
+                     "--eigen-adjustment or --bias-eigen-scales")
+    if args.bias_regime_half_lives and not args.bias:
+        parser.error("--bias-regime-half-lives tests beside the model in --bias")
+    if args.bias_regime_half_lives and args.bias_eigen_scales:
+        parser.error("--bias-regime-half-lives and --bias-eigen-scales are separate passes: "
+                     "test the regime half-lives first, then the eigen scales on the model's "
+                     "own --regime-factor-half-life and --regime-specific-half-life")
     if args.correlation_lags is not None and args.correlation_half_life is None:
         parser.error("--correlation-lags needs the two-half-life covariance, not "
                      "--correlation-half-life none")
@@ -1899,6 +2304,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.eigen_adjustment is not None:
         options.update(eigen_adjustment=args.eigen_adjustment, eigen_draws=args.eigen_draws)
+        if args.eigen_one_sided:
+            options.update(eigen_one_sided=True)
     model = estimate_cross_sectional_model(return_panel, indices, **options)
     notes = model.notes
     print(f"  {model.describe()}")
@@ -1914,8 +2321,9 @@ def main(argv: list[str] | None = None) -> int:
               "regressions by sqrt(1 + h): the sampling-error correction's specific side")
     if notes.eigen is not None:
         eigen, a = notes.eigen, notes.eigen_adjustment
-        gamma = eigen.scales(a)
+        gamma = eigen.scales(a, notes.eigen_one_sided)
         print(f"  the eigenfactor risk adjustment, a = {a:g}"
+              + (", one-sided" if notes.eigen_one_sided else "")
               + (" (simulated, nothing scaled)" if not a else "")
               + f": lambda by rank from {eigen.draws} histories simulated from the factor "
               f"covariance over its {eigen.n_periods} periods and re-estimated by its own "
@@ -2278,6 +2686,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.bias:
         bias_section(args, panel, market, membership, codes, merges, inputs, model, options,
                      horizon)
+    elif args.regime_factor_half_life is not None or args.regime_specific_half_life is not None:
+        regime_section(args, panel, membership, inputs, model, options)
     return 0
 
 

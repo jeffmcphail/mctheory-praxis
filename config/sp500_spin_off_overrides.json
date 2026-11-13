@@ -1,5 +1,5 @@
 {
-  "description": "Rulings on the S&P 500 panel on securities' total returns where a distribution of another company's shares -- a spin-off -- is not carried, or carried wrongly, by the cache's records. Rulings, not vendor data, so in the repo rather than in data/, as the count rulings are carried. Each entry: the parent's key, label and name; the child's ticker and composite FIGI; the ratio, the child's shares a parent share; the record, distribution and ex-dates; 'split', a split the parent made with the distribution that the cache does not record, applied to its count; 'child_count' 'parent', a child whose records carry no count seeded with the parent's on the record date at the ratio until Polygon carries one; 'supersedes', count overrides this ruling replaces; and the evidence. On the ex-date the build sets the parent's total return to (w (C_t + D_t) + k V) / C_s - 1, C its raw closes that day and the priced day before, D its cash that day, V the child's close that day -- or its first after, where it had none -- and w the splits it applies between; the stitched prices are left as Polygon has them. Read by scripts/build_sp500_securities.py, which lists every ruling it applies (midoffice14).",
+  "description": "Rulings on the S&P 500 panel on securities' total returns where a distribution of another company's shares -- a spin-off -- is not carried, or carried wrongly, by the cache's records. Rulings, not vendor data, so in the repo rather than in data/, as the count rulings are carried. Each entry: the parent's key, label and name; the child's ticker and composite FIGI; the ratio, the child's shares a parent share; the record, distribution and ex-dates; 'split', a split the parent made with the distribution that the cache does not record, applied to its count; 'child_count' 'parent', a child whose records carry no count seeded with the parent's on the record date at the ratio until Polygon carries one, and 'retained' the share of the child the parent kept, the seeded count the shares distributed over the rest (midoffice15); 'supersedes', count overrides this ruling replaces; the evidence; and 'held', a ruling held until it is understood, with why -- read and listed by the build, never applied (midoffice15). On the ex-date the build sets the parent's total return to (w (C_t + D_t) + k V) / C_s - 1, C its raw closes that day and the priced day before, D its cash that day, V the child's close that day -- or its first after, where it had none -- and w the splits it applies between; the stitched prices are left as Polygon has them. Read by scripts/build_sp500_securities.py, which lists every ruling it applies (midoffice14).",
   "entries": [
     {
       "parent": "BBG000J6XT05",
@@ -129,7 +129,7 @@
       "distributed": "2025-02-07",
       "ex_date": "2025-01-21",
       "evidence": "Public record: Millrose's S-11/A and 424B1: one Millrose Class A (MRP) share for every two Lennar Class A or Class B shares held at the close on the record date, 2025-01-21, distributed 2025-02-07; 154,180,454 Class A and 11,819,811 Class B shares outstanding after it. The record date is its ex-date here, as the gap shows. The data: LEN's raw close 141.54 on 2025-01-17, 133.14 on 2025-01-21 (open 136.01); its count 238,810,000 the day before and 238,810,000 that day; the cache records a price-only adjustment of 1000-to-1033 there, which the stitched prices keep; MRP's raw close 26.74 on 2025-02-07, its first, none on the ex-date (Millrose Properties, Inc.).",
-      "ruled": "midoffice14 brief (Jeff, 2026-11-12), item 2: LEN's adjustment of 2025-01-21, checked -- carried wrongly, the date right and the value a third of the distribution's; carried by item 1's rule at Millrose's first close"
+      "ruled": "midoffice14 brief (Jeff, 2026-11-12), item 2: LEN's adjustment of 2025-01-21, checked -- carried wrongly, the date right and the value a third of the distribution's; carried by item 1's rule at Millrose's first close; kept by midoffice15's ruling 4 (Jeff, 2026-11-12)"
     },
     {
       "parent": "BBG000BWNFZ9",
@@ -155,7 +155,7 @@
       "distributed": "2025-05-30",
       "ex_date": "2025-05-16",
       "evidence": "Public record: Jacobs' release of 2025-04-30 and the OCC notice: a special dividend of Jacobs' remaining 7,299,065 Amentum shares, 0.060835 of a share for each of the 119,981,839 Jacobs shares outstanding on the record date, 2025-05-16 -- the NYSE's ex-distribution date -- paid 2025-05-30. The data: J's raw close 128.80 on 2025-05-15, 129.17 on 2025-05-16 (open 128.37); its count 122,540,000 the day before and 122,540,000 that day; the cache records no split or distribution under it that day; AMTM's raw close 21.84 on 2025-05-16 (no record).",
-      "ruled": "midoffice14, item 2: from the public record, a pair the brief's list does not name; carried by item 1's rule -- Code's reading, for Jeff's review"
+      "ruled": "midoffice14, item 2: from the public record, a pair the brief's list does not name; carried by item 1's rule -- Code's reading, for Jeff's review; kept by midoffice15's ruling 1 (Jeff, 2026-11-12)"
     },
     {
       "parent": "BBG000BFT2L4",
@@ -181,7 +181,7 @@
       "distributed": "2026-02-09",
       "ex_date": "2026-02-10",
       "evidence": "Public record: BD's and Waters' completion releases of 2026-02-09: BD's Biosciences and Diagnostic Solutions spun off and merged into Waters, a Reverse Morris Trust; BD's holders of record on 2026-02-05 received approximately 0.135 Waters (WAT) shares a BD share, 39.2% of Waters fully diluted. The ratio is the releases' rounded one. The data: BDX's raw close 207.39 on 2026-02-09, 171.68 on 2026-02-10 (open 165.98); its count 284,908,096 the day before and 284,908,096 that day; the cache records no split or distribution under it that day; WAT's raw close 327.02 on 2026-02-10 (no record).",
-      "ruled": "midoffice14, item 2: from the public record, a pair the brief's list does not name; carried by item 1's rule -- Code's reading, for Jeff's review"
+      "ruled": "midoffice14, item 2: from the public record, a pair the brief's list does not name; carried by item 1's rule -- Code's reading, for Jeff's review; kept by midoffice15's ruling 1 (Jeff, 2026-11-12)"
     },
     {
       "parent": "CIK0001521332",
@@ -194,7 +194,7 @@
       "distributed": "2026-04-01",
       "ex_date": "2026-04-01",
       "evidence": "Public record: Aptiv's release and 8-K of 2026-03-05: one Versigent (VGNT) share for every three Aptiv shares held at the close on 2026-03-17, distributed before the open on 2026-04-01, VGNT WI when-issued from 2026-03-27 and regular-way on the NYSE from 2026-04-01. The data: APTV's raw close 69.44 on 2026-03-31, 62.09 on 2026-04-01 (open 60.16); its count 216,079,411 the day before and 216,079,411 that day; the cache records no split or distribution under it that day; VGNT's raw close 27.85 on 2026-04-01 (Versigent PLC).",
-      "ruled": "midoffice14, item 2: from the public record, a pair the brief's list does not name; carried by item 1's rule -- Code's reading, for Jeff's review"
+      "ruled": "midoffice14, item 2: from the public record, a pair the brief's list does not name; carried by item 1's rule -- Code's reading, for Jeff's review; kept by midoffice15's ruling 1 (Jeff, 2026-11-12)"
     },
     {
       "parent": "BBG000BJF1Z8",
@@ -207,8 +207,9 @@
       "distributed": "2026-06-01",
       "ex_date": "2026-06-01",
       "child_count": "parent",
-      "evidence": "Public record: FedEx's releases and 8-K of May 2026: one FedEx Freight (FDXF) share for every two FedEx shares held on the record date, 2026-05-15, distributed 2026-06-01, FDXF regular-way on the NYSE from that day (FDXF WI when-issued 2026-05-27 to 05-29); FedEx keeps about 19.9% of FedEx Freight. The data: FDX's raw close 411.75 on 2026-05-29, 338.49 on 2026-06-01 (open 325.01); its count 238,606,756 the day before and 238,606,756 that day; the cache records no split or distribution under it that day; FDXF's raw close 149.53 on 2026-06-01 (FedEx Freight Holding Company, Inc.). FDXF's count: its records carry no share-class count in the window, so FDX's on the record date, 238,606,756, times 0.5: 119,303,378, until Polygon carries one (the brief). FedEx kept about 19.9% of FedEx Freight, so FDXF's outstanding count is about 149.5 million -- its weighted count is 149,518,133 on 2026-08-26 -- and the seeded count, the shares distributed, 0.80 of it.",
-      "ruled": "midoffice14 brief (Jeff, 2026-11-12), item 2: a pair it names, not carried; FDXF's count as Vylor's"
+      "evidence": "Public record: FedEx's releases and 8-K of May 2026: one FedEx Freight (FDXF) share for every two FedEx shares held on the record date, 2026-05-15, distributed 2026-06-01, FDXF regular-way on the NYSE from that day (FDXF WI when-issued 2026-05-27 to 05-29); FedEx keeps about 19.9% of FedEx Freight. The data: FDX's raw close 411.75 on 2026-05-29, 338.49 on 2026-06-01 (open 325.01); its count 238,606,756 the day before and 238,606,756 that day; the cache records no split or distribution under it that day; FDXF's raw close 149.53 on 2026-06-01 (FedEx Freight Holding Company, Inc.). FDXF's count: its records carry no share-class count in the window, so FDX's on the record date, 238,606,756, times 0.5: 119,303,378, until Polygon carries one (the brief). FedEx kept 19.9% of FedEx Freight, so the shares distributed, 119,303,378, are 0.801 of its outstanding count: the seeded count is 119,303,378 / 0.801, 148,943,044, the total outstanding as every other count in the panel is (midoffice15's ruling 3 (Jeff, 2026-11-12)). Its weighted counts: 149,518,133 on 2026-08-26, 1.0039 times it; 149,521,266 on 2026-11-03, 1.0039 times it.",
+      "ruled": "midoffice14 brief (Jeff, 2026-11-12), item 2: a pair it names, not carried; FDXF's count as Vylor's; grossed up by FedEx's retained share, midoffice15's ruling 3 (Jeff, 2026-11-12)",
+      "retained": 0.199
     },
     {
       "parent": "BBG000H556T9",
@@ -229,7 +230,7 @@
         }
       ],
       "evidence": "Public record: Honeywell's release of June 2026: one Honeywell Aerospace (HONA) share for every two Honeywell shares held at the close on 2026-06-15, distributed 12:01 a.m. ET on 2026-06-29, and a 1-for-2 reverse split of Honeywell's shares at 12:02 a.m. that day, contingent on the spin-off; HONAV when-issued and HONIV ex-distribution 2026-06-15 to 06-26, HONA regular-way from 2026-06-29. The data: HON's raw close 232.21 on 2026-06-26, 227.80 on 2026-06-29 (open 240.65); its count 635,675,701 the day before and 635,675,701 that day; the cache records no split or distribution under it that day; HONA's raw close 220.19 on 2026-06-29 (Honeywell Aerospace Inc. Common Stock). Its samples: 635,675,701 on 2026-04-13; none on 2026-07-14, whose weighted count, 316,826,559, is HONA's first count exactly -- each old share became half a share of Aerospace and half a share of Honeywell, so the two counts start equal; 316,940,010 on 2026-10-12 and 317,358,518 on 2026-11-03: the counts follow the split. midoffice08's count override read that halving as another security's count; it is Honeywell's own after the reverse split, which this ruling applies, so the override is superseded.",
-      "ruled": "midoffice14, item 2: from the public record, a pair the brief's list does not name; carried by item 1's rule -- Code's reading, for Jeff's review; it supersedes midoffice08's decision 3 on HON's count"
+      "ruled": "midoffice14, item 2: from the public record, a pair the brief's list does not name; carried by item 1's rule -- Code's reading, for Jeff's review; it supersedes midoffice08's decision 3 on HON's count; kept by midoffice15's rulings 1 and 2 (Jeff, 2026-11-12)"
     },
     {
       "parent": "BBG000BP1Q11",
@@ -242,7 +243,8 @@
       "distributed": "2026-07-01",
       "ex_date": "2026-07-01",
       "evidence": "Public record: S&P Global's release of 2026-05-21: one Mobility Global (MBGL) share for each S&P Global share held at the close on 2026-06-15, distributed 12:01 a.m. ET on 2026-07-01, MBGL WI when-issued from about 2026-06-26 and regular-way on the NYSE from 2026-07-01. The data: SPGI's raw close 407.26 on 2026-06-30, 414.97 on 2026-07-01 (open 399.58); its count 303,462,990 the day before and 303,462,990 that day; the cache records no split or distribution under it that day; MBGL's raw close 21.19 on 2026-07-01 (Mobility Global Inc.).",
-      "ruled": "midoffice14, item 2: from the public record, a pair the brief's list does not name; carried by item 1's rule -- Code's reading, for Jeff's review"
+      "ruled": "midoffice14, item 2: from the public record, a pair the brief's list does not name; carried by item 1's rule -- Code's reading, for Jeff's review; held by midoffice15's ruling 1 (Jeff, 2026-11-12)",
+      "held": "The record: S&P Global's release of 2026-05-21 -- two ways to trade SPGI from about 06-26 through 06-30, regular-way with the entitlement and SPGI WI without it -- so 07-01 is the first day SPGI trades without it, the ruled ex-date; unlike Lennar's, the record date is not the ex-date. The data show no gap of Mobility's size on either day. On the record date SPGI opened -0.16% and closed +1.23% against its peers' median -0.09% and +0.54% (MCO, MSCI, ICE, CME, NDAQ, FDS), and the day after +1.39% and +2.16% against +0.82% and +0.11%. On 07-01, Mobility worth 4.98% of SPGI's prior close at its first open and 5.20% at its first close, SPGI opened -1.89% against its peers' +0.74% -- -2.63 points, about half the distribution, the largest such gap from 06-02 to 07-10 (the next -0.80) -- and closed +1.89% against +4.27%; over 07-01 and 07-02 together its raw return, +8.01%, is its peers' (+7.14% to +8.70%, median +7.86%) without the distribution, and +13.53% with it. Neither the record date nor the ex-date shows the distribution in SPGI's raw prices, so the ruling is held until it is understood -- by an outside price for SPGI's regular-way close of 2026-06-30, say; the panel keeps Polygon's +1.89% on 07-01 meanwhile."
     },
     {
       "parent": "BBG00BN969C1",

@@ -384,6 +384,46 @@ half-lives leave 260 and 826 effective observations for 25 factors. Over the bia
 252 to 937 periods, the smallest five average about 1.06 and some large ranks sit below one
 (rank 3 at about 0.97); the simulation takes about half a second a refit.
 
+**One-sided** (midoffice15; `eigen_one_sided`, the run's `--eigen-one-sided`, off by default and
+only with the adjustment), `gamma(k) = max(1, a (lambda(k) - 1) + 1)`: the eigenvalues the
+simulation finds too small are raised, and none is lowered. midoffice13's two-sided adjustment
+lowered the largest, and the minimum-variance portfolios realised more risk under it.
+
+### The volatility regime adjustment
+
+A covariance estimated over a long window forecasts the average volatility of the window behind
+it, so it lags a change of regime -- every portfolio with it, the broad ones most. The bias
+statistics show it by halves (midoffice13 and 14): the cap-weighted index 1.22 in the test's first
+half and 0.75 in its second, the minimum-variance portfolios 1.25 and 1.30 then 0.83 and 0.86. A
+shape adjustment cannot move a level. `regime.RegimeHistory` (midoffice15; Menchero, Orr and Wang
+2011, Barra USE4) reads the model's own out-of-sample record and scales its forecast by it:
+
+- each day t, the factors' cross-sectional bias statistic, the root mean square over the factors
+  of each factor's return over its volatility as forecast at t - 1's close, unadjusted,
+  `B_F(t)^2 = (1/K) sum_k (f_k(t) / sigma_k(t-1))^2`;
+- and the specific returns', over the members, cap-weighted, `B_S(t)^2 = sum_n w_n (u_n(t) /
+  s_n(t-1))^2`, u the member's return less its forecast exposures times the day's factor returns,
+  w its capitalisation at t - 1 over the members with a forecast, a capitalisation and a return;
+- each side's multiplier as of a day T the square root of the squared statistic's exponentially
+  weighted mean through T, on its own half-life, the weights normalised over the days there are;
+- the forecast's factor covariance times `lambda_F(T)^2` and each specific variance times
+  `lambda_S(T)^2` (`bias.RiskForecast.regime_adjusted`).
+
+Out of sample throughout: B(t) is read from the forecast made at t - 1 and the returns of day t,
+so lambda(T) uses nothing after T's close (a test redraws everything after a date and finds the
+history through it, and every multiplier as of it, the same to the bit). The forecasts it reads
+are the model refitted as of each day, the bias test's own, so the history starts the day after
+the test's first forecast, the first date whose covariance has a year of estimated periods; **a
+side's multiplier is one until it has 21 days of history** (`REGIME_MIN_DAYS`), the shortest
+half-life tested, so every half-life starts on the same day and the test's first 21 forecast dates
+are unadjusted. A history of 21 days on a half-life of 84 is near an equal-weighted mean of them.
+
+It is an option, off, on each side separately: the run's `--regime-factor-half-life H` and
+`--regime-specific-half-life H`, each refitting the model as of every day from the bias test's
+first (about eight minutes, or within `--bias`'s own loop); `--bias-regime-half-lives H,H` tests
+every pairing of those half-lives on the two sides, either side off among them, beside the model
+in one pass, each eigen scale's factor side levelled again by its own forecasts' history.
+
 ## The cross-sectional estimator
 
 `crosssectional.py` runs the other direction. Every period, security returns are regressed
@@ -1156,7 +1196,8 @@ cache holds the fetch:
   - **Rulings for what no rule can tell,** in `config/sp500_share_count_overrides.json`, each
     with its evidence: Honeywell's records read as carrying Honeywell Aerospace's count from
     2026-10-12 (midoffice08) -- superseded by the spin-off rulings below, the halving being
-    Honeywell's own reverse split -- and Skydance's carrying none after it took Warner Bros.
+    Honeywell's own reverse split, and that reading wrong (midoffice15's ruling 2; the entry kept
+    as the record, marked so) -- and Skydance's carrying none after it took Warner Bros.
     Discovery. The build lists every entry it uses, and every one a spin-off ruling supersedes.
 - **Spin-offs the total return does not carry** (midoffice14), in
   `config/sp500_spin_off_overrides.json`, each ruling with its evidence, the public record's
@@ -1167,23 +1208,51 @@ cache holds the fetch:
   priced day before, its cash that day, k of the child's shares a parent share at the child's
   close V (its first close after, where it has none that day: Lennar's, whose record date was
   its ex-date), w any split the build applies between -- and the stitched prices keep Polygon's
-  adjusted closes. 19 rulings: 13 of the pairs the brief names that the cache does not carry,
-  CTVA's among them (-83.8% to +4.1%); Lennar's of 2025-01-21, carried at a third of the
-  distribution's value; and five the public record adds -- Jacobs' second Amentum distribution,
-  BD's Waters shares, Aptiv's Versigent, Honeywell's Aerospace and S&P Global's Mobility. The
-  seven Polygon records within 10% of the brief's value are left as carried. Honeywell made a
+  adjusted closes. 19 rulings, 18 applied: 13 of the pairs the brief names that the cache does
+  not carry, CTVA's among them (-83.8% to +4.1%); Lennar's of 2025-01-21, carried at a third of
+  the distribution's value, now at Millrose's first close; and five the public record adds --
+  Jacobs' second Amentum distribution, BD's Waters shares, Aptiv's Versigent and Honeywell's
+  Aerospace, kept (midoffice15's ruling 1), and S&P Global's Mobility, **held**: the record makes
+  2026-07-01 its first ex-distribution day, and SPGI's raw prices show no fall of Mobility's
+  value (5.2%) on it, on its record date or on any day from 06-01 to 07-10 -- over 07-01 and
+  07-02 its raw return, +8.01%, is its six peers' (+7.14% to +8.70%) without the distribution.
+  A held ruling is read and listed and never applied (`held`), its evidence kept until it is
+  understood. The seven Polygon records within 10% of the brief's value are left as carried
+  (midoffice15's ruling 5). Honeywell made a
   1-for-2 reverse split one minute after its Aerospace distribution, which the cache does not
   record and which offsets the price gap: the ruling applies it to the count as a split the gate
   classified, checked by Honeywell's own samples (635,675,701 to 316,940,010, 0.499 times), so
   its count from 2026-06-29 is half the one midoffice08's override carried and its weighted
   check no longer flags. A child whose records carry no count -- Vylor, FedEx Freight -- takes
-  its parent's on the record date at the ratio until Polygon carries one; FedEx kept 19.9% of
-  FedEx Freight, so its seeded count is the shares distributed, 0.80 of its weighted count, and
-  flagged. `--spin-offs none` builds without them, `_listed` to the bit.
+  its parent's on the record date at the ratio until Polygon carries one, over the share the
+  parent did not keep (`retained`): FedEx kept 19.9% of FedEx Freight, so its count is the
+  119,303,378 shares distributed over 0.801, 148,943,044, the total outstanding as every other
+  count is (midoffice15's ruling 3), 0.9962 of its weighted count; Vylor, wholly distributed,
+  668,820,000. `--spin-offs none` builds without them, `_listed` to the bit; the file as
+  midoffice14 left it (d2b2864) builds `_spinoffs` to the bit.
 - **The first-day check**, standing: on each security's first day in the panel, the members
   whose raw price opened more than 1.5 points below SPY's, the three lowest, each with the ruling
   or record that explains it. A spin-off's parent gaps by the child's value on its ex-date, and
   the check shows each of the window's: every parent gap now explained, the other gaps news.
+- **Which series each descriptor reads** (midoffice15's ruling 6). At the defaults, total
+  returns, none reads the stitched prices, so the rulings are not applied to them as price
+  factors:
+
+  | Descriptor | Series |
+  |---|---|
+  | DASTD, CMRA, RSTR; BTSG, HALPHA, SERDP and VLVR's residual sd (the market model) | the total-return index's daily returns, the rulings in them, against the market's total return |
+  | LNCAP, LCAPCB | the raw close times the carried count, the day's own |
+  | LPRI | the raw close, the day's own |
+  | HILO | the day's raw high over its raw low -- the panel's highs and lows are the raw bars', not stitched |
+  | STOM, STOQ, STOA | the traded volumes over the carried counts |
+  | VLVR's dollar volume | the traded volume times the raw close |
+
+  Blanking the stitched prices leaves every default descriptor the same to the bit, and scaling
+  the highs and lows before every ruled ex-date by its price factor moves HILO by 2e-16 and
+  nothing else (`ruling6_series.txt`, the midoffice15 retro). Under `--returns price` the
+  stitched prices are the run's returns and every return descriptor's, by that option's
+  definition: there an unrecorded spin-off is a price fall and a recorded one Polygon's
+  adjustment.
 
 - **A span ends where its security stops trading on an exchange** (midoffice09's ruling 2). A
   span's records say where its ticker trades: from its first sample whose market is not
@@ -1202,8 +1271,9 @@ is an earnings-per-share denominator, an average over a period, not the shares i
 wherever a record carries one, it is set against the count the panel carries that day and
 flagged beyond 10%. It confirms the 1:1 carries of OKE's and XOM's reorganisations (1.0001 and
 0.9920), and the repairs of Quest Diagnostics', Everest's and Starbucks' samples, whose own
-records' weighted counts sit within 0.6% of the count carried through them; it flags Carnival's
-unification (1.118), FedEx Freight's seeded count (1.253), and PG&E's, where both of Polygon's
+records' weighted counts sit within 0.6% of the count carried through them, and FedEx Freight's
+grossed-up seeded count (1.0039; 1.253 on `_spinoffs`, the shares distributed); it flags
+Carnival's unification (1.118), and PG&E's, where both of Polygon's
 counts agree with the sample the error rule removed; on `_listed` it flagged Honeywell's records
 from 2026-07-14 (0.50), which its reverse split explains. Where a record's own share-class count
 is a single class of a company with several -- GOOGL, BRK.B, FOXA -- the weighted count spans
@@ -1237,7 +1307,13 @@ from 5.80% to 6.22%. Total returns raise every industry's mean, from 0.65% (Serv
 lower Volatility's by 0.58%; the high yielders' specific risk falls most, Altria's by 0.58 of a
 point.
 
-Since midoffice14 the default panel is `_spinoffs`: the 19 spin-off rulings change 19 member-day
+Since midoffice15 the default panel is `_revised`: S&P Global's ruling held, which returns its
+2026-07-01 to Polygon's +1.89%, and FedEx Freight's count grossed up over its 109 member-days, and
+nothing else. Mean R-squared moves from 0.293826 to 0.293821; specific risk is 16.56 / 28.98 /
+48.89%; the size pair is unchanged (11.05% and 0.60%). FedEx Freight still lacks Momentum, so its
+count reaches the model only through the standardisation's cap-weighted means.
+
+Since midoffice14 the default panel was `_spinoffs`: the 19 spin-off rulings change 19 member-day
 returns and 223 count member-days (FedEx Freight's 109 and Vylor's 24 seeded, Honeywell's 90
 halved by its reverse split), and nothing else. Mean R-squared moves from 0.293203 to 0.293826;
 specific risk is 16.56 / 28.99 / 48.89% at p10 / median / p90 (16.58 / 28.98 / 48.98%); the size
@@ -1445,6 +1521,67 @@ the volatility regime adjustment is next to address (midoffice13's ruling 3). Th
 portfolios, the industries, the random portfolios and the eigenportfolios move in the third
 decimal or not at all; the parents' own outcomes on their ex-dates go from -7.8 to -41.9 sd
 (J, WDC, BDX, FDX, CTVA) to within 2.4 sd.
+
+**On the revised panel** (midoffice15, S&P Global's ruling held, FedEx Freight's count grossed
+up; the defaults' run D15 against D14): SPGI's 2026-07-01 outcome goes from +3.8 to +1.0 sd, its
+member statistic 1.021 to 1.010; the unconstrained minimum-variance portfolio realises 10.00% a
+year where it realised 10.01%; every other statistic is D14's to the third decimal.
+
+**The volatility regime adjustment, measured** (midoffice15), on the one-day model: every pairing
+of half-lives of 21, 42 and 84 days on the two sides, either side off among them, beside the
+model in one pass (V15, 0.97 s a refit with its 16 tests); its model test equals D15's to the
+bit, and every factor-side setting's eigenportfolio forecasts are the model's times its
+multiplier to 5e-14.
+
+- **The factor side follows the regime.** The factors' squared bias statistic averages 1.33 in
+  the test's first half and 0.90 in the second, 0.56 to 2.10 by quarter; the multiplier at 21 days
+  runs from 0.78 (2025-10-09) to 1.98 (2025-04-10), 1.12 on average in the first half and 0.96
+  in the second (at 42 days 0.86 to 1.63, at 84 days 0.89 to 1.41). It moves the index's forecast
+  from day to day four times as much as the model does: 1.00% at the median, 0.67% at 42 days,
+  0.49% at 84 (the model's 0.27%).
+- **Chosen on the first half by a criterion fixed beforehand** -- the mean of three MRADs, the
+  broad portfolios', the minimum-variance portfolios' and the members' median -- the factor side
+  at 21 days, the specific at 42 (0.094 against the model's 0.172), which holds on the second
+  half (0.128 against 0.141). The factor side at 21 days is the best of the three in both halves,
+  alone or with any specific setting; alone, 0.098 and 0.123.
+- **It brings each year's level toward one:** the broad portfolios' MRAD 0.167 to 0.094 over the
+  test (the first half's 0.165 to 0.068), the minimum-variance portfolios' 0.238 to 0.135; by half
+  the index reads 1.063 and 0.785 (the model's 1.224 and 0.751), the optimiser 1.109 and 1.163
+  then 0.855 and 0.887. Over the whole test the index falls from 1.015 to 0.934, below its band:
+  the factors as a whole were forecast too low (their squared statistic 1.115 over the test) while
+  the market's direction was right.
+- **It cannot reach the calm half's level, which is a shape.** In the second half the market-like
+  eigenportfolio, rank 1, reads 0.780, as the index does, while every other rank reads 0.99 to
+  1.37 -- their mean squared outcome 1.36 against rank 1's 0.61 -- so a single multiplier lowers
+  the market's forecast only as far as the rest allows (0.814), and raises the small ranks' bias.
+- **The optimiser realises a little more risk under it:** 10.13% and 10.19% a year against 9.92%
+  and 10.00%, about 0.2 of a point, in the first half (11.88% against 11.47%), less in the
+  second (8.02% against 8.09%).
+- **The specific side is a level, not a regime.** Its squared statistic, cap-weighted (502 members
+  a day, an effective number of 51), averages 1.09 in both halves, and its multiplier is about 1.04
+  at every half-life throughout: it is the largest members' specific risk forecast too low, which
+  it corrects (the top capitalisation quintile 1.054 to 1.022 at 42 days) by raising every
+  member's, the other four quintiles to 0.95-0.98 and the members' median from 1.003 to 0.976. It
+  helps the criterion in the first half (0.165 against 0.172) and hurts it in the second (0.145
+  against 0.141).
+
+**The eigenvalue adjustment one-sided on the regime adjustment** (midoffice15, VE15): the factor
+side at 21 days and the specific side off the model's own, the eigen scales a = 1, 2, 3 one-sided
+beside it, each scale's factor multiplier from its own forecasts' history (1.21 s a refit with the
+simulation; its model test equals V15's at that setting to the bit, and each scale's eigenportfolio
+forecasts are the model's times the day's one-sided gamma and its own multiplier over the model's
+to 2.4e-14). The eigen adjustment raises the factor volatilities, so each scale's multiplier is
+lower, 1.024, 1.010 and 0.997 on average against the model's 1.039.
+
+- **It shapes the eigenportfolios as it should:** their mean abs(bias - 1) 0.131 to 0.110, 0.092
+  and 0.076; ranks 16 to 20 from 1.22 to 1.08 at a = 3, ranks 21 to 25 from 1.20 to 1.05.
+- **It fails the optimiser's test, first:** the minimum-variance portfolios realise more risk at
+  every a -- long-only 10.13% a year to 10.17%, 10.23% and 10.30%, unconstrained 10.19% to
+  10.26%, 10.33% and 10.40% -- most in the first half (12.22% at a = 3 against 11.88%), a few
+  hundredths less in the second; their statistics do not move (0.99 to 0.99, 1.03 to 1.04).
+- **The rest is level:** the re-levelled multiplier lowers the market direction, the index
+  0.934 to 0.966 at a = 3; the regime criterion 0.105 to 0.107. One-sided as two-sided
+  (midoffice13), the adjustment stays an option, off.
 
 ## Status
 

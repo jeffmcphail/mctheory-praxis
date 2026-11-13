@@ -432,7 +432,13 @@ class SpinOff:
     (`spin_off_splits`), and so enters w. `child_count` "parent": where the child's records carry
     no count, the parent's carried count on the record date times the ratio, from the child's
     first day on or after the ex-date until a sample of its own carries one. `supersedes`: count
-    overrides this ruling replaces, each (key, first, last)."""
+    overrides this ruling replaces, each (key, first, last).
+
+    `retained`, for a seeded count: the share of the child the parent kept, so the child's count
+    is the shares distributed over 1 - retained, to the nearest share -- every count in the panel
+    is the total outstanding (FedEx's 19.9% of FedEx Freight, midoffice15's ruling 3). `held`: a
+    ruling held out until it is understood, with why -- read and listed, never applied (S&P
+    Global's Mobility, whose ruled ex-date the data show no gap on, midoffice15's ruling 1)."""
 
     parent: str
     label: str
@@ -450,14 +456,18 @@ class SpinOff:
     supersedes: tuple[tuple[str, dt.date, dt.date], ...] = ()
     evidence: str = ""
     ruled: str = ""
+    retained: float = 0.0
+    held: str = ""
 
 
 def read_spin_offs(path: Path | str) -> list[SpinOff]:
     """The spin-off overrides file, `config/sp500_spin_off_overrides.json`: rulings with their
     evidence, as the count rulings are carried (midoffice14's brief). Each entry the parent's key,
     label and name, the child's ticker and key, the ratio, the record, distribution and ex-dates,
-    any split the parent made with it, whether the child's count is seeded from the parent's, the
-    count overrides it supersedes, and the evidence."""
+    any split the parent made with it, whether the child's count is seeded from the parent's and
+    the share of the child the parent kept, the count overrides it supersedes, the evidence, and
+    whether it is held (midoffice15). A held ruling is read with the rest: the build lists it and
+    applies only the others."""
     entries = json.loads(Path(path).read_text(encoding="utf-8"))["entries"]
     out = []
     for entry in entries:
@@ -471,6 +481,16 @@ def read_spin_offs(path: Path | str) -> list[SpinOff]:
                              f"{child_count!r}")
         if child_count and not entry.get("child_key"):
             raise ValueError(f"{where}: a seeded count needs the child's key")
+        retained = float(entry.get("retained", 0.0))
+        if not 0.0 <= retained < 1.0:
+            raise ValueError(f"{where}: the share of the child the parent kept is at least 0 and "
+                             f"under 1, not {retained!r}")
+        if retained and not child_count:
+            raise ValueError(f"{where}: a retained share grosses up a seeded count, and this "
+                             f"ruling seeds none")
+        held = entry.get("held", "")
+        if not isinstance(held, str):
+            raise ValueError(f"{where}: a held ruling says why it is held, in words")
         record, distributed, ex = (dt.date.fromisoformat(entry[k])
                                    for k in ("record", "distributed", "ex_date"))
         if distributed < record or ex < record:
@@ -483,13 +503,21 @@ def read_spin_offs(path: Path | str) -> list[SpinOff]:
         out.append(SpinOff(entry["parent"], entry.get("label", entry["parent"]),
                            entry.get("name", ""), entry["child"], entry.get("child_key"), ratio,
                            record, distributed, ex, split, child_count, supersedes,
-                           entry["evidence"], entry.get("ruled", "")))
+                           entry["evidence"], entry.get("ruled", ""), retained=retained,
+                           held=held))
     seen = set()
     for s in out:
         if (s.parent, s.ex_date) in seen:
             raise ValueError(f"{s.label}: two rulings on {s.ex_date}")
         seen.add((s.parent, s.ex_date))
     return out
+
+
+def _refuse_held(spin_offs: Sequence[SpinOff]) -> None:
+    """A held ruling is the build's to list and leave out, never to apply."""
+    held = [f"{s.label} {s.ex_date}" for s in spin_offs if s.held]
+    if held:
+        raise ValueError(f"a held spin-off ruling is not applied: {', '.join(held)}")
 
 
 def spin_off_splits(
@@ -503,7 +531,8 @@ def spin_off_splits(
     share samples (`rebuild.classify`), which must follow it, and not against the raw price,
     which the distribution in the same minute offsets -- Honeywell's 1-for-2 reverse split of
     2026-06-29, one minute after its Aerospace distribution. Raises if the counts do not follow
-    the ratio."""
+    the ratio, and on a held ruling, which is not applied."""
+    _refuse_held(spin_offs)
     out = []
     for s in spin_offs:
         if s.split == 1.0:
@@ -553,8 +582,8 @@ class SpinOffUse:
 @dataclass(frozen=True)
 class Seeded:
     """A child's count seeded from its parent's: the parent's carried count on the record date
-    times the ratio, from `first` until its own first count, `until` (None: to the window's
-    end)."""
+    times the ratio -- over 1 - retained, to the nearest share, where the parent kept part of
+    the child -- from `first` until its own first count, `until` (None: to the window's end)."""
 
     ruling: SpinOff
     key: str
@@ -694,7 +723,9 @@ def build_panel(
     distributions; `member_days[key]` each plan key's runs of membership, (first, last), read
     through the renames; `market` the market series' adjusted and raw bars and its
     distributions; `overrides` the rulings on counts (`Override`); `spin_offs` the rulings on
-    distributions of shares (`SpinOff`). `dates` are the trading calendar, the market's."""
+    distributions of shares (`SpinOff`), none of them held. `dates` are the trading calendar, the
+    market's."""
+    _refuse_held(spin_offs)
     dates = tuple(dates)
     n, m = len(dates), len(columns)
     at = {day: i for i, day in enumerate(dates)}
@@ -897,7 +928,9 @@ def build_panel(
             out.overridden.append((o, len(inside), int(membership[inside, j].sum()), unread[o]))
 
     # A child whose records carry no count: its parent's on the record date at the ratio, from
-    # its first day on or after the ex-date until a sample of its own carries one, never back.
+    # its first day on or after the ex-date until a sample of its own carries one, never back --
+    # over 1 - retained where the parent kept part of the child, to the nearest share: the
+    # child's total outstanding, as every other count is (midoffice15's ruling 3).
     index = {key: j for j, c in enumerate(columns) for key in c.keys}
     for ruling in spin_offs:
         if ruling.child_count != "parent":
@@ -915,6 +948,8 @@ def build_panel(
         if not days:
             raise ValueError(f"{ruling.child}: no day in its spans on or after {ruling.ex_date}")
         count, filled, i = float(base) * ruling.ratio, [], days[0]
+        if ruling.retained:
+            count = float(round(count / (1.0 - ruling.retained)))
         while i < n and not np.isfinite(shares[i, jc]):
             if inside[i]:
                 shares[i, jc] = count

@@ -115,3 +115,24 @@ def test_bad_inputs_are_refused():
         eigen_bias(truth, SampleCovariance(), 50, draws=1)
     with pytest.raises(ValueError, match="two periods"):
         eigen_bias(truth, SampleCovariance(), 1)
+
+
+def test_the_one_sided_adjustment_raises_the_small_eigenvalues_and_lowers_none():
+    """midoffice15: gamma = max(1, a (lambda - 1) + 1). The eigenvalues the simulation finds too
+    small are raised as two-sided; the ones it finds too large are left as estimated, not
+    lowered; at a = 0 the covariance is as given, and two-sided is as before."""
+    truth = _truth(k=8)
+    bias = eigen_bias(truth, SampleCovariance(), 30, draws=300)
+    assert bias.bias[0] < 1.0 < bias.bias[-1]
+    for a in (1.0, 3.0):
+        two, one = bias.scales(a), bias.scales(a, one_sided=True)
+        assert np.array_equal(one, np.maximum(two, 1.0))
+        assert np.all(one >= 1.0) and one[0] == 1.0 and one[-1] == two[-1] > 1.0
+        adjusted = bias.adjusted(a, one_sided=True)
+        for k in range(8):
+            u = bias.vectors[:, k]
+            assert np.allclose(adjusted @ u, one[k] ** 2 * bias.values[k] * u, atol=1e-12)
+        scaled, kept = bias.basis(a, one_sided=True)
+        assert np.array_equal(scaled, one**2 * bias.values) and kept is bias.vectors
+        assert np.array_equal(bias.adjusted(a, one_sided=False), bias.adjusted(a))
+    assert bias.adjusted(0.0, one_sided=True) is bias.covariance

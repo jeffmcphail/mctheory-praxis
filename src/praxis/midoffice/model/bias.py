@@ -39,7 +39,7 @@ portfolios can.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from functools import lru_cache
 from typing import Callable, Iterable, Mapping, Sequence
@@ -226,29 +226,38 @@ class RiskForecast:
 
     @classmethod
     def from_model(
-        cls, model, securities: Sequence[str], *, eigen_scale: float | None = None
+        cls,
+        model,
+        securities: Sequence[str],
+        *,
+        eigen_scale: float | None = None,
+        eigen_one_sided: bool | None = None,
     ) -> "RiskForecast":
         """A `FactorModel`'s forecast on `securities`, in its factor order. `eigen_scale` reads
         it at another eigenfactor adjustment scale a than the model's own, from the
         simulation its notes carry (`eigen.EigenBias`), one simulation serving every a; at 0,
-        the covariance unadjusted."""
+        the covariance unadjusted. `eigen_one_sided` reads that scale one-sided or not; None,
+        as the model's own adjustment is."""
         notes = model.notes
         periods = notes.frequency.periods_per_year if notes.annualised else 1.0
         scale = notes.frequency.variance_scale if notes.annualised else 1.0
         eigen = getattr(notes, "eigen", None)
         own = getattr(notes, "eigen_adjustment", None)
-        if eigen_scale is None or eigen_scale == (own or 0.0):
+        own_sided = bool(getattr(notes, "eigen_one_sided", False))
+        sided = own_sided if eigen_one_sided is None else bool(eigen_one_sided)
+        if eigen_scale is None or (eigen_scale == (own or 0.0)
+                                   and (sided == own_sided or not eigen_scale)):
             matrix = model.covariance.matrix
-            a = own
+            a, sided = own, own_sided
         else:
             if eigen is None:
                 raise ValueError("the model carries no eigenfactor simulation to read another "
                                  "scale from; fit it with eigen_adjustment set")
-            matrix = eigen.adjusted(eigen_scale) * scale
+            matrix = eigen.adjusted(eigen_scale, sided) * scale
             a = eigen_scale
         eigenbasis = None
         if eigen is not None and a:
-            values, vectors = eigen.basis(a)
+            values, vectors = eigen.basis(a, sided)
             eigenbasis = (values * scale, vectors)
         covariance, repair = nearest_psd(np.asarray(matrix, dtype=float))
         ids = list(model.factor_ids)
@@ -261,6 +270,20 @@ class RiskForecast:
             exposures[j] = [vector.exposures.get(fid, 0.0) for fid in ids]
             specific[j] = vector.specific.by_issuer[code]
         return cls(covariance, exposures, specific, float(periods), repair, eigenbasis)
+
+    def regime_adjusted(self, factor: float = 1.0, specific: float = 1.0) -> "RiskForecast":
+        """The forecast under the volatility regime adjustment (`regime`): the factor covariance
+        times factor^2 -- its eigenbasis too, where it carries one -- and each specific volatility
+        times specific. At one and one, the forecast itself."""
+        if factor == 1.0 and specific == 1.0:
+            return self
+        if not (factor > 0.0 and specific > 0.0):
+            raise ValueError(f"the multipliers are positive; got {factor!r} and {specific!r}")
+        eigenbasis = None
+        if self.eigenbasis is not None:
+            eigenbasis = (self.eigenbasis[0] * factor**2, self.eigenbasis[1])
+        return replace(self, covariance=self.covariance * factor**2,
+                       specific=self.specific * specific, eigenbasis=eigenbasis)
 
     @property
     def has_forecast(self) -> np.ndarray:

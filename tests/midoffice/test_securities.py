@@ -394,10 +394,10 @@ def test_a_span_off_an_exchange_ends_but_for_the_days_the_index_still_held_it():
 # --------------------------------------------------------------------- spin-offs (midoffice14)
 
 def spin_off(ex, *, child="KID", ratio=0.5, record=None, split=1.0, child_key=None,
-             child_count=None):
+             child_count=None, retained=0.0, held=""):
     return securities.SpinOff("F1", "NEW", "name F1", child, child_key, ratio,
                               record or day(ex - 1), day(ex), day(ex), split, child_count,
-                              (), "evidence", "ruled")
+                              (), "evidence", "ruled", retained=retained, held=held)
 
 
 def price_only(on):
@@ -555,3 +555,72 @@ def test_the_first_day_check_lists_the_members_gaps_and_what_explains_them():
     cash = {"NEW": [Dividend(day(20), 0.5, "USD", "SC", 0, None, "NEW")]}
     (paid,) = securities.first_days(panel, bars("SPY", "raw"), splits, cash)
     assert paid.gaps[0][3] == "distribution"
+
+
+# ------------------------------------------------- midoffice14's rulings, revised (midoffice15)
+
+
+def test_a_seeded_count_is_grossed_up_by_the_share_the_parent_kept():
+    """FedEx Freight's case (midoffice15's ruling 3): the parent kept part of the child, so the
+    shares it distributed are the rest of the child's count -- the seeded count is the parent's
+    on the record date times the ratio over 1 - retained, to the nearest share, the child's total
+    outstanding as every other count is; the day's total return is the ruling's as before."""
+    samples = {"F1": [(day(0), "OLD", 100.0), (day(10), "NEW", 100.0), (day(16), "NEW", 100.0),
+                      (day(19), "NEW", 201.0)],
+               "P": [(day(0), "RE", 50.0)], "S": [(day(30), "RE", 54.0)],
+               "Y": [(day(30), "SPL", 7.0)]}
+    whole = spin_off(20, child="SPL", child_key="Y", record=day(19), child_count="parent")
+    kept = spin_off(20, child="SPL", child_key="Y", record=day(19), child_count="parent",
+                    retained=0.2)
+    plain = small_panel(samples=samples, spin_offs=[whole])
+    panel = small_panel(samples=samples, spin_offs=[kept])
+    y = panel.shares[:, 2]
+    # 201 x 0.5 = 100.5 distributed, over the 0.8 not kept: 125.625, to the share 126.
+    assert list(y[[20, 29, 30, 39]]) == [126.0, 126.0, 7.0, 7.0]
+    assert not np.isfinite(y[:20]).any()
+    (seed,) = panel.seeded
+    assert (seed.count, seed.parent_count, seed.first, seed.until) == (
+        126.0, 201.0, day(20), day(30))
+    assert np.array_equal(panel.total_prices, plain.total_prices, equal_nan=True)
+    assert np.array_equal(panel.shares[:, :2], plain.shares[:, :2], equal_nan=True)
+
+
+def test_a_held_ruling_is_read_with_its_reason_and_never_applied(tmp_path):
+    """S&P Global's case (midoffice15's ruling 1): a ruling held until it is understood is read
+    with why, and the build and the split check refuse to apply it; the reader's other new rule,
+    a retained share at least 0 and under 1 and only on a seeded count. The repo's file reads:
+    SPGI's ruling held, FDXF's count grossed up by FedEx's 19.9%, CTVA's and HON's as before."""
+    import json
+
+    def write(*entries):
+        path = tmp_path / "spin_offs.json"
+        path.write_text(json.dumps({"entries": list(entries)}), encoding="utf-8")
+        return path
+
+    good = {"parent": "K", "label": "KK", "name": "the parent", "child": "C", "child_key": "F",
+            "ratio": 1.0, "record": "2026-09-24", "distributed": "2026-10-01",
+            "ex_date": "2026-10-01", "child_count": "parent", "retained": 0.199,
+            "evidence": "the record", "ruled": "midoffice15"}
+    (read,) = securities.read_spin_offs(write(good))
+    assert (read.retained, read.held) == (0.199, "")
+    (held,) = securities.read_spin_offs(write({**good, "held": "no gap on either day"}))
+    assert held.held == "no gap on either day"
+    for bad, why in (({**good, "retained": 1.0}, "under 1"),
+                     ({**good, "retained": -0.1}, "under 1"),
+                     ({**good, "child_count": None}, "seeds none"),
+                     ({**good, "held": True}, "in words")):
+        with pytest.raises(ValueError, match=why):
+            securities.read_spin_offs(write(bad))
+    with pytest.raises(ValueError, match="held spin-off ruling is not applied"):
+        small_panel(spin_offs=[spin_off(12, held="not understood")])
+    with pytest.raises(ValueError, match="held spin-off ruling is not applied"):
+        securities.spin_off_splits([spin_off(20, split=0.5, held="not understood")], {})
+    path = Path(__file__).resolve().parents[2] / "config" / "sp500_spin_off_overrides.json"
+    rulings = {(r.label, r.ex_date): r for r in securities.read_spin_offs(path)}
+    spgi = rulings[("SPGI", dt.date(2026, 7, 1))]
+    assert spgi.held and "no gap" in spgi.held
+    fdx = rulings[("FDX", dt.date(2026, 6, 1))]
+    assert (fdx.child, fdx.child_count, fdx.retained) == ("FDXF", "parent", 0.199)
+    assert [r.label for r in rulings.values() if r.held] == ["SPGI"]
+    assert [r.label for r in rulings.values() if r.retained] == ["FDX"]
+    assert rulings[("CTVA", dt.date(2026, 10, 1))].retained == 0.0

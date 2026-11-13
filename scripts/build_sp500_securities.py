@@ -46,15 +46,19 @@ And the distributions of shares the cache records wrongly or not at all (midoffi
   as Polygon has them; a split the parent made with the distribution and the cache does not
   record is applied to its count as a split (Honeywell's 1-for-2 of 2026-06-29), checked by its
   samples; a child with no count of its own takes its parent's on the record date at the ratio,
-  until a sample of its own carries one; a count override a ruling supersedes is not read, and is
-  listed. `none` reads none.
+  over the share the parent did not keep (FedEx's 19.9% of FedEx Freight, midoffice15), until a
+  sample of its own carries one; a count override a ruling supersedes is not read, and is
+  listed; a ruling held until it is understood (S&P Global's Mobility, midoffice15) is listed and
+  not applied. `none` reads none.
 - **The first-day check**, standing: on each security's first day in the panel, the members
   whose raw price opened furthest below the market's, each with the record or ruling that
   explains it, or none.
 
 Writes, beside the plan (gitignored, like it): `sp500_securities_<first>_<last><suffix>.npz`,
-the panel, and `.json`, the report -- `--suffix` `_spinoffs` by default. midoffice10's panel,
-`_listed`, is `--spin-offs none --suffix _listed`; midoffice09's, `_repaired`, is that with
+the panel, and `.json`, the report -- `--suffix` `_revised` by default, midoffice14's rulings as
+midoffice15's rulings revised them. midoffice14's panel, `_spinoffs`, is `--spin-offs` its file
+at d2b2864 with `--suffix _spinoffs`; midoffice10's, `_listed`, is `--spin-offs none --suffix
+_listed`; midoffice09's, `_repaired`, is that with
 `--spare none --listed any`; midoffice08's, with no suffix, is `--first-counts found --repair
 none --overrides none --spin-offs none --spare none --listed any`. An existing file is never
 overwritten without `--overwrite`.
@@ -146,15 +150,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spin-offs", default="config/sp500_spin_off_overrides.json",
                         help="the rulings on distributions of shares the cache records wrongly "
                              "or not at all (midoffice14); none reads none, midoffice10's build")
-    parser.add_argument("--suffix", default="_spinoffs",
-                        help="appended to the output's stem (default _spinoffs; midoffice10's "
-                             "panel is _listed, midoffice09's _repaired, midoffice08's has none)")
+    parser.add_argument("--suffix", default="_revised",
+                        help="appended to the output's stem (default _revised; midoffice14's "
+                             "panel is _spinoffs, midoffice10's _listed, midoffice09's _repaired, "
+                             "midoffice08's has none)")
     parser.add_argument("--overwrite", action="store_true",
                         help="write over an existing panel of the same name; without it the "
                              "build stops first")
     args = parser.parse_args(argv)
     spin_offs = ([] if args.spin_offs == "none"
                  else securities.read_spin_offs(args.spin_offs))
+    # A ruling held until it is understood is listed and not applied (midoffice15's ruling 1).
+    held = [r for r in spin_offs if r.held]
+    spin_offs = [r for r in spin_offs if not r.held]
 
     plan_path = Path(args.plan)
     cache = Path(args.cache)
@@ -399,10 +407,13 @@ def main(argv: list[str] | None = None) -> int:
           f"year")
 
     print("\nSpin-offs: distributions of shares the cache records wrongly or not at all, "
-          + (f"{args.spin_offs}: {len(spin_offs)} rulings, {len(panel.spin_offs)} applied -- on "
-             f"each ex-date the parent's total return (w (C_t + D_t) + k V) / C_s - 1, the child "
-             f"at its close; the stitched prices as Polygon has them"
+          + (f"{args.spin_offs}: {len(spin_offs) + len(held)} rulings, {len(held)} held, "
+             f"{len(panel.spin_offs)} applied -- on each ex-date the parent's total return "
+             f"(w (C_t + D_t) + k V) / C_s - 1, the child at its close; the stitched prices as "
+             f"Polygon has them"
              if args.spin_offs != "none" else "none read (--spin-offs none)"))
+    for r in held:
+        print(f"  {r.label:<6} {r.ex_date} -> {r.child:<5} held, not applied: {r.held}")
     keys_of = {key: c.keys for c in columns for key in c.keys}
     for use in panel.spin_offs:
         r = use.ruling
@@ -426,8 +437,10 @@ def main(argv: list[str] | None = None) -> int:
     for seed in panel.seeded:
         r = seed.ruling
         print(f"  {r.child:<6} {seed.key}: no count of its own -- {r.label}'s "
-              f"{seed.parent_count:,.0f} on the record date {r.record} times {r.ratio:g}, "
-              f"{seed.count:,.0f}, from {seed.first} "
+              f"{seed.parent_count:,.0f} on the record date {r.record} times {r.ratio:g}"
+              + (f", {seed.parent_count * r.ratio:,.0f} distributed, over the {1 - r.retained:g} "
+                 f"{r.label} did not keep" if r.retained else "")
+              + f", {seed.count:,.0f}, from {seed.first} "
               + (f"to {seed.until}, its own first count" if seed.until
                  else "to the window's end, Polygon carrying none")
               + f": {seed.days} days, {seed.member_days} member-days")
@@ -671,8 +684,11 @@ def main(argv: list[str] | None = None) -> int:
         "seeded": [{"child": s.ruling.child, "key": s.key, "first": str(s.first),
                     "count": s.count, "parent": s.ruling.label,
                     "parent_count": s.parent_count, "record": str(s.ruling.record),
+                    "retained": s.ruling.retained,
                     "until": str(s.until) if s.until else None, "days": s.days,
                     "member_days": s.member_days} for s in panel.seeded],
+        "held_spin_offs": [{"parent": r.parent, "label": r.label, "child": r.child,
+                            "ex_date": str(r.ex_date), "held": r.held} for r in held],
         "superseded_overrides": [{"label": o.label, "key": o.key, "first": str(o.first),
                                   "last": str(o.last), "by": [r.label, str(r.ex_date)]}
                                  for o, r in superseded],

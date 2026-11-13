@@ -354,3 +354,44 @@ def test_a_forecast_at_another_eigen_scale_reads_the_models_simulation():
     assert np.allclose(own.eigenbasis[0], values)
     with pytest.raises(ValueError, match="no eigenfactor simulation"):
         RiskForecast.from_model(_small_model()[0], secs, eigen_scale=1.0)
+
+
+def test_a_forecast_reads_another_scale_one_sided_and_a_one_sided_model_its_own():
+    """midoffice15: from_model reads a scale one-sided or not, by default as the model's own
+    adjustment is; a model fitted one-sided carries its one-sided covariance and basis; the
+    option needs the adjustment."""
+    model, secs = _small_model(eigen_adjustment=0.0)
+    eigen = model.notes.eigen
+    one = RiskForecast.from_model(model, secs, eigen_scale=2.0, eigen_one_sided=True)
+    two = RiskForecast.from_model(model, secs, eigen_scale=2.0)
+    assert np.allclose(one.covariance, eigen.adjusted(2.0, True) * 252.0, rtol=1e-12)
+    assert np.allclose(two.covariance, eigen.adjusted(2.0) * 252.0, rtol=1e-12)
+    assert np.allclose(one.eigenbasis[0], eigen.basis(2.0, True)[0] * 252.0)
+    assert np.all(one.eigenbasis[0] >= eigen.values * 252.0 * (1 - 1e-12))
+    # At a = 0 the sidedness changes nothing.
+    zero = RiskForecast.from_model(model, secs, eigen_scale=0.0, eigen_one_sided=True)
+    assert np.array_equal(zero.covariance, RiskForecast.from_model(model, secs).covariance)
+    from praxis.midoffice.model.characteristics import CharacteristicPanel
+    from praxis.midoffice.model.covariance import ExponentialCovariance
+    from praxis.midoffice.model.crosssectional import estimate_cross_sectional_model
+    from praxis.midoffice.model.panel import Frequency, ReturnPanel
+
+    rng = np.random.default_rng(23)
+    n_periods, n_secs = 120, 40
+    dates = tuple(date(2020, 1, 1) + timedelta(days=i) for i in range(n_periods))
+    chars = CharacteristicPanel(dates, secs, ("C0", "C1", "C2"),
+                                rng.normal(size=(n_periods, n_secs, 3)), Frequency.DAILY)
+    returns = ReturnPanel(dates, secs, rng.normal(scale=0.01, size=(n_periods, n_secs)),
+                          Frequency.DAILY)
+    fitted = estimate_cross_sectional_model(
+        returns, chars, covariance_estimator=ExponentialCovariance(30.0), min_securities=10,
+        eigen_adjustment=2.0, eigen_draws=50, eigen_one_sided=True,
+    )
+    assert fitted.notes.eigen_one_sided
+    assert np.allclose(fitted.covariance.matrix, eigen.adjusted(2.0, True) * 252.0, rtol=1e-12)
+    own = RiskForecast.from_model(fitted, secs)
+    assert np.allclose(own.covariance, one.covariance, rtol=1e-12)
+    assert np.allclose(own.eigenbasis[0], one.eigenbasis[0], rtol=1e-12)
+    assert any("one-sided" in q for q in fitted.qualifications())
+    with pytest.raises(ValueError, match="eigen_one_sided"):
+        estimate_cross_sectional_model(returns, chars, min_securities=10, eigen_one_sided=True)
