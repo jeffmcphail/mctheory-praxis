@@ -1,7 +1,8 @@
 # Mid-office state
 
-**Updated:** 2026-11-12, at the end of midoffice15 (midoffice14's rulings, the panel revised; the
-volatility regime adjustment, built and measured; the eigenvalue adjustment one-sided on it).
+**Updated:** 2026-11-13, at the end of midoffice16 (midoffice15's rulings: the regime adjustment's
+factor side the default, S&P Global's ruling released, the panel with every ruling applied; the
+correlation half-life on the regime-adjusted model, measured in one pass).
 Brought up to date at the end of every piece, in the same commit as its retro (Rule 43). Not a
 history: the state a new session needs to carry on. The detail is in the retros named below.
 
@@ -10,7 +11,7 @@ history: the state a new session needs to carry on. The detail is in the retros 
 ## Start here
 
 1. Read `claude/CLAUDE_CODE_RULES.md` (Rule 43 above all), then this file, then the latest retro:
-   `claude/retros/RETRO_midoffice15_volatility_regime_adjustment.md`.
+   `claude/retros/RETRO_midoffice16_correlation_half_life.md`.
 2. **How the work runs.**
    - **The brief.** Each piece, `midofficeNN`, is a brief written in Chat and pasted into the Code
      session. Code transcribes it verbatim to `claude/handoffs/BRIEF_midofficeNN_<slug>.md`; its
@@ -30,8 +31,8 @@ history: the state a new session needs to carry on. The detail is in the retros 
    - Scratch goes to `claude/scratch/midofficeNN/` (gitignored), its outputs copied into the retro.
    - Python is ASCII and keeps the file's line endings (most `.py` here are CRLF in the working
      copy; the `claude/` briefs and retros LF).
-   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,372 passed
-     and 1 skipped at midoffice15. That file looks for `../core_repo/src`, which isn't on this
+   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,374 passed
+     and 1 skipped at midoffice16. That file looks for `../core_repo/src`, which isn't on this
      machine.
 4. **Working notes, from the pieces so far.**
    - A bash heredoc has failed in this harness on some apostrophes (06, 07, 08), though not
@@ -66,7 +67,23 @@ history: the state a new session needs to carry on. The detail is in the retros 
    - **Smoke runs (15).** `claude/scratch/midoffice15/smoke_last.py N [flags]` runs the bias section
      on the last N forecast rows (`forecast_rows` patched), so the run's own forecast as of the
      last date follows the last one tested, as in a full run; midoffice13's `smoke_bias.py` keeps
-     the first N dates, which the regime adjustment's final step cannot follow.
+     the first N dates, which the regime adjustment's final step cannot follow. Since the factor
+     side is the default (16), a plain run refits too: `smoke_last.py 30` with no `--bias` smokes
+     its regime section in about a minute and a half.
+   - **Waiting (16).** The harness blocks a foreground `sleep`: wait on a runner with the Monitor
+     tool on its log, or a background `until grep -q ...; do sleep 10; done`.
+   - **Naming a ruling (16).** This file's "NN ruling k" is Jeff's ruling k on piece NN's
+     decisions, at the top of the next brief, and the code's docstrings mean the same by
+     "midofficeNN's ruling k". midoffice15's docs and rulings file used "midoffice15's ruling k"
+     for its own brief's rulings instead. Since 16 the code, docs and tests write "ruling k of
+     midofficeNN's brief", which neither reading can mistake; the rulings file keeps its own
+     usage, with the date.
+   - **The two-half-life covariance's last bit (16).** Its diagonal is each factor's correlation
+     with itself, c / (sqrt(c) sqrt(c)), times the short window's variance, and that ratio rounds to
+     exactly one only about half the time (51% of a million random c). So the factor volatilities
+     depend on the correlation half-life in the last bit (4e-16 to 7e-16 relative), and anything
+     read from them -- the regime multiplier -- agrees across correlation half-lives to rounding,
+     not to the bit.
 
 ---
 
@@ -123,43 +140,52 @@ layer (c92d343 to e859b4e, 2026-11-01).
   correlations' own lags.
 - d2b2864: **midoffice14** -- the spin-offs the total return does not carry, ruled; the one-day
   correlations above one day; the optimiser's realised volatility standing.
-- Next: **midoffice15**. Jeff commits it after d2b2864 (`git log --oneline -3`).
+- 355b772 (11-12): **midoffice15** -- the volatility regime adjustment measured; held rulings; the
+  revised panel.
+- Next: **midoffice16**. Jeff commits it after 355b772 (`git log --oneline -3`).
 
-**The current piece: midoffice15, COMPLETE (2026-11-12).**
+**The current piece: midoffice16, COMPLETE (2026-11-13).**
 
-- **midoffice14's rulings.** The four spin-off rulings the public record added are kept and S&P
-  Global's is held (ruling 1): the record makes 2026-07-01 its ex-date, and SPGI's raw prices
-  show no fall of Mobility's 5.2% on it or around its record date -- over 07-01 and 07-02 its raw
-  +8.01% is its six peers' without the distribution. Honeywell's reverse split stands, midoffice08's
-  count ruling marked superseded and wrong (ruling 2). FedEx Freight's count grossed up by
-  FedEx's 19.9%, 148,943,044, 0.9962 of its weighted count (ruling 3). Lennar and the seven
-  Polygon carries as built (rulings 4, 5). No descriptor reads the stitched prices, highs or lows
-  across a ruled ex-date, so the price series are left (ruling 6).
-- **The revised panel, `_revised`,** the run's default, `_spinoffs` kept: SPGI's one return and
-  FDXF's 109 counts changed, nothing else. The defaults' bias run on it (D15) is D14's to the
-  third decimal (SPGI's ex-date outcome +3.8 to +1.0 sd).
-- **The volatility regime adjustment** (item 1), an option, off, each side separately: each day's
-  factor and specific cross-sectional bias statistics read from the forecasts made the day before,
-  unadjusted, the multiplier the root of their exponentially weighted mean square, one until 21
-  days of history; a test redraws everything after a date and finds every multiplier as of it
-  unchanged.
-- **Its half-lives** (item 2, V15, 16 settings in one pass, its model test D15's to the bit): the
-  criterion fixed beforehand (the mean of the broad, the optimiser's and the members' MRADs) chose
-  the factor side at 21 days and the specific at 42 on the first half, 0.094 against the model's
-  0.172, holding on the second (0.128 against 0.141). The factor side at 21 days is the best in
-  both halves, alone 0.098 and 0.123: by half the index 1.224 and 0.751 to 1.063 and 0.785, the
-  optimiser 1.25 and 1.30 to 1.11 and 1.16 in the first half. Its costs: the index's whole-test
-  statistic 1.015 to 0.934, below its band; the optimiser realising about 0.2 of a point a year
-  more; the index's forecast moving 1.00% a day at the median against 0.27%. The calm half's
-  over-forecast is the market direction's alone (eigenportfolio 1 at 0.780, the other ranks at
-  0.99 to 1.37): a shape one multiplier cannot reach. The specific side is a level, not a regime
-  (its squared statistic 1.09 in both halves, cap-weighted: the largest members' specific risk
-  forecast too low).
-- **The eigenvalue adjustment one-sided on it** (item 3, VE15): the eigenportfolios' mean
-  abs(bias - 1) 0.131 to 0.076 at a = 3, but the optimiser realises more risk at every a
-  (long-only 10.13% to 10.30% a year at a = 3), its statistics unmoved: off.
-- **What I would choose:** the regime adjustment's factor side on 21 days, its specific side off,
-  the eigenvalue adjustment off. No default changed beyond the rulings.
+- **midoffice15's rulings.**
+  - **Ruling 1:** the regime adjustment's factor side is the model's default at 21 days
+    (`REGIME_FACTOR_HALF_LIFE`, `--regime-factor-half-life none` for off).
+  - **The identity:** a whole test's statistic is the root mean square of its halves', checked
+    for every family at one day and put beside the bias statistics in the docs. It holds within
+    0.001 for the broad, optimiser, industry and random long-only portfolios. It fails by a few
+    thousandths where a mean outcome turns between the halves, for a member whose halves differ
+    in size (JNPR, 0.545 against 1.562), and for a family's summary.
+  - **Rulings 2 and 3:** the specific side and the eigenvalue adjustment stay off.
+  - **Ruling 4:** S&P Global's ruling stands and its hold is released. Every line of the
+    ruling's arithmetic checks against the cache's bars; Kalkine's 436.69 is an intraday price
+    of 07-02.
+- **The released panel, `_released`,** the run's default, `_revised` kept. Against `_revised`,
+  SPGI's 2026-07-01 alone; against `_spinoffs`, FDXF's counts alone. The model on it reads mean
+  R-squared 0.293825.
+- **The new defaults (item 1).**
+  - **On `_revised` (N16):** V15's F 21, S off test to the bit in every array.
+  - **On `_released` (D16):** nothing before 2026-07-01 moves; SPGI's outcome that day goes
+    from +1.0 to +3.7 sd; everything else is unchanged to the third decimal.
+  - **The plain run's cost:** the factor side costs it 6.7 minutes (7.5 against 0.8), the
+    refits 6.8. The refits are not needed: each refit's factor returns are the full fit's through its date, to the bit, on all 686 days, so the history read from the full fit alone is the refits' to the bit, in 0.3 s (`check_fast_regime.py`); not built, for Jeff.
+- **The correlation half-lives (items 2 to 4, C16, one pass).** 63, 126 and 252 days beside
+  504, each refit's factor returns re-estimated (`reestimated_covariance`); the model test is
+  D16's to the bit. Each setting's own regime multiplier is the model's to rounding (2.2e-16),
+  not to the bit: the two-half-life diagonal's last bit (a working note above).
+  - **The rule, written before the run:** realised volatility first, then the regime criterion
+    on the first half. It keeps 504: 63 is out (the unconstrained optimiser 10.23% a year
+    against 10.19%), and 126 and 252 are worse on the first half (0.104 and 0.100 against
+    0.098).
+  - **Each half prefers the other end.** At 63 the calm half's criterion goes from 0.123 to
+    0.083, and the first half's from 0.098 to 0.116.
+  - **The shape:** fixed in part. The calm half's market direction 0.814 to 0.858 at 63, the
+    index 0.785 to 0.833 -- the 63-day correlations take 6% off its forecast volatility where
+    it would need 19% (1 - 0.814).
+  - **The optimiser pays in the small eigen-directions:** ranks 21-25 1.195 to 1.303, and its
+    forecast variance in ranks 16-25 rises from 20.6% to 23.8%, those parts under-forecast more
+    (1.25 against 1.17).
+  - **Proposed, not run:** the one-sided eigenvalue adjustment on the 63-day correlations.
+- **What I would choose:** the correlations on 504 days, as the rule has it. No default changed
+  beyond rulings 1 and 4.
 - **Waiting on Jeff:** the decisions in the retro.
 
 ---
@@ -254,7 +280,13 @@ in `docs/FACTOR_MODEL.md`.
   `--regime-factor-half-life`, `--regime-specific-half-life`), its bias statistics read from the
   as-of refits the bias test makes, out of sample, the multiplier one until 21 days of history;
   and **the eigenvalue adjustment one-sided**, gamma = max(1, a (lambda - 1) + 1)
-  (`eigen_one_sided`, `--eigen-one-sided`). Measured, not yet ruled (the midoffice15 retro).
+  (`eigen_one_sided`, `--eigen-one-sided`). Ruled (15's rulings): **the regime adjustment's
+  factor side is the model's default at 21 days** (15 ruling 1; `REGIME_FACTOR_HALF_LIFE`,
+  `--regime-factor-half-life none` for off) -- its price is noise, the index's forecast moving
+  1.00% a day at the median against 0.27% -- **its specific side off** (15 ruling 2: a level, 1.09
+  in both halves, set by the largest members, a fix by size in the specific risk model), **the
+  eigenvalue adjustment off**, one-sided as two-sided (15 ruling 3: the optimiser realises more
+  at every a).
 - **The variance-ratio variant** stays an option, off (12 ruling 5); **the specific history** a
   63-day half-life (12 ruling 6).
 - **The correction's specific side** (`leverage_correction`, `--leverage-correction`) is an
@@ -280,7 +312,13 @@ in `docs/FACTOR_MODEL.md`.
   stands beside their statistic (13 ruling 5): every portfolio's forecast (median) and realised
   volatility a year in the tables, at one day and the model's horizon; the optimiser's by half;
   each eigen scale's in its tables -- the test the eigen adjustment failed, kept for every
-  covariance candidate.
+  covariance candidate. **A whole test's statistic is, to rounding, the root mean square of its
+  halves'** (15 ruling 1, checked in 16 for every family; `docs/FACTOR_MODEL.md` beside the bias
+  statistics): exactly b^2 = [(n1 - 1) b1^2 + (n2 - 1) b2^2 + (n1 n2 / n)(m1 - m2)^2] / (n - 1),
+  so it fails only where a mean outcome turns between the halves (a few thousandths), where a
+  member's halves differ in size, and for a family's summary. A whole-test band can pass a model
+  wrong in both halves -- the model's in-band 1.015 for the index was 1.224 and 0.751 -- which is
+  why the rolling windows are the criterion.
 - **A security's own specific-risk history** is every specific return it has, member or not:
   in each estimated period, the return of every security with a return and a complete
   characteristic row less its exposures times the members' factor returns, with no
@@ -400,11 +438,14 @@ in `docs/FACTOR_MODEL.md`.
     `config/sp500_spin_off_overrides.json`, each ruling with its evidence (`--spin-offs`). The
     child's close is its first after the ex-date where it had none that day (Lennar's, 14; kept,
     14 ruling 4). The four rulings the public record added are kept -- Jacobs' second Amentum
-    distribution, BD's Waters shares, Aptiv's Versigent, Honeywell's Aerospace -- and S&P
-    Global's Mobility is **held** until it is understood (14 ruling 1): the record makes
-    2026-07-01 its ex-date (SPGI WI ex-distribution from about 06-26), and SPGI's raw prices show
-    no fall of Mobility's 5.2% on it, on its record date or on any day from 06-01 to 07-10. A held
-    ruling (`held`, with why) is read and listed by the build and never applied. Polygon's
+    distribution, BD's Waters shares, Aptiv's Versigent, Honeywell's Aerospace (14 ruling 1).
+    **S&P Global's Mobility stands**: held by midoffice15 (14 ruling 1) and released by 15 ruling
+    4 -- Polygon's 407.26 is the regular-way close of 2026-06-30, SPGI WI closing at 384.00, the
+    23.26 between them about one Mobility share at its when-issued price; 07-01's rally filled
+    the gap (SPGI 8.07% over its when-issued close, its peers' median +4.27%), so its +7.0962% is
+    right and its +3.8 sd that day the market's; the evidence quotes Chat's search results of
+    2026-11-13 and checks against the cache's bars. A held ruling (`held`, with why) is read and
+    listed by the build and never applied; the mechanism stays, and none is held. Polygon's
     fractional ratios within 10% of the brief's value stand as carried (14; 14 ruling 5).
   - **The price series:** the stitched prices keep Polygon's adjusted closes, so price returns
     carry a spin-off only where Polygon records one. At the defaults no descriptor reads them,
@@ -461,9 +502,9 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
   - Report: `data/external/polygon/sp500_rebuild_gate_2022-01-03_2026-11-03_amended.json`.
     midoffice07's is `_corrected`, midoffice06's unsuffixed. Run on another plan, it writes that
     plan's report: given the `_corrected` plan, it would overwrite midoffice07's.
-- **The panel on securities, current: `_revised`** (midoffice15):
-  `data/external/polygon/sp500_securities_2022-01-03_2026-11-03_revised.npz`, and its report
-  `.json` -- midoffice14's rulings as midoffice15's revised them.
+- **The panel on securities, current: `_released`** (midoffice16):
+  `data/external/polygon/sp500_securities_2022-01-03_2026-11-03_released.npz`, and its report
+  `.json` -- every ruling applied, S&P Global's hold released (15 ruling 4).
   - 592 securities -- each a share class, its key in `securities`, its label its last ticker --
     over the same 1,214 days.
   - Arrays: prices, total_return_prices, unadjusted_prices, volumes (traded), adjusted_volumes,
@@ -471,15 +512,18 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
     market_total_returns, sic_codes and sic_dates, with the snapshot hash and the plan.
   - Regenerate: `python scripts/build_sp500_securities.py --offline`, about 40 s. It runs the gate
     offline first and builds only if it passes, and it refuses to write over an existing panel
-    without `--overwrite`. Against `_spinoffs`: SPGI's 2026-07-01 return (+7.10% to Polygon's
-    +1.89%) and FDXF's count over its 109 member-days (119,303,378 to 148,943,044), nothing else
-    (`panel_changed.txt` in the midoffice15 retro); against `_listed`, 18 member-day returns and
-    223 count member-days.
+    without `--overwrite`. Against `_revised`: SPGI's 2026-07-01 return (Polygon's +1.8931% to
+    +7.0962%) and its index's rescaling after it, nothing else; against `_spinoffs`: FDXF's count
+    over its 109 member-days (119,303,378 to 148,943,044), nothing else, the total returns equal
+    to the bit (`panel_changed.txt` in the midoffice16 retro).
+  - midoffice15's panel, the default to midoffice15, is `_revised`: `--spin-offs` the rulings
+    file as 355b772 has it (`git show 355b772:config/sp500_spin_off_overrides.json`) with
+    `--suffix _revised` rebuilds its arrays exactly (checked 2026-11-13).
   - midoffice14's panel, the default to midoffice14, is `_spinoffs`: `--spin-offs` the rulings
     file as d2b2864 has it (`git show d2b2864:config/sp500_spin_off_overrides.json`) with
-    `--suffix _spinoffs` rebuilds its arrays exactly (checked 2026-11-12).
+    `--suffix _spinoffs` rebuilds its arrays exactly (checked 2026-11-13).
   - midoffice10's panel, the default to midoffice13, is `_listed`: `--spin-offs none --suffix
-    _listed` rebuilds its arrays exactly (checked 2026-11-12).
+    _listed` rebuilds its arrays exactly (checked 2026-11-13).
   - midoffice09's panel is `_repaired`: that with `--spare none --listed any --suffix _repaired`
     (checked 2026-11-10, before the spin-off rulings existed).
   - midoffice08's panel, before the count rulings, is the unsuffixed one: `--first-counts found
@@ -489,13 +533,14 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
   so: its reading was wrong, 14 ruling 2); SKYD from 2026-10-06 has no count. Each entry's
   `last` is the last day its evidence reaches.
 - **The spin-off overrides file**, in the repo: `config/sp500_spin_off_overrides.json` -- 19
-  rulings (midoffice14), 18 applied and S&P Global's held (midoffice15), each the parent's key,
-  the child, the ratio, the record, distribution and ex-dates, any split with it (HON's 0.5), a
-  seeded child count (VYLR, FDXF) and the share of the child the parent kept (FDXF's 0.199), the
-  count overrides it supersedes (HON's), the evidence, and `held` with why where it is held.
-  Written by `claude/scratch/midoffice14/make_spin_offs.py` from the public record and the data,
-  amended by `claude/scratch/midoffice15/amend_rulings.py`; read by the build (`--spin-offs`,
-  `none` for none).
+  rulings (midoffice14), every one applied (S&P Global's held by midoffice15, released by
+  midoffice16), each the parent's key, the child, the ratio, the record, distribution and
+  ex-dates, any split with it (HON's 0.5), a seeded child count (VYLR, FDXF) and the share of the
+  child the parent kept (FDXF's 0.199), the count overrides it supersedes (HON's), the evidence,
+  and `held` with why where one is held (none now). Written by
+  `claude/scratch/midoffice14/make_spin_offs.py` from the public record and the data, amended by
+  `claude/scratch/midoffice15/amend_rulings.py` and `claude/scratch/midoffice16/release_spgi.py`;
+  read by the build (`--spin-offs`, `none` for none).
 - **The cache gained** (midoffice14) the raw bars over the window of ten children that never
   joined the index -- ZIMV, EMBC, FTRE, PHIN, KLG, RAL, MRP, VSNT, VGNT, MBGL -- and nine
   reference records on their ex-dates (ZIMV's of 03-01 and 03-02, EMBC's, PHIN's, KLG's, MRP's
@@ -510,12 +555,14 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
 python scripts/run_sp500_model.py --industries --membership
 ```
 
-That is the panel on securities with its counts repaired, its spans listed and its spin-offs
-carried as revised (`DEFAULT_PANEL`, `_revised`), total returns, traded volumes, covered
-histories weighted by a 63-day half-life, the two-half-life covariance (90 / 504) and the
-one-day horizon; no regime or eigenvalue adjustment. midoffice14's panel runs with
-`data/external/polygon/sp500_securities_2022-01-03_2026-11-03_spinoffs.npz` given first,
-midoffice13's with `..._listed.npz`. The old
+That is the panel on securities with its counts repaired, its spans listed and every spin-off
+ruling applied (`DEFAULT_PANEL`, `_released`), total returns, traded volumes, covered histories
+weighted by a 63-day half-life, the two-half-life covariance (90 / 504), the one-day horizon and
+the volatility regime adjustment's factor side on 21 days (16; its specific side off, no
+eigenvalue adjustment). The report names its panel file. midoffice15's panel runs with
+`data/external/polygon/sp500_securities_2022-01-03_2026-11-03_revised.npz` given first,
+midoffice14's with `..._spinoffs.npz`, midoffice13's with `..._listed.npz`; midoffice15's
+defaults add `--regime-factor-half-life none`. The old
 panel, for comparison, runs as below, and with `--specific-history regression
 --specific-half-life none --correlation-half-life none` too it takes midoffice08's code path,
 which reproduced its run A exactly (`none none` reproduces midoffice11's defaults to the bit on
@@ -558,9 +605,10 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   variance times lambda_S^2, each multiplier the root of the exponentially weighted mean square on
   its half-life of the day's cross-sectional bias statistic, read from the forecast made the day
   before, unadjusted; one until 21 days of history. The forecasts it reads are the model refitted
-  as of every day from the bias test's first, so a plain run with it refits each (about eight
-  minutes) and reports the multipliers as of the last date; under `--bias` the test's own loop
-  serves. Off by default.
+  as of every day from the bias test's first, so a plain run with it refits each and reports the
+  multipliers as of the last date and the refits' minutes; under `--bias` the test's own loop
+  serves. The factor side is on by default at 21 days (15 ruling 1; `none` for off), the specific
+  side off (15 ruling 2).
 - `--variance-ratio-half-life H` (12): each factor volatility its one-day volatility on
   `--half-life` times the square root of its variance ratio at the horizon, the ratio estimated
   on H. Off by default; it needs the two-half-life covariance, and has no weighted noise share.
@@ -572,8 +620,14 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   every pairing of those half-lives on the two sides, either side off among them, beside the
   model in one pass (16 tests at 21,42,84, under a second a refit), chosen on the first half by
   its criterion -- not with `--bias-eigen-scales`, which instead levels each scale again on the
-  model's own regime adjustment; `--bias-out PATH` keeps every forecast and outcome in an `.npz`,
-  each regime setting's keyed `_rF<h>S<h>` and the daily statistics' history;
+  model's own regime adjustment; `--bias-correlation-half-lives H,H` (16) tests the factor
+  correlations on those half-lives beside the model's, the volatilities' kept, each refit's own
+  factor returns re-estimated (`crosssectional.reestimated_covariance`) and each setting on its
+  own forecasts' regime adjustment, one pass (0.69 s a refit with four tests), chosen by
+  `CORRELATION_RULE` -- not with the eigen-scale or regime passes, the sampling correction or the
+  eigen adjustment; `--bias-out PATH` keeps every forecast and outcome in an `.npz`, each regime
+  setting's keyed `_rF<h>S<h>`, each correlation setting's `_c<h>`, the daily statistics'
+  history, every test's factor covariance by date and the optimiser's factor exposures;
   `--bias-guard N` (default 5, 0 skips) is the guard's date count, two to four minutes at five.
 - On the panel on securities, `--membership` is its own, checked against the newest snapshot's
   hash, and `--industries` reads its own SIC codes and needs no key.
@@ -582,13 +636,16 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
 
 **At the defaults:**
 
-- **Time:** about 50 to 65 s.
-- **Mean R-squared:** 0.293821 over 938 periods from 2023-02-08 (0.293826 on `_spinoffs`,
-  0.293203 on `_listed`).
+- **Time:** about 7.5 minutes, 6.8 of them the regime adjustment's refits; 0.8 minutes with
+  `--regime-factor-half-life none`.
+- **Mean R-squared:** 0.293825 over 938 periods from 2023-02-08 (0.293821 on `_revised`, 0.293826
+  on `_spinoffs`, 0.293203 on `_listed`).
 - **Members in the regression a period:** median 502, range 499 to 503.
-- **Specific risk:** p10 16.56%, median 28.98%, p90 48.89%, 550 forecasts (on `_spinoffs` 16.56 /
-  28.99 / 48.89%, on `_listed` 16.58 / 28.98 / 48.98%; equal-weighted histories, midoffice11's
+- **Specific risk:** p10 16.56%, median 28.99%, p90 48.89%, 550 forecasts (on `_revised` 16.56 /
+  28.98 / 48.89%, on `_listed` 16.58 / 28.98 / 48.98%; equal-weighted histories, midoffice11's
   defaults: 15.58 / 24.76 / 40.49%).
+- **The regime adjustment's factor side** as of 2026-11-03: lambda_F 0.9640, the factor
+  volatilities' median 16.26% to 15.67%.
 - **The size pair:** 11.05% for the smallest 85, 0.60% for the largest 50, 0.01% for the index
   (on `_listed` 10.99 / 0.57 / 0.01%).
 - **The covariance:** the one-day covariance, 826.4 effective observations of 938, the
@@ -602,6 +659,7 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 
 **Its standing lines, and what each is there to catch:**
 
+- **The panel file** (16): its path, and whether it is `DEFAULT_PANEL`.
 - **The snapshot.** Its hash and coverage; current_stale, the roll-forward; the members in the
   panel on the first and last days. A change membership() does not reproduce is the change table
   disagreeing with itself. A date the snapshot cannot answer stops the run, and so does a panel
@@ -646,9 +704,14 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
   bias statistics, their mean square by half and by quarter; each multiplier's path by quarter,
   its range and its mean by half; how much each setting moves the forecasts from day to day; and
   every setting over the whole test and each half, chosen on the first by `REGIME_CRITERION`.
-  **Under `--regime-factor-half-life` or `--regime-specific-half-life`** (15): the multipliers
-  the run's own forecast carries as of the last date, and the factor volatilities and specific
-  risk they make; under `--bias-eigen-scales`, each scale's own factor multiplier.
+  **Under `--bias-correlation-half-lives`** (16): each setting's factor volatilities, B_F^2 and
+  lambda_F against the model's, bit for bit; the optimiser's realised volatility by part and who
+  is out; the regime criterion by part and the choice by `CORRELATION_RULE`; each setting's own
+  eigenportfolios by rank and part; the statistics, realised volatility and MRADs by part; the
+  members by capitalisation quintile; the forecasts' day-to-day moves. **The regime adjustment's
+  own lines** (15; by default since 16): the multipliers the run's own forecast carries as of the
+  last date, and the factor volatilities and specific risk they make; in a plain run the refits'
+  minutes; under `--bias-eigen-scales`, each scale's own factor multiplier.
 - **Specific risk:**
   - the percentiles;
   - the shares of V-squared;
@@ -700,26 +763,29 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 
 ## What is next
 
-1. **Jeff's rulings on midoffice15** (its retro, "Decisions left for Jeff"):
-   - **The regime adjustment's factor side:** the model's default on 21 days (my choice: the
-     best in both halves), on 42 (steadier from day to day: the index's forecast 0.67% a day at
-     the median against 1.00%, the criterion 0.111 and 0.131 against 0.098 and 0.123), or off.
-   - **Its specific side:** off (my choice: a level, not a regime); or on 42 days, the
-     criterion's joint pick.
-   - **The eigenvalue adjustment one-sided:** off (my choice).
-   - **S&P Global's held ruling:** held until an outside price for SPGI's regular-way close of
-     2026-06-30 settles it; or dropped.
-2. **Next, as I would order it:** the calm half's shape -- the market direction over-forecast
-   while the rest is under -- by a shorter correlation half-life on the regime-adjusted model (504
-   days now), the correlations then following the regime as the volatilities do; then the
-   largest members' specific risk, forecast too low at every half-life (the top quintile 1.054),
-   in the specific risk model, by size, after which the specific side can be re-tested.
+1. **Jeff's rulings on midoffice16** (its retro, "Decisions left for Jeff"):
+   - **The correlation half-life:** 504 days, as it is (my choice, the rule's); or a shorter one.
+   - **The test item 4 proposes:** the one-sided eigenvalue adjustment on the 63-day
+     correlations, judged by the same rule -- whether the optimiser's price in the small
+     eigen-directions can be taken back while the calm half keeps its gain. Run it, or not.
+   - **The two-half-life estimator's diagonal:** set to the short window's variances, so the
+     volatilities (and the regime multiplier) no longer depend on the correlation half-life in
+     the last bit, every stored run then reproducing to rounding only; or left as it is (my
+     choice for now).
+   - **The plain run's regime history from the full fit alone:** each refit's factor returns are the full fit's through its date, to the bit (all 686), so the history and the multiplier read from the full fit's factor returns -- the model's estimator on their prefixes -- are the refits' to the bit, in 0.3 s instead of about seven minutes. Build it for the plain run (my choice), or keep the refits. The bias test refits anyway, and the specific side, off, would still need them.
+   - **The next piece.**
+2. **Next, as I would order it:** the largest members' specific risk (15 ruling 5), forecast too
+   low at every setting (the top quintile 1.028 under the new defaults), in the specific risk
+   model, by size -- and at the other end the optimiser's specific part, over-forecast (0.88 by
+   eigen-split), which may be the same shrinkage seen from the low-risk names. The calm half's
+   remaining shape -- the market direction's volatility, not its correlations -- after that, if
+   Jeff wants it pursued.
 3. **The bias statistics are standing,** at one day and the model's horizon, the optimiser's
    realised volatility beside its statistic: every later candidate is one `--bias --bias-horizons
-   ...` run against D15 -- or V15's factor-side test, if the regime adjustment is ruled in --
-   (`--bias-eigen-scales` for a covariance-side scale, `--bias-regime-half-lives` for the regime
-   adjustment's), one at a time through a runner like midoffice15's
-   (`claude/scratch/midoffice15/runner.py`).
+   ...` run against D16 (`--bias-eigen-scales` for a covariance-side scale,
+   `--bias-regime-half-lives` for the regime adjustment's, `--bias-correlation-half-lives` for the
+   correlations'), one at a time through a runner like midoffice16's
+   (`claude/scratch/midoffice16/runner.py`, which runs plain runs too).
 
 **Open, not queued:**
 
@@ -730,10 +796,7 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 - six ruff findings at HEAD in files no mid-office piece has touched since --
   `characteristics.py` (an E501, an unused `Sequence`), `exposure_basis.py` (an unused
   `Mapping`, two N806 `T`), `timeseries.py` (an unused `Sequence`); checked in 11
-  (`ruff_head_untouched.txt`), untouched in 12, 13, 14 and 15;
-- S&P Global's Mobility ruling, held: the record makes 2026-07-01 its ex-date and SPGI's raw
-  prices show no fall of Mobility's value there or around its record date; Polygon's SPGI series
-  before 07-01 may not be the regular-way line's, which an outside price would settle (15);
+  (`ruff_head_untouched.txt`), untouched in 12 to 16;
 - spin-offs no check sees: the first-day check sees only children that joined the index, and the
   public lists are not exhaustive (one omits Constellation); a child that never joined and that no
   list names would be missed (14);
@@ -742,19 +805,29 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
   SOLS 13, SOLV 1, VLTO 2, WBD 1 member-days -- which the seeding rule would fill as Vylor's (14);
 - FedEx Freight and Vylor now have weights and still lack Momentum, so they enter no regression
   (14);
-- the regime: by half the index's one-day statistic is 1.22 and then 0.75, the optimiser's 1.25
-  and 1.30 then 0.83 and 0.86 (13, 14); the regime adjustment, built in 15 and off, brings the
-  first half to 1.06 and the optimiser to 1.11 and 1.16, the second only to 0.78: the calm half's
-  over-forecast is the market direction's, a shape (15);
-- under the regime adjustment the index's whole-test statistic falls below its band (0.934) and
-  its forecast moves four times as much from day to day (15);
+- the regime: by half the index's one-day statistic is 1.22 and then 0.75 under the unadjusted
+  model (13, 14); the regime adjustment's factor side, the default since 16, brings the first
+  half to 1.06 and the optimiser to 1.11 and 1.16, the second only to 0.785: the calm half's
+  over-forecast is the market direction's, a shape (15). A shorter correlation half-life fixes
+  only part of it -- at 63 days the market direction 0.814 to 0.858 -- and the optimiser pays for
+  it in the small eigen-directions (16). What is left is on the volatility side: one multiplier
+  over 25 factors, which the market direction and the rest pull apart (16);
+- the index's whole-test statistic under the factor side, 0.934, below its band: the calm half's
+  shape, not a cost of the adjustment (15 ruling 1); its forecast moves four times as much from
+  day to day as the unadjusted model's (15);
+- the two-half-life covariance's diagonal depends on the correlation half-life in the last bit
+  (7e-16), so the regime multiplier does too (2.2e-16) (16);
+- the optimiser's specific part reads over-forecast, 0.88, split from its realised return
+  through the estimated factor returns -- their noise in the factor part, the regression's
+  projection in the specific -- so it says where more surely than how much (16);
 - the specific history's half-life past 42: the trend from equal weights to 42 has flattened
   (members 1.075, 1.057, 1.045, 1.042, then on the new defaults 1.034 at 63, 1.031 at 42) (12);
 - the small caps mean-revert more than any model's lags hold them to (a realised 0.64 at 21
   days against the 21-day model's 0.73), so their long-horizon risk is over-forecast (12);
 - the largest names stay under-forecast at one day (the top quintile 1.054 under the one-day
-  model, 1.089 under the 11-day one): midoffice11's leverages, a scheme question (11, 12); the
-  cap-weighted specific bias statistic reads it as a level, 1.09 in both halves (15);
+  model, 1.089 under the 11-day one, 1.028 under the new defaults): midoffice11's leverages, a
+  scheme question (11, 12); the cap-weighted specific bias statistic reads it as a level, 1.09 in
+  both halves (15);
 - the sampling covariance is the classical `sigma^2 (X'WX)^-1`; a heteroskedasticity-robust
   sandwich would say whether it misstates a thin industry's noise (10);
 - a member floor is not a noise floor: SIC20, with 21 members, is 55% noise, weighted (10);

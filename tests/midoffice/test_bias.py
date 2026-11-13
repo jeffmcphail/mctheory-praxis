@@ -395,3 +395,72 @@ def test_a_forecast_reads_another_scale_one_sided_and_a_one_sided_model_its_own(
     assert any("one-sided" in q for q in fitted.qualifications())
     with pytest.raises(ValueError, match="eigen_one_sided"):
         estimate_cross_sectional_model(returns, chars, min_securities=10, eigen_one_sided=True)
+
+
+def test_a_covariance_reestimated_from_the_factor_returns_is_the_fit_with_that_estimator():
+    """midoffice16: the covariance is estimated last, from the factor returns alone, so a fitted
+    model's covariance re-estimated by another estimator is the fit with that estimator, to the
+    bit, and a forecast with it is that fit's forecast -- the bias test's correlation half-lives
+    share one pass's refits. The volatilities do not depend on the correlations' half-life but
+    for the last bit. Refused where the covariance is not the estimator's estimate alone."""
+    from praxis.midoffice.model.characteristics import CharacteristicPanel
+    from praxis.midoffice.model.covariance import ExponentialCovariance, HorizonCovariance
+    from praxis.midoffice.model.crosssectional import (
+        estimate_cross_sectional_model,
+        reestimated_covariance,
+    )
+    from praxis.midoffice.model.panel import Frequency, ReturnPanel
+
+    rng = np.random.default_rng(29)
+    n_periods, n_secs = 160, 40
+    dates = tuple(date(2020, 1, 1) + timedelta(days=i) for i in range(n_periods))
+    secs = tuple(f"S{j:02d}" for j in range(n_secs))
+    chars = CharacteristicPanel(dates, secs, ("C0", "C1", "C2"),
+                                rng.normal(size=(n_periods, n_secs, 3)), Frequency.DAILY)
+    returns = ReturnPanel(dates, secs, rng.normal(scale=0.01, size=(n_periods, n_secs)),
+                          Frequency.DAILY)
+
+    def fit(estimator, **options):
+        return estimate_cross_sectional_model(returns, chars, covariance_estimator=estimator,
+                                              min_securities=10, **options)
+
+    long = HorizonCovariance(volatility_half_life=20.0, correlation_half_life=80.0,
+                             newey_west_lags=0)
+    short = dataclasses.replace(long, correlation_half_life=10.0)
+    model, other = fit(long), fit(short)
+    again = reestimated_covariance(model, short)
+    assert np.array_equal(again, other.covariance.matrix)
+    assert np.array_equal(reestimated_covariance(model, long), model.covariance.matrix)
+    mine = RiskForecast.from_model(model, secs, covariance=again)
+    theirs = RiskForecast.from_model(other, secs)
+    for name in ("covariance", "exposures", "specific"):
+        assert np.array_equal(getattr(mine, name), getattr(theirs, name), equal_nan=True)
+    assert mine.repair == theirs.repair and mine.eigenbasis is None
+    # Other correlations, the short window's volatilities under both but for the last bit.
+    assert not np.allclose(again, model.covariance.matrix)
+    assert np.allclose(np.diag(again), np.diag(model.covariance.matrix), rtol=1e-15, atol=0.0)
+    with pytest.raises(ValueError, match="factors"):
+        RiskForecast.from_model(model, secs, covariance=again[:2, :2])
+    with pytest.raises(ValueError, match="sampling correction"):
+        reestimated_covariance(fit(ExponentialCovariance(30.0), sampling_correction=True), long)
+    adjusted = fit(ExponentialCovariance(30.0), eigen_adjustment=1.0, eigen_draws=20)
+    with pytest.raises(ValueError, match="eigenfactor"):
+        reestimated_covariance(adjusted, long)
+    with pytest.raises(ValueError, match="eigenfactor"):
+        RiskForecast.from_model(adjusted, secs, covariance=again)
+
+
+def test_the_minimum_variance_portfolios_factor_exposures_are_kept():
+    """midoffice16: each date's minimum-variance portfolios' factor exposures -- their weights
+    times the forecast's exposures -- so where the optimiser puts its factor risk can be read by
+    eigen-direction after the run."""
+    world = _known_world(n_dates=40)
+    forecast, dates, securities, returns, membership, caps, groups, f = world
+    run = _run(world, range(0, 30))
+    for label in ("long-only", "unconstrained"):
+        x = run.min_variance_exposure[label]
+        assert x.shape == (30, 5)
+        for i, t in enumerate(range(0, 30)):
+            eligible = membership[t] & np.isfinite(returns[t + 1]) & (caps[t] > 0.0)
+            w = minimum_variance(forecast, eligible, long_only=label == "long-only").weights
+            assert np.allclose(x[i], w @ forecast.exposures, rtol=1e-12, atol=1e-15)

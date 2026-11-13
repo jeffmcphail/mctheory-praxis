@@ -1526,6 +1526,31 @@ def estimate_cross_sectional_model(
     )
 
 
+def reestimated_covariance(model: FactorModel, estimator: CovarianceEstimator) -> np.ndarray:
+    """The factor covariance `estimate_cross_sectional_model` would have given `model` with
+    `estimator` in place of its own: the estimate from the model's own factor returns, annualised
+    as the model is, in its factor order.
+
+    The covariance is estimated last, from the factor returns alone -- the regressions, the
+    exposures and the specific risk model never read it -- so one fit's factor returns serve
+    every estimator, and the bias test can try several correlation half-lives in one pass
+    (midoffice16), as it tries its horizons and its eigen scales. Refused for a model whose
+    covariance is not its estimator's estimate alone: one with the sampling correction, or with
+    the eigenfactor adjustment scaling it."""
+    notes = model.notes
+    if getattr(notes, "sampling_correction", False):
+        raise ValueError("this model's covariance has the sampling correction subtracted, so it "
+                         "is not its estimator's estimate alone; re-estimate it without")
+    if getattr(notes, "eigen_adjustment", None):
+        raise ValueError("this model's covariance is scaled by the eigenfactor adjustment, so it "
+                         "is not its estimator's estimate alone; re-estimate it without")
+    factors = notes.factor_returns
+    if factors is None or factors.returns.size == 0:
+        raise ValueError("the model carries no factor returns to re-estimate its covariance from")
+    scale = notes.frequency.variance_scale if notes.annualised else 1.0
+    return estimator.estimate(factors.returns).matrix * scale
+
+
 # The options on the return panel's dates, and the one on the characteristic panel's.
 _DATED_ON_RETURNS = ("regression_weights", "membership", "capitalisations", "periods")
 _DATED_ON_CHARACTERISTICS = ("standardise_weights",)

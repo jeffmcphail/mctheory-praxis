@@ -48,17 +48,19 @@ And the distributions of shares the cache records wrongly or not at all (midoffi
   samples; a child with no count of its own takes its parent's on the record date at the ratio,
   over the share the parent did not keep (FedEx's 19.9% of FedEx Freight, midoffice15), until a
   sample of its own carries one; a count override a ruling supersedes is not read, and is
-  listed; a ruling held until it is understood (S&P Global's Mobility, midoffice15) is listed and
-  not applied. `none` reads none.
+  listed; a ruling held until it is understood is listed and not applied (S&P Global's
+  Mobility, held by midoffice15 and released by midoffice16; none is held now). `none` reads
+  none.
 - **The first-day check**, standing: on each security's first day in the panel, the members
   whose raw price opened furthest below the market's, each with the record or ruling that
   explains it, or none.
 
 Writes, beside the plan (gitignored, like it): `sp500_securities_<first>_<last><suffix>.npz`,
-the panel, and `.json`, the report -- `--suffix` `_revised` by default, midoffice14's rulings as
-midoffice15's rulings revised them. midoffice14's panel, `_spinoffs`, is `--spin-offs` its file
-at d2b2864 with `--suffix _spinoffs`; midoffice10's, `_listed`, is `--spin-offs none --suffix
-_listed`; midoffice09's, `_repaired`, is that with
+the panel, and `.json`, the report -- `--suffix` `_released` by default, every ruling applied,
+S&P Global's hold released (midoffice16). midoffice15's panel, `_revised`, is `--spin-offs` its
+file at 355b772 with `--suffix _revised`; midoffice14's, `_spinoffs`, its file at d2b2864 with
+`--suffix _spinoffs`; midoffice10's, `_listed`, is `--spin-offs none --suffix _listed`;
+midoffice09's, `_repaired`, is that with
 `--spare none --listed any`; midoffice08's, with no suffix, is `--first-counts found --repair
 none --overrides none --spin-offs none --spare none --listed any`. An existing file is never
 overwritten without `--overwrite`.
@@ -150,17 +152,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spin-offs", default="config/sp500_spin_off_overrides.json",
                         help="the rulings on distributions of shares the cache records wrongly "
                              "or not at all (midoffice14); none reads none, midoffice10's build")
-    parser.add_argument("--suffix", default="_revised",
-                        help="appended to the output's stem (default _revised; midoffice14's "
-                             "panel is _spinoffs, midoffice10's _listed, midoffice09's _repaired, "
-                             "midoffice08's has none)")
+    parser.add_argument("--suffix", default="_released",
+                        help="appended to the output's stem (default _released; midoffice15's "
+                             "panel is _revised, midoffice14's _spinoffs, midoffice10's _listed, "
+                             "midoffice09's _repaired, midoffice08's has none)")
     parser.add_argument("--overwrite", action="store_true",
                         help="write over an existing panel of the same name; without it the "
                              "build stops first")
     args = parser.parse_args(argv)
     spin_offs = ([] if args.spin_offs == "none"
                  else securities.read_spin_offs(args.spin_offs))
-    # A ruling held until it is understood is listed and not applied (midoffice15's ruling 1).
+    # A ruling held until it is understood is listed and not applied (midoffice15's ruling 1;
+    # S&P Global's, the one held, released by ruling 4 of midoffice16's brief).
     held = [r for r in spin_offs if r.held]
     spin_offs = [r for r in spin_offs if not r.held]
 

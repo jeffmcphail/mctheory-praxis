@@ -232,12 +232,16 @@ class RiskForecast:
         *,
         eigen_scale: float | None = None,
         eigen_one_sided: bool | None = None,
+        covariance: np.ndarray | None = None,
     ) -> "RiskForecast":
         """A `FactorModel`'s forecast on `securities`, in its factor order. `eigen_scale` reads
         it at another eigenfactor adjustment scale a than the model's own, from the
         simulation its notes carry (`eigen.EigenBias`), one simulation serving every a; at 0,
         the covariance unadjusted. `eigen_one_sided` reads that scale one-sided or not; None,
-        as the model's own adjustment is."""
+        as the model's own adjustment is. `covariance` forecasts with another factor
+        covariance than the model's, annualised and in its factor order -- another estimator's
+        from the model's own factor returns (`crosssectional.reestimated_covariance`) -- the
+        exposures and the specific risk the model's (midoffice16); not with `eigen_scale`."""
         notes = model.notes
         periods = notes.frequency.periods_per_year if notes.annualised else 1.0
         scale = notes.frequency.variance_scale if notes.annualised else 1.0
@@ -245,8 +249,17 @@ class RiskForecast:
         own = getattr(notes, "eigen_adjustment", None)
         own_sided = bool(getattr(notes, "eigen_one_sided", False))
         sided = own_sided if eigen_one_sided is None else bool(eigen_one_sided)
-        if eigen_scale is None or (eigen_scale == (own or 0.0)
-                                   and (sided == own_sided or not eigen_scale)):
+        if covariance is not None:
+            if eigen_scale is not None or own:
+                raise ValueError("another covariance is forecast with as given: not at an "
+                                 "eigenfactor adjustment scale, nor for a model with its own")
+            covariance = np.asarray(covariance, dtype=float)
+            if covariance.shape != model.covariance.matrix.shape:
+                raise ValueError(f"a covariance of shape {covariance.shape} for a model of "
+                                 f"{len(model.factor_ids)} factors")
+            matrix, a = covariance, None
+        elif eigen_scale is None or (eigen_scale == (own or 0.0)
+                                     and (sided == own_sided or not eigen_scale)):
             matrix = model.covariance.matrix
             a, sided = own, own_sided
         else:
@@ -421,6 +434,9 @@ class BiasRun:
     dropped: int
     securities: tuple[str, ...]
     random_seed: int
+    # The minimum-variance portfolios' factor exposures, dates by factors (midoffice16): where
+    # the optimiser puts its factor risk, to read by eigen-direction.
+    min_variance_exposure: Mapping[str, np.ndarray] = field(default_factory=dict)
 
     def _at(self, forecast, realised, by_horizon, horizon, overlapping, axis):
         if horizon == 1:
@@ -492,7 +508,7 @@ class BiasTest:
     - the index, cap-weighted and equally weighted;
     - the `smallest` and the `largest` by capitalisation, equally weighted -- the size pair;
     - each group, cap-weighted;
-    - the minimum-variance portfolio, long-only and unconstrained;
+    - the minimum-variance portfolio, long-only and unconstrained, its factor exposures kept;
     - `random_portfolios` long-only portfolios of `random_names` members and as many long-short
       ones of `random_names` a side, each member's key and weight drawn once from `seed`, so a
       portfolio keeps its names from day to day but for the index's changes;
@@ -569,6 +585,7 @@ class BiasTest:
         self.repaired: list[bool] = []
         self.held = {"long-only": [], "unconstrained": []}
         self.violation = {"long-only": [], "unconstrained": []}
+        self.exposure = {"long-only": [], "unconstrained": []}
         self.dropped = 0
         self.first_row: int | None = None
         self.last_row = len(dates) - 1
@@ -603,6 +620,7 @@ class BiasTest:
             weights[base + k] = portfolio.weights
             self.held[label].append(portfolio.held)
             self.violation[label].append(portfolio.violation)
+            self.exposure[label].append(portfolio.weights[idx] @ forecast.exposures[idx])
         start = base + 2
         weights[start : start + self.random_portfolios] = _random_weights(
             self.long_keys, self.long_sizes, idx, self.random_names, False
@@ -668,6 +686,8 @@ class BiasTest:
             dropped=self.dropped,
             securities=self.securities,
             random_seed=self.seed,
+            min_variance_exposure={k: np.array(v).reshape(-1, n_factors)
+                                   for k, v in self.exposure.items()},
         )
 
 

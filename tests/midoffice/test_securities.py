@@ -589,7 +589,8 @@ def test_a_held_ruling_is_read_with_its_reason_and_never_applied(tmp_path):
     """S&P Global's case (midoffice15's ruling 1): a ruling held until it is understood is read
     with why, and the build and the split check refuse to apply it; the reader's other new rule,
     a retained share at least 0 and under 1 and only on a seeded count. The repo's file reads:
-    SPGI's ruling held, FDXF's count grossed up by FedEx's 19.9%, CTVA's and HON's as before."""
+    no ruling held -- SPGI's released by ruling 4 of midoffice16's brief, its evidence the
+    when-issued close -- FDXF's count grossed up by FedEx's 19.9%, CTVA's and HON's as before."""
     import json
 
     def write(*entries):
@@ -618,9 +619,10 @@ def test_a_held_ruling_is_read_with_its_reason_and_never_applied(tmp_path):
     path = Path(__file__).resolve().parents[2] / "config" / "sp500_spin_off_overrides.json"
     rulings = {(r.label, r.ex_date): r for r in securities.read_spin_offs(path)}
     spgi = rulings[("SPGI", dt.date(2026, 7, 1))]
-    assert spgi.held and "no gap" in spgi.held
+    assert not spgi.held and "SPGI WI, closed at 384.00" in spgi.evidence
+    assert (spgi.child, spgi.ratio, spgi.record) == ("MBGL", 1.0, dt.date(2026, 6, 15))
     fdx = rulings[("FDX", dt.date(2026, 6, 1))]
     assert (fdx.child, fdx.child_count, fdx.retained) == ("FDXF", "parent", 0.199)
-    assert [r.label for r in rulings.values() if r.held] == ["SPGI"]
+    assert [r.label for r in rulings.values() if r.held] == []
     assert [r.label for r in rulings.values() if r.retained] == ["FDX"]
     assert rulings[("CTVA", dt.date(2026, 10, 1))].retained == 0.0

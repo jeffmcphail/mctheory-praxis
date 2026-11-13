@@ -257,7 +257,11 @@ PSD, and neither then is the recombination; the notes say when it is not. The S&
 factor covariance is this estimator by default (midoffice11's ruling 2): correlations on
 `--correlation-half-life` 504 trading days, BIM301S's two years, volatilities on `--half-life`'s
 90, both Newey-West at the horizon's lags -- none at the one-day default; `--correlation-half-life
-none` is one half-life for the whole matrix.
+none` is one half-life for the whole matrix. Its diagonal is each factor's correlation with
+itself, c / (sqrt(c) sqrt(c)), times the short window's variance, and that ratio rounds to exactly
+one only about half the time: the volatilities depend on the correlation half-life in the last
+bit, 7e-16 at most, and so does anything read from them, such as the regime multiplier
+(midoffice16).
 
 `correlation_lags` (midoffice13, the run's `--correlation-lags`) gives the correlations their own
 lag count: at 0 they are the long window's one-period correlations while the volatilities keep
@@ -418,11 +422,22 @@ side's multiplier is one until it has 21 days of history** (`REGIME_MIN_DAYS`), 
 half-life tested, so every half-life starts on the same day and the test's first 21 forecast dates
 are unadjusted. A history of 21 days on a half-life of 84 is near an equal-weighted mean of them.
 
-It is an option, off, on each side separately: the run's `--regime-factor-half-life H` and
-`--regime-specific-half-life H`, each refitting the model as of every day from the bias test's
-first (about eight minutes, or within `--bias`'s own loop); `--bias-regime-half-lives H,H` tests
-every pairing of those half-lives on the two sides, either side off among them, beside the model
-in one pass, each eigen scale's factor side levelled again by its own forecasts' history.
+Each side is an option, set separately: the run's `--regime-factor-half-life H` and
+`--regime-specific-half-life H`, `none` for off. Either one makes a plain run refit the model as
+of every day from the bias test's first; under `--bias` the test's own loop serves.
+`--bias-regime-half-lives H,H` tests every pairing of those half-lives on the two sides, either
+side off among them, beside the model in one pass, each eigen scale's factor side levelled again
+by its own forecasts' history.
+
+- **The factor side is the model's default at 21 days** (ruling 1 of midoffice16's brief). The
+  criterion
+  fixed before midoffice15's run chose it on the test's first half (0.098, against 42 days' 0.111
+  and the model's 0.172), and it was the best on the second (0.123, against 0.131 and 0.141). Its
+  price is noise: the index's forecast moves 1.00% a day at the median against 0.27%, still less
+  than a member's moves under the model (1.34%). In a plain run its refits cost about seven
+  minutes: 7.5 minutes against 0.8 with the side off, 6.8 of them the 686 refits.
+- **The specific side is off** (ruling 2): a level, 1.09 in both halves, set by the largest
+  members, whose fix is by size, in the specific risk model.
 
 ## The cross-sectional estimator
 
@@ -1208,17 +1223,27 @@ cache holds the fetch:
   priced day before, its cash that day, k of the child's shares a parent share at the child's
   close V (its first close after, where it has none that day: Lennar's, whose record date was
   its ex-date), w any split the build applies between -- and the stitched prices keep Polygon's
-  adjusted closes. 19 rulings, 18 applied: 13 of the pairs the brief names that the cache does
-  not carry, CTVA's among them (-83.8% to +4.1%); Lennar's of 2025-01-21, carried at a third of
-  the distribution's value, now at Millrose's first close; and five the public record adds --
+  adjusted closes. 19 rulings, every one applied: 13 of the pairs the brief names that the cache
+  does not carry, CTVA's among them (-83.8% to +4.1%); Lennar's of 2025-01-21, carried at a third
+  of the distribution's value, now at Millrose's first close; and five the public record adds --
   Jacobs' second Amentum distribution, BD's Waters shares, Aptiv's Versigent and Honeywell's
-  Aerospace, kept (midoffice15's ruling 1), and S&P Global's Mobility, **held**: the record makes
-  2026-07-01 its first ex-distribution day, and SPGI's raw prices show no fall of Mobility's
-  value (5.2%) on it, on its record date or on any day from 06-01 to 07-10 -- over 07-01 and
-  07-02 its raw return, +8.01%, is its six peers' (+7.14% to +8.70%) without the distribution.
-  A held ruling is read and listed and never applied (`held`), its evidence kept until it is
-  understood. The seven Polygon records within 10% of the brief's value are left as carried
-  (midoffice15's ruling 5). Honeywell made a
+  Aerospace, kept (midoffice15's ruling 1), and S&P Global's Mobility.
+  - **S&P Global's was held, then released.** midoffice15 held it: the record makes 2026-07-01
+    its first ex-distribution day, and SPGI's raw prices showed no fall of Mobility's value
+    (5.2%) on it or on its record date. Over 07-01 and 07-02 its raw +8.01% was its six peers'
+    (+7.14% to +8.70%) without the distribution.
+  - **Ruling 4 of midoffice16's brief released it.** Polygon's 407.26 is the regular-way close of
+    2026-06-30: the ex-distribution line, SPGI WI, closed at 384.00 that day, and the 23.26
+    between them is about one Mobility share at its when-issued price. A regular-way close near
+    428 would have needed Mobility near 44, and it opened at 20.30. The gap was there, and
+    07-01's rally filled it: SPGI closed 8.07% over its when-issued close, its peers' median
+    +4.27%. The press read the day the same way; the prices and the press are quoted in the
+    ruling's evidence, from Chat's search results, and the arithmetic checks against the
+    cache's bars. So the ruling's +7.0962% stands, and SPGI's +3.8 sd that day is the market's.
+
+  A held ruling (`held`) is read and listed and never applied, its evidence kept until it is
+  understood; the mechanism stays, and none is held now. The seven Polygon records within 10% of
+  the brief's value are left as carried (midoffice15's ruling 5). Honeywell made a
   1-for-2 reverse split one minute after its Aerospace distribution, which the cache does not
   record and which offsets the price gap: the ruling applies it to the count as a split the gate
   classified, checked by Honeywell's own samples (635,675,701 to 316,940,010, 0.499 times), so
@@ -1307,7 +1332,12 @@ from 5.80% to 6.22%. Total returns raise every industry's mean, from 0.65% (Serv
 lower Volatility's by 0.58%; the high yielders' specific risk falls most, Altria's by 0.58 of a
 point.
 
-Since midoffice15 the default panel is `_revised`: S&P Global's ruling held, which returns its
+Since midoffice16 the default panel is `_released`: every ruling applied, S&P Global's hold
+released. Against `_revised` only SPGI's 2026-07-01 (+1.89% to +7.10%) and its index's rescaling
+after it change; against `_spinoffs` only FedEx Freight's counts. Mean R-squared is 0.293825;
+specific risk 16.56 / 28.99 / 48.89%; the size pair 11.05% and 0.60%.
+
+Since midoffice15 the default panel was `_revised`: S&P Global's ruling held, which returned its
 2026-07-01 to Polygon's +1.89%, and FedEx Freight's count grossed up over its 109 member-days, and
 nothing else. Mean R-squared moves from 0.293826 to 0.293821; specific risk is 16.56 / 28.98 /
 48.89%; the size pair is unchanged (11.05% and 0.60%). FedEx Freight still lacks Momentum, so its
@@ -1339,6 +1369,32 @@ a daily scale, and set against the next trading day's total return: `z = realise
 The bias statistic is the standard deviation of z -- one if the forecasts are right, its 95%
 band about `1 +/- sqrt(2/T)` -- over the whole test, and over every 12-month window with the
 windows' mean absolute deviation from one (MRAD).
+
+**A whole test's statistic is, to rounding, the root mean square of its halves'** (ruling 1 of
+midoffice16's brief). Over halves of n1 and n2 outcomes, with means m1 and m2, exactly
+
+    b^2 = [ (n1 - 1) b1^2 + (n2 - 1) b2^2 + (n1 n2 / n) (m1 - m2)^2 ] / (n - 1),
+
+so b is `sqrt((b1^2 + b2^2) / 2)` where the halves are the same size and their mean outcomes
+close. Checked on midoffice15's runs at one day, every family (`rms_identity.txt` in the
+midoffice16 retro):
+
+- **Within 0.001** for the broad portfolios, the minimum-variance portfolios, the industries
+  and the random long-only portfolios, ddof's weights alone taking 0.0007. The index's 1.015 is
+  1.224 and 0.751; eigenportfolio 1's 1.027 is 1.226 and 0.780; under the regime adjustment's
+  factor side the index's 0.934 is 1.063 and 0.785.
+- **A few thousandths more where a portfolio's mean outcome turns** between the halves: a random
+  long-short portfolio 0.0047 (its mean z -0.10 then +0.11), eigenportfolio 20 0.0056.
+- **It fails for a member whose halves differ in size**, one that joined or left the index during
+  the test -- 45 of 504. JNPR, 343 outcomes and then 5, reads 0.545 against a root mean square
+  of 1.562. There the counts weigh, and the exact form holds.
+- **A family's summary is no identity at all:** the industries' mean abs(bias - 1) is 0.046 over
+  the test and 0.094 and 0.110 in its halves, their errors cancelling within each industry's
+  whole-test statistic.
+
+**So a whole-test band can pass a model that is wrong in both halves.** The model's in-band
+1.015 for the index was a first-half under-forecast cancelling a second-half over-forecast. That
+is why the rolling 12-month windows, not the whole test, are the criterion.
 
 **At the model's horizon** (midoffice12) every forecast, at h times its daily variance, is set
 against the h trading days' return after it, bought and held. The windows overlap, each starting
@@ -1547,9 +1603,12 @@ multiplier to 5e-14.
 - **It brings each year's level toward one:** the broad portfolios' MRAD 0.167 to 0.094 over the
   test (the first half's 0.165 to 0.068), the minimum-variance portfolios' 0.238 to 0.135; by half
   the index reads 1.063 and 0.785 (the model's 1.224 and 0.751), the optimiser 1.109 and 1.163
-  then 0.855 and 0.887. Over the whole test the index falls from 1.015 to 0.934, below its band:
-  the factors as a whole were forecast too low (their squared statistic 1.115 over the test) while
-  the market's direction was right.
+  then 0.855 and 0.887. Over the whole test the index falls from 1.015 to 0.934, below its band
+  -- not a cost of the adjustment (ruling 1 of midoffice16's brief). Each whole-test statistic is
+  the root
+  mean square of its halves' (above): the model's in-band 1.015 was a first-half under-forecast
+  cancelling a second-half over-forecast, the adjustment removes the first, and the 0.934 is the
+  second, the calm half's shape.
 - **It cannot reach the calm half's level, which is a shape.** In the second half the market-like
   eigenportfolio, rank 1, reads 0.780, as the index does, while every other rank reads 0.99 to
   1.37 -- their mean squared outcome 1.36 against rank 1's 0.61 -- so a single multiplier lowers
@@ -1581,7 +1640,60 @@ lower, 1.024, 1.010 and 0.997 on average against the model's 1.039.
   hundredths less in the second; their statistics do not move (0.99 to 0.99, 1.03 to 1.04).
 - **The rest is level:** the re-levelled multiplier lowers the market direction, the index
   0.934 to 0.966 at a = 3; the regime criterion 0.105 to 0.107. One-sided as two-sided
-  (midoffice13), the adjustment stays an option, off.
+  (midoffice13), the adjustment stays an option, off (midoffice15's ruling 3).
+
+**The new defaults** (rulings 1 and 4 of midoffice16's brief: the regime adjustment's factor side
+on 21 days, the panel with every ruling applied).
+- **On midoffice15's panel** (N16) their bias run is V15's F 21, S off test to the bit in every
+  array, the regime history included.
+- **On the released panel** (D16, the guard on) only S&P Global's 2026-07-01 moves anything:
+  - no forecast before that day changes;
+  - after it everything moves through that day's factor returns, the multiplier at most +3.5e-4;
+  - SPGI's own outcome that day goes from +1.0 to +3.7 sd, and every other statistic is
+    unchanged to the third decimal but one (0.887 to 0.886).
+- **Their standing numbers:**
+  - the index 0.934 over the test, 1.063 and 0.785 by half, its MRAD 0.098;
+  - the minimum-variance portfolios 0.990 and 1.033, realising 10.13% and 10.19% a year;
+  - the members' median 0.987.
+
+**The correlation half-life on the regime-adjusted model, measured** (midoffice16, C16): 63, 126
+and 252 days beside the model's 504, the volatilities' 90 kept, in one pass. Each refit's own
+factor returns are re-estimated by the model's estimator (`crosssectional.reestimated_covariance`),
+and each setting reads the regime multiplier from its own forecasts; its model test is D16's to
+the bit. Chosen by a rule written before the run: the minimum-variance portfolios' realised
+volatility first -- a setting under which either realises more over the whole test than at 504,
+to the hundredth of a point, is out -- then the regime criterion on the first half.
+
+- **The rule keeps 504.** 63 days is out: its unconstrained portfolio realises 10.23% a year
+  against 10.19%. 126 and 252 are in but worse on the first half's criterion (0.104 and 0.100
+  against 0.098).
+- **Each half prefers the other end, monotonically.** Shorter is better in the calm second half
+  (the criterion 0.123 to 0.083 at 63; the optimiser realising 8.02% and 8.08% a year to 7.67%
+  and 7.83%) and worse in the first (0.098 to 0.116; 11.88% and 11.95% to 12.10% and 12.18%).
+- **A shorter half-life fixes part of the shape, in the calm half.**
+  - **The same directions:** on the model's own eigen-directions, as each setting forecasts
+    them, the second half's mean abs(bias - 1) goes from 0.222 to 0.168 at 63, and the middle
+    ranks come down.
+  - **The market direction stays over-forecast:** rank 1 0.814 to 0.858, the index 0.785 to
+    0.833. The 63-day correlations take only 6% off the market direction's forecast volatility,
+    where it would need about 19% (1 - 0.814). The calm half's mean correlation between factors is
+    0.398 at 63 days against 0.432 at 504: the correlations had fallen, but not by much.
+  - **What is left is on the volatility side:** one multiplier over 25 factors, which the market
+    direction and the rest pull apart.
+- **The optimiser pays for it in the small eigen-directions, in both halves.** At 63 days, of
+  its own covariance's eigen-directions:
+  - ranks 21-25 read 1.303 against 1.195;
+  - the optimiser puts 23.8% of its long-only forecast variance in ranks 16-25 against 20.6%
+    (unconstrained 28.2% against 23.4%), and those parts realise 1.25 times their forecast
+    against 1.17.
+
+  The noisier window's smallest eigenvalues are too small, and the optimiser finds them.
+- **The noise a shorter window adds is small** beside the regime adjustment's: the index's
+  forecast moves 1.06% a day at the median at 63, 1.00% at 504.
+
+The 504-day correlations stay. The test that would tell whether the optimiser's price can be
+taken back is the one-sided eigenvalue adjustment on the 63-day correlations, judged by the same
+rule; proposed, not run (midoffice16's retro).
 
 ## Status
 
