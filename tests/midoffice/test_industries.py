@@ -9,6 +9,7 @@ dressed as a taxonomy and deserves to be visible.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -19,12 +20,15 @@ from praxis.midoffice.refdata.industries import (
     MIN_MEMBERS,
     OTHER,
     UNCLASSIFIED,
+    apply_code_overrides,
     build_scheme,
     combine,
     division_of,
     industry_exposures,
     major_group_of,
+    members_without_industry,
     merge_industries,
+    read_industry_overrides,
 )
 
 
@@ -398,3 +402,135 @@ def test_a_fold_names_only_industries_that_are_factors():
     for merges in ({"SIC13": "Mining"}, {"Mining": "Construction"}, {"Mining": "Mining"}):
         with pytest.raises(ValueError):
             merge_industries(base, merges)
+
+
+# ------------------------------------------------------- every member on the market (midoffice19)
+
+
+def _lone_world() -> dict[str, str | None]:
+    """Two well-populated major groups and one security alone in Agriculture, below the floor."""
+    codes: dict[str, str | None] = {f"M{i:02d}": "3571" for i in range(20)}
+    codes.update({f"C{i:02d}": "2834" for i in range(20)})
+    codes["LONE"] = "0100"
+    return codes
+
+
+def test_a_group_below_the_floor_joins_its_nearest_industry_and_no_member_goes_without_one():
+    """Ruling 3 of midoffice19's brief. The model has no market factor, its industries spanning
+    the market, so a member with no industry factor has none of the market's risk, and a
+    minimum-variance optimiser held CTVA, alone in Agriculture, at a tenth of its portfolio. With
+    `joins` a group still below the hard floor after its division merge joins the industry its
+    entry names: every member in the universe has an industry factor, nothing is pooled, and the
+    join is recorded and reported. Without `joins`, the pooling as before."""
+    codes = _lone_world()
+    old = build_scheme(codes)
+    assert old.assignment["LONE"] == OTHER and old.factorless == ("LONE",)
+    scheme = build_scheme(codes, joins={"Agriculture": "SIC28"})
+    assert scheme.assignment["LONE"] == "SIC28"
+    assert scheme.industries == ("SIC28", "SIC35")
+    assert scheme.counts() == {"SIC28": 21, "SIC35": 20}
+    assert scheme.factorless == () and scheme.pooled == ()
+    assert OTHER not in scheme.assignment.values()
+    assert scheme.joined == {"Agriculture": "SIC28"}
+    assert scheme.joined_members == {"Agriculture": ("LONE",)}
+    assert "1 group(s) below the hard floor of 5 joined their nearest industry: Agriculture (1) "\
+           "into SIC28" in scheme.describe()
+    assert any("Agriculture into SIC28 (LONE)" in q for q in scheme.qualifications())
+    securities = tuple(codes)
+    block = industry_exposures(scheme, _dates(), securities)
+    assert np.allclose(block.values.sum(axis=2), 1.0)
+    assert (block.values[:, securities.index("LONE"), 0] == 1.0).all()
+    # An entry for a group at or above the floor is not used: the scheme is the old one's.
+    unused = build_scheme(_codes(), min_members=MIN_MEMBERS, joins={"Agriculture": "SIC35"})
+    assert unused.joined == {}
+    assert unused.assignment == build_scheme(_codes(), min_members=MIN_MEMBERS).assignment
+
+
+def test_a_group_below_the_floor_with_no_entry_or_no_code_is_refused():
+    """A group below the floor with no entry stops the build -- its nearest industry is a ruling,
+    with the evidence -- and so does a join to anything that is not a factor at or above the
+    floor. A member with no SIC code needs a code: Unclassified has no nearest industry. Outside
+    the universe it is in no regression, and is left as before."""
+    codes = _lone_world()
+    with pytest.raises(ValueError, match="no industry to join"):
+        build_scheme(codes, joins={})
+    for target in ("SIC99", OTHER, UNCLASSIFIED, "Agriculture"):
+        with pytest.raises(ValueError, match="not an industry factor"):
+            build_scheme(codes, joins={"Agriculture": target})
+    thin = dict(codes, B1="1521", B2="1521")       # Construction: two, below the floor too
+    with pytest.raises(ValueError, match="not an industry factor"):
+        build_scheme(thin, joins={"Agriculture": "Construction", "Construction": "SIC35"})
+    nocode: dict[str, str | None] = {f"M{i:02d}": "3571" for i in range(20)}
+    nocode["BANK"] = None
+    with pytest.raises(ValueError, match="no usable SIC code"):
+        build_scheme(nocode, joins={UNCLASSIFIED: "SIC35"})
+    outside = build_scheme(nocode, universe=set(nocode) - {"BANK"}, joins={})
+    assert UNCLASSIFIED in outside.dropped and outside.factorless == ()
+
+
+def test_the_rulings_file_is_read_and_its_codes_apply_only_where_the_records_have_none(tmp_path):
+    """The industries' rulings file (midoffice19): each code entry a key, label, four-digit code
+    and evidence, each join a group, industry and evidence. A code applies only where the records
+    carry none -- the records' code stands, noted -- and an entry whose key is not the panel's
+    for its label is refused, naming another security."""
+    import json
+
+    good = {"codes": [{"key": "K1", "label": "BANK", "sic": "6022", "evidence": "a bank"},
+                      {"key": "K2", "label": "GONE", "sic": "0100", "evidence": "not here"},
+                      {"key": "K3", "label": "HAS", "sic": "2834", "evidence": "superseded"}],
+            "joins": [{"group": "Agriculture", "industry": "SIC28", "evidence": "its business"}]}
+    path = tmp_path / "industries.json"
+    path.write_text(json.dumps(good), encoding="utf-8")
+    overrides = read_industry_overrides(path)
+    assert set(overrides.codes) == {"BANK", "GONE", "HAS"}
+    assert overrides.join_map == {"Agriculture": "SIC28"}
+    codes = {"BANK": None, "HAS": "3571", "M00": "3571"}
+    out, used, notes = apply_code_overrides(codes, overrides,
+                                            keys={"BANK": "K1", "HAS": "K3", "M00": "K0"})
+    assert out == {"BANK": "6022", "HAS": "3571", "M00": "3571"} and used == ["BANK"]
+    assert notes == ["GONE is not in the panel",
+                     "HAS's records carry 3571, which stands; its override (2834) is not applied"]
+    with pytest.raises(ValueError, match="names K1"):
+        apply_code_overrides(codes, overrides, keys={"BANK": "OTHER", "HAS": "K3"})
+    for bad in ({"codes": [{"key": "K", "label": "X", "sic": "60", "evidence": "e"}]},
+                {"codes": [{"key": "K", "label": "X", "sic": "6022"}]},
+                {"codes": [{"key": "K", "label": "X", "sic": "6022", "evidence": "e"}] * 2},
+                {"joins": [{"group": "Agriculture", "evidence": "e"}]}):
+        path.write_text(json.dumps(bad), encoding="utf-8")
+        with pytest.raises(ValueError):
+            read_industry_overrides(path)
+
+
+def test_the_repo_rulings_file_gives_the_three_their_industries():
+    """config/sp500_industry_overrides.json as ruled (midoffice19): FRCB and SBNY, the failed
+    state banks, SIC 6022; VYLR, Corteva's seeds, 0100; Agriculture into SIC28. Each with its
+    evidence; the file ASCII, as every config file here."""
+    path = Path(__file__).resolve().parents[2] / "config" / "sp500_industry_overrides.json"
+    path.read_bytes().decode("ascii")
+    overrides = read_industry_overrides(path)
+    assert {label: entry["sic"] for label, entry in overrides.codes.items()} == {
+        "FRCB": "6022", "SBNY": "6022", "VYLR": "0100"}
+    assert overrides.join_map == {"Agriculture": "SIC28"}
+    assert all(len(entry["evidence"]) > 200 for entry in
+               [*overrides.codes.values(), *overrides.joins.values()])
+
+
+def test_the_standing_check_counts_member_days_without_the_market():
+    """members_without_industry: a member-day with every style exposure and an industry row of
+    zeros is one forecast with no market exposure; a member-day missing a style, or not a
+    member's, is not counted."""
+    codes = _lone_world()
+    securities = tuple(codes)
+    dates = _dates(4)
+    styles = CharacteristicPanel(dates=dates, securities=securities, names=("Size",),
+                                 values=np.ones((4, len(securities), 1)),
+                                 frequency=Frequency.DAILY, standardised=True)
+    styles.values[0, securities.index("LONE"), 0] = np.nan
+    membership = np.ones((4, len(securities)), dtype=bool)
+    membership[3, securities.index("LONE")] = False
+    old = combine(styles, industry_exposures(build_scheme(codes), dates, securities))
+    assert members_without_industry(old, 2, membership) == (2, {"LONE": 2})
+    assert members_without_industry(old, 2, membership, first_row=2) == (1, {"LONE": 1})
+    new = combine(styles, industry_exposures(build_scheme(codes, joins={"Agriculture": "SIC28"}),
+                                             dates, securities))
+    assert members_without_industry(new, 2, membership) == (0, {})

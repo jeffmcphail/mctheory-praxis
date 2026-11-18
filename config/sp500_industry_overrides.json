@@ -1,0 +1,33 @@
+{
+  "description": "Rulings on the S&P 500 model's industries (ruling 3 of midoffice19's brief: no member goes without the market). The model has no market factor -- its industries span the market -- so a member with no industry factor has no market exposure, and the minimum-variance optimiser used it: in the bias test before this file (D16) both optimiser portfolios held CTVA, alone in Agriculture below the scheme's hard floor, at about a tenth on average, their largest holding on most dates. Rulings, not vendor data, so in the repo rather than in data/, as the count and spin-off rulings are carried. 'codes': a SIC code for a security whose records carry none -- its key (composite FIGI, else CIK), label and name, the code and the evidence -- applied only where the panel's own records carry no code, and refused where the key is not the label's. 'joins': a group below the scheme's hard floor after its division merge, and the industry factor it joins, its nearest, with the evidence; a group below the floor with no entry stops the run. Read by scripts/run_sp500_model.py (--industry-overrides; none for midoffice18's scheme, the pooling into Other Industries), which lists every entry it uses (midoffice19).",
+  "codes": [
+    {
+      "key": "BBG0019LSQ49",
+      "label": "FRCB",
+      "name": "First Republic Bank",
+      "sic": "6022",
+      "evidence": "A state-chartered commercial bank: SIC 6022, State Commercial Banks, in major group 60, Depository Institutions, with the index's other banks. Polygon's records carry no SIC code, under FRC (NYSE, CIK 0001132979, 2022-01-03 to 2023-04-05) and FRCB (OTC Link, from 2023-05-03), and describe it: 'First Republic offers private banking and wealth management services to high-net-worth clients. Services are primarily offered in the San Francisco, New York City, and Los Angeles markets. The bank was founded in 1985.' (2022-04-04). The public record: the California Department of Financial Protection and Innovation closed First Republic Bank, San Francisco, on 2023-05-01 and appointed the FDIC receiver, JPMorgan Chase Bank assuming its deposits (FDIC press release of 2023-05-01, https://www.fdic.gov/news/press-releases/2023/pr23034.html) -- a bank chartered by California, closed by its state regulator. SVB Financial Group, whose bank the same regulator closed on 2023-03-10, carries 6022 in Polygon's records."
+    },
+    {
+      "key": "BBG000M6TR37",
+      "label": "SBNY",
+      "name": "Signature Bank",
+      "sic": "6022",
+      "evidence": "A state-chartered commercial bank: SIC 6022, State Commercial Banks, in major group 60, Depository Institutions, with the index's other banks. Polygon's records carry no SIC code (XNAS, CIK 0001288784, 2022-01-03 to 2023-03-10; OTC Link after) and describe it: 'Signature Bank is a New York-based commercial bank. It is engaged in offering a wide range of business and personal banking products and services. The operating segments of the company are Commercial banking and Specialty finance.' (2022-04-04). The public record: the New York State Department of Financial Services closed Signature Bank, New York, on 2023-03-12 and appointed the FDIC receiver, which transferred its deposits to Signature Bridge Bank, N.A. (FDIC press release of 2023-03-12, https://fdic.gov/index.php/news/press-releases/2023/pr23018.html) -- a bank chartered by New York, closed by its state regulator."
+    },
+    {
+      "key": "BBG024CQR6X9",
+      "label": "VYLR",
+      "name": "Vylor Inc.",
+      "sic": "0100",
+      "evidence": "Corteva's seeds business, spun off on 2026-10-01 (config/sp500_spin_off_overrides.json, Corteva's ruling). Polygon's records (XNYS, CIK 0002128626, from 2026-10-01) carry no SIC code and describe it from 2026-10-05: 'Vylor is a seed and crop genetics pure-play company. The company was formed in 2026 when it was spun off from Corteva. Vylor is a leader in the development of genetically modified seeds and other advanced germplasm and traits that boost crop yields.' Its business is the one Corteva's own code, 0100 (Agricultural Production - Crops), was given for while seeds were the larger part of Corteva's profits (Polygon's CTVA records, 2022-04-04 to 2024-07-09). Not named in ruling 3 of midoffice19's brief: in this panel VYLR is in no regression and has no forecast (no momentum history yet), so its code changes no number; it keeps a member from going without the market once it has one."
+    }
+  ],
+  "joins": [
+    {
+      "group": "Agriculture",
+      "industry": "SIC28",
+      "evidence": "Agriculture holds one member in the regressions, CTVA (SIC 0100), below the hard floor of 5 after the division merge, and VYLR outside them. Its nearest industry is SIC28, Chemicals and Allied Products, by its business: Polygon's CTVA records describe a seed and crop protection company -- 'Seeds generate a little over half of total company profits and crop protection chemicals make up the remainder.' (2022-04-04), 'Seeds generate the majority of profits with the remainder coming from crop protection products.' (2024-07-09) -- and, once it had spun off its seeds business as Vylor, 'Corteva is a crop protection pure play.' (2026-10-12). Crop protection chemicals are SIC 2879, Pesticides and Agricultural Chemicals, in major group 28, where the panel's other agricultural-chemical makers are: CF and MOS (2870) and FMC (2800). The model's returns, a check: with the styles' part of its return taken out by the full fit (midoffice18's defaults), CTVA's residual volatility over the 252 estimated periods before the bias test's first forecast is 28.2% a year in SIC28, second of the 20 industries to the Manufacturing division's 27.9%, against 30.6% in none (claude/retros/RETRO_midoffice19_every_member_on_the_market.md)."
+    }
+  ]
+}

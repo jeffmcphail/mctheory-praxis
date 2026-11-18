@@ -13,6 +13,7 @@ import pytest
 
 from praxis.midoffice.model.characteristics import CharacteristicPanel
 from praxis.midoffice.model.country import (
+    block_scaled,
     country_covariance,
     country_map,
     country_weights,
@@ -136,3 +137,26 @@ def test_the_basis_maps_back_and_only_the_two_half_life_estimator_changes():
         country_covariance(model, single, {}, industries)
     with pytest.raises(ValueError, match="weights of shape"):
         to_country_basis(factors.returns, industries, w[:, :2])
+
+
+def test_two_blocks_scale_the_country_and_the_rest_apart_and_map_back():
+    """midoffice19: the basis's covariance scaled by blocks -- the country's variance by
+    lambda_C^2, the other factors' by lambda_R^2, their cross terms by lambda_C lambda_R -- is
+    D S D; on one multiplier for both it is S lambda^2, so mapped back it is midoffice18's
+    setting, the whole covariance times lambda^2. A multiplier not positive is refused."""
+    rng = np.random.default_rng(7)
+    a = rng.normal(size=(6, 6))
+    s = a @ a.T
+    scaled = block_scaled(s, 1.5, 0.8)
+    assert scaled[0, 0] == pytest.approx(s[0, 0] * 1.5 ** 2, rel=1e-15)
+    assert np.allclose(scaled[1:, 1:], s[1:, 1:] * 0.8 ** 2, rtol=1e-15, atol=0.0)
+    assert np.allclose(scaled[0, 1:], s[0, 1:] * 1.5 * 0.8, rtol=1e-15, atol=0.0)
+    assert np.array_equal(scaled, scaled.T)
+    t = country_map(5, [0, 1, 2])
+    assert np.allclose(t @ block_scaled(s, 1.3, 1.3) @ t.T, (t @ s @ t.T) * 1.3 ** 2,
+                       rtol=1e-13, atol=0.0)
+    for bad in ((0.0, 1.0), (1.0, -1.0), (np.nan, 1.0)):
+        with pytest.raises(ValueError, match="positive"):
+            block_scaled(s, *bad)
+    with pytest.raises(ValueError, match="square"):
+        block_scaled(s[:1, :1], 1.0, 1.0)

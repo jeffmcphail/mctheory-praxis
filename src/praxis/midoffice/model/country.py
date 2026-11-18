@@ -20,6 +20,13 @@ own. The two-half-life estimator is not. In the country basis it puts the market
 volatilities' window and the industries' correlations, net of the market, on the long one, where
 the industry basis carries the market's variance on the industries' correlations, the long window
 (`country_covariance`).
+
+The regime adjustment on two blocks (midoffice19): the basis's covariance S scaled as D S D, D
+diag(lambda_C, lambda_R, ..., lambda_R) -- the country's variance by lambda_C^2, the other
+factors' by lambda_R^2, their cross terms by lambda_C lambda_R -- before it is mapped back
+(`block_scaled`). lambda_C is read from the country's own squared bias statistic, lambda_R from
+the other factors', so the market direction gets a multiplier of its own: one multiplier over
+all the basis's factors follows the rest and leaves the market without its regime (midoffice18).
 """
 
 from __future__ import annotations
@@ -108,6 +115,22 @@ def country_map(n_factors: int, industry_columns: Sequence[int]) -> np.ndarray:
     t[:, 1:] = np.eye(n_factors)
     t[np.asarray(industry_columns, dtype=int), 0] = 1.0
     return t
+
+
+def block_scaled(own: np.ndarray, country: float, rest: float) -> np.ndarray:
+    """The basis's covariance with its two blocks scaled (midoffice19): D S D, D the diagonal
+    of `country` for the country, the basis's first factor, and `rest` for every other -- the
+    country's variance times country^2, the others' times rest^2, their cross terms times
+    country * rest. Mapped back by `country_map` as any basis covariance is."""
+    s = np.asarray(own, dtype=float)
+    if s.ndim != 2 or s.shape[0] != s.shape[1] or s.shape[0] < 2:
+        raise ValueError(f"a basis covariance is square, the country and at least one other "
+                         f"factor; got shape {s.shape}")
+    if not (np.isfinite(country) and np.isfinite(rest) and country > 0.0 and rest > 0.0):
+        raise ValueError(f"the multipliers are positive; got {country!r} and {rest!r}")
+    d = np.full(s.shape[0], float(rest))
+    d[0] = float(country)
+    return s * np.outer(d, d)
 
 
 def country_covariance(

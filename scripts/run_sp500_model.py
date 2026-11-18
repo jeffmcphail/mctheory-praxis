@@ -46,7 +46,9 @@ from praxis.midoffice.model.bias import (  # noqa: E402
 )
 from praxis.midoffice.model.characteristics import CharacteristicPanel  # noqa: E402
 from praxis.midoffice.model.country import (  # noqa: E402
+    block_scaled,
     country_covariance,
+    country_map,
     country_weights,
     to_country_basis,
 )
@@ -84,10 +86,13 @@ from praxis.midoffice.model.regime import (  # noqa: E402
 from praxis.midoffice.model.specificrisk import RESIDUAL_SPREADS  # noqa: E402
 from praxis.midoffice.refdata import sp500  # noqa: E402
 from praxis.midoffice.refdata.industries import (  # noqa: E402
+    apply_code_overrides,
     build_scheme,
     combine,
     industry_exposures,
+    members_without_industry,
     merge_industries,
+    read_industry_overrides,
 )
 from praxis.midoffice.refdata.polygon import (  # noqa: E402
     PolygonClient,
@@ -148,6 +153,15 @@ the test's first half and it was the best on the second. Its price is noise -- t
 forecast moving 1.00% a day at the median against the model's 0.27%. The specific side stays
 off (ruling 2): a level, not a regime. `--regime-factor-half-life none` turns the factor side
 off, the model as before."""
+
+INDUSTRY_OVERRIDES = "config/sp500_industry_overrides.json"
+"""The industries' rulings (ruling 3 of midoffice19's brief: no member goes without the market):
+a SIC code, with its evidence, for each security whose records carry none -- FRCB and SBNY, the
+failed banks, and VYLR -- and, for each group below the scheme's hard floor, the industry it
+joins, its nearest -- Agriculture, CTVA alone, into SIC28. With them every member in a regression
+has an industry factor, and so the market. `--industry-overrides none` is midoffice18's scheme:
+the records' codes alone, and a group below the floor pooled into Other Industries, which falls
+short of the floor itself and carries no factor."""
 
 
 def half_life_or_none(text: str) -> float | None:
@@ -675,13 +689,16 @@ def model_inputs(
     codes: dict[str, str | None] | None = None,
     merges: dict[str, str] | None = None,
     scheme=None,
+    joins: dict[str, str] | None = None,
 ) -> ModelInputs:
     """Everything from the panel to the estimator's inputs, as the run computes it.
 
     With `codes`, the industries: a scheme built over the regression universe and folded by
-    `merges` -- or, given, `scheme` held in its place and folded the same way. One definition
-    for the run and for its bias statistics' guard, which rebuilds these from the panel cut at a
-    date with the full run's scheme held, and checks they are the full run's through that date.
+    `merges` -- or, given, `scheme` held in its place and folded the same way. `joins` maps each
+    group below the scheme's hard floor to the industry it joins (midoffice19); None pools them,
+    midoffice18's scheme. One definition for the run and for its bias statistics' guard, which
+    rebuilds these from the panel cut at a date with the full run's scheme held, and checks they
+    are the full run's through that date.
     """
     # None leaves the window to the library.
     beta_months = (
@@ -776,9 +793,13 @@ def model_inputs(
             return_panel, styles, regression_weights=weights, membership=membership,
             periods=periods,
         )
-        built = scheme if scheme is not None else build_scheme(
-            codes, min_members=args.min_industry, universe=universe
-        )
+        try:
+            built = scheme if scheme is not None else build_scheme(
+                codes, min_members=args.min_industry, universe=universe, joins=joins
+            )
+        except ValueError as error:
+            raise SystemExit(f"  the run stops: the industry scheme -- {error} "
+                             f"(--industry-overrides)") from None
         folded = built
         if merges:
             try:
@@ -1103,14 +1124,21 @@ def bias_section(
             inputs.return_panel, inputs.indices, options.get("capitalisations", inputs.caps),
             industry_columns, regression_weights=options.get("regression_weights"),
             membership=options.get("membership"), lag=options.get("lag", 1))
+        t_map = country_map(len(factor_names), industry_columns)
         print(f"  the country factor as a covariance basis (USE4): each refit's own factor returns "
               f"taken to the country basis -- the country the cap-weighted mean of the "
               f"{len(industry_columns)} industries' returns, the weights each period's "
               f"regression's capitalisation shares, each industry less it, the styles as they are "
               f"-- the "
               f"covariance estimated there by the model's estimator, its {len(factor_names) + 1} "
-              f"factors, and mapped back; on the regime adjustment of its own forecasts, B_F over "
-              f"the basis's factors, {regime_label(own_regime)}; chosen by {COVARIANCE_RULE}")
+              f"factors, and mapped back; on two regime multipliers, two settings, each read from "
+              f"the basis's own forecasts, {regime_label(own_regime)}: 'country' one over the "
+              f"basis's factors (midoffice18), 'blocks' two (midoffice19) -- lambda_C from the "
+              f"country's own squared statistic, lambda_R from the other {len(factor_names)} "
+              f"factors', the basis's covariance scaled by blocks before it is mapped back, the "
+              f"country's variance by lambda_C^2, the others' by lambda_R^2, their cross terms by "
+              f"lambda_C lambda_R; chosen by {COVARIANCE_RULE}, the blocks held to ruling 2 of "
+              f"midoffice19's brief: {BLOCKS_BAR}")
 
     # The guard: the forecast as of a date, rebuilt from the panel cut at that date through
     # the run's own pipeline, the scheme held, is the full run's -- its inputs bit for bit
@@ -1190,6 +1218,7 @@ def bias_section(
     setting_variants = {key: BiasTest(**setup) for key in estimators}
     if country:
         setting_variants["country"] = BiasTest(**setup)
+        setting_variants["blocks"] = BiasTest(**setup)
     # Each regime history reads the forecasts its tests start from: the model's (None), each
     # eigen scale's and each covariance setting's; the specific side is the model's for every
     # one.
@@ -1205,6 +1234,13 @@ def bias_section(
     basis_history = RegimeHistory() if country else None
     basis_covariances: list[np.ndarray] = []
     previous_basis = None
+    # The two blocks (midoffice19): the country's own history and the other factors', both from
+    # the basis's forecasts, so together they are the basis's history split; the basis's
+    # covariance scaled by blocks by date, and each date's two multipliers.
+    block_histories = ({"blocks_c": RegimeHistory(), "blocks_r": RegimeHistory()} if country
+                       else {})
+    blocks_covariances: list[np.ndarray] = []
+    block_multipliers: list[tuple[float, float]] = []
     periods = notes.frequency.periods_per_year if notes.annualised else 1.0
     returns = inputs.return_panel.returns
     previous = None
@@ -1234,9 +1270,20 @@ def bias_section(
                                      f"follows a forecast as of {dates[previous_basis[0]]}")
                 day_return = to_country_basis(own.returns[-1:], industry_columns,
                                               country_by_date[dates[t]][None])[0]
-                basis_history.add_factor(dates[t], forecast_volatilities(previous_basis[1],
-                                                                         periods), day_return)
+                basis_vols = forecast_volatilities(previous_basis[1], periods)
+                basis_history.add_factor(dates[t], basis_vols, day_return)
+                block_histories["blocks_c"].add_factor(dates[t], basis_vols[:1], day_return[:1])
+                block_histories["blocks_r"].add_factor(dates[t], basis_vols[1:], day_return[1:])
             previous_basis = (t, basis)
+            # The two blocks' multipliers as of t, from the histories through day t, and the
+            # basis's covariance scaled by them before it is mapped back (midoffice19).
+            block_pair = ((block_histories["blocks_c"].multiplier("factor", own_regime[0]),
+                           block_histories["blocks_r"].multiplier("factor", own_regime[0]))
+                          if regime_on else (1.0, 1.0))
+            scaled = block_scaled(basis, *block_pair)
+            forecasts["blocks"] = RiskForecast.from_model(fitted, securities,
+                                                          covariance=t_map @ scaled @ t_map.T)
+            block_multipliers.append(block_pair)
         # Day t's statistics from the forecasts as of t - 1, so the multipliers as of t read
         # nothing after t's close.
         regime_step(histories, previous, fitted, t, dates, returns, inputs.caps, membership)
@@ -1253,7 +1300,11 @@ def bias_section(
             variant.add(t, forecasts[None].regime_adjusted(*regime_multipliers(histories, None,
                                                                                pair)))
         for key, variant in setting_variants.items():
-            if key != "country":
+            if key == "blocks":
+                # Its factor multipliers are in its covariance already, by block.
+                pair = ((1.0, histories[None].multiplier("specific", own_regime[1]))
+                        if regime_on else (1.0, 1.0))
+            elif key != "country":
                 pair = regime_multipliers(histories, key, own_regime)
             elif regime_on:
                 pair = (basis_history.multiplier("factor", own_regime[0]),
@@ -1265,6 +1316,8 @@ def bias_section(
             covariances[key].append(adjusted.covariance)
             if key == "country":
                 basis_covariances.append(basis * pair[0] ** 2)
+            if key == "blocks":
+                blocks_covariances.append(scaled)
         if fitted.notes.eigen is not None:
             eigen = fitted.notes.eigen
             simulated.append((eigen.bias, eigen.standard_error, eigen.seconds))
@@ -1414,10 +1467,36 @@ def bias_section(
     if regime_runs:
         _report_regime(run, regime_runs, histories[None], own_regime, tested, groups,
                        member_stats or [], securities)
-    report_histories = {**histories, "country": basis_history} if country else histories
+    report_histories = ({**histories, "country": basis_history, **block_histories} if country
+                        else histories)
+    if country and regime_on and len(basis_history):
+        # The blocks' histories are the basis's split: over the 26 factors the mean of the two.
+        whole = np.array(basis_history.factor_squared)
+        split = ((np.array(block_histories["blocks_c"].factor_squared)
+                  + len(factor_names) * np.array(block_histories["blocks_r"].factor_squared))
+                 / (len(factor_names) + 1))
+        print(f"  the blocks' histories split the basis's: B_F^2 over its {len(factor_names) + 1} "
+              f"factors is (B_C^2 + {len(factor_names)} B_R^2) / {len(factor_names) + 1} on all "
+              f"{whole.size} days, to {np.max(np.abs(split / whole - 1.0)):.1e} relative")
+    # The country factor (midoffice19): the industries' factor returns of each outcome period
+    # weighted by that period's capitalisation shares -- known at the forecast's close, read from
+    # t's capitalisations -- and each setting's forecast of the same portfolio of factors.
+    country_factor = None
+    if country:
+        position = {d: i for i, d in enumerate(dates)}
+        shares = [country_by_date.get(dates[position[d] + 1]) for d in run.dates]
+        country_factor = {"realised": np.array([
+            np.nan if w is None else float(w @ factor_rows[position[d] + 1, industry_columns])
+            for d, w in zip(run.dates, shares)])}
+        block = np.ix_(industry_columns, industry_columns)
+        for key in (None, "country", "blocks"):
+            country_factor[key] = np.array([
+                np.nan if w is None else float(np.sqrt(w @ covariance[block] @ w / periods))
+                for w, covariance in zip(shares, covariances[key])])
     if setting_runs:
         _report_settings(run, setting_runs, kind, own_setting, report_histories, own_regime,
-                         groups, member_stats or [], securities, run_caps, volatilities)
+                         groups, member_stats or [], securities, run_caps, volatilities,
+                         country_factor if country else None)
     if own_regime != (None, None):
         # The run's own forecast, as of the last date: the last day's statistics from the last
         # forecast tested and the full run's own factor returns that day.
@@ -1429,6 +1508,8 @@ def bias_section(
         _save_bias(args.bias_out, run, run_caps, horizon, eigen_runs, simulated, regime_runs,
                    report_histories, setting_runs, covariances,
                    ({"basis_covariance_country": np.array(basis_covariances),
+                     "basis_covariance_blocks": np.array(blocks_covariances),
+                     "blocks_multipliers": np.array(block_multipliers),
                      "country_weights": np.array([country_by_date[d]
                                                   for d in notes.estimated_dates]),
                      "country_weight_dates": np.array([str(d) for d in notes.estimated_dates]),
@@ -1878,6 +1959,13 @@ minimum-variance portfolios realise more is not a better covariance whatever its
 CORRELATION_RULE = COVARIANCE_RULE
 """midoffice16's name for the rule, kept."""
 
+BLOCKS_BAR = ("in only if the optimiser's test passes and its regime criterion is below the "
+              "model's on both halves, not chosen on the first and checked on the second")
+"""The two-block setting's bar (ruling 2 of midoffice19's brief), higher than `COVARIANCE_RULE`'s:
+its design was read from midoffice18's halves, so choosing on the first half and checking on the
+second guards it less well. After the optimiser's test, it must beat the reference's criterion on
+both halves."""
+
 
 PLURAL = {"correlation": "correlations", "volatility": "volatilities"}
 """The covariance settings' kinds, in the plural."""
@@ -1909,7 +1997,7 @@ def _member_quintiles(test, member_stats, securities, caps, part=slice(None)) ->
 
 
 def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime, groups,
-                     member_stats, securities, caps, volatilities) -> None:
+                     member_stats, securities, caps, volatilities, country_factor=None) -> None:
     """The factor covariance's correlation half-life (midoffice16) or volatility half-life
     (midoffice17) at every setting tested, at one day: the regime multiplier each setting's own
     forecasts give against the model's; the minimum-variance portfolios' realised volatility, by
@@ -1921,7 +2009,7 @@ def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime
     keys = list(setting_runs) if country else sorted(setting_runs, key=lambda key: float(key[1:]))
     order = [*keys, None]
     tests = {None: run, **setting_runs}
-    label = ({"country": "country", None: "model *"} if country
+    label = ({**{key: key for key in keys}, None: "model *"} if country
              else {**{key: key[1:] for key in keys}, None: f"{own_setting:g} *"})
     own_text = "the model's" if country else f"at {own_setting:g}"
     n = len(run.dates)
@@ -1932,7 +2020,10 @@ def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime
         print(f"\n  The country factor as a covariance basis at one day (midoffice18): the model "
               f"(*) and its factor returns in the country basis, the covariance estimated there "
               f"and mapped back, on its own forecasts' volatility regime adjustment, "
-              f"{regime_label(own_regime)}")
+              f"{regime_label(own_regime)}"
+              + ("; 'country' on one multiplier over the basis's factors, 'blocks' on two "
+                 "(midoffice19), the country's own and the other factors'"
+                 if "blocks" in keys else ""))
     else:
         print(f"\n  The factor {PLURAL[kind]}' half-life at one day: the model's {own_setting:g} "
               f"(*) and {', '.join(key[1:] for key in keys)} trading days, the {other} on their "
@@ -1950,10 +2041,18 @@ def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime
               f"part" + (" -- the country basis's B_F over its own factors, the country among "
                          "them" if country else ""))
         print(f"  {'':<8} " + "   ".join(f"{p.split(' (')[0]:>30}" for p in parts))
-        for key in order:
+        rows = [(label[key], key) for key in order if key != "blocks"]
+        if "blocks" in keys:
+            # Two multipliers (midoffice19): lambda_C from the country's own statistic, lambda_R
+            # from the other factors'.
+            rows[keys.index("blocks"):keys.index("blocks")] = [("blocks C", "blocks_c"),
+                                                                ("blocks R", "blocks_r")]
+        paths = {}
+        for name, key in rows:
             history = histories[key]
             squared = np.array(history.factor_squared)
             path = regime_path(history, "factor", own_regime[0], n)
+            paths[name] = path
             rows_of = np.array([at[d] for d in history.dates])
             cells = []
             for part in parts.values():
@@ -1961,7 +2060,27 @@ def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime
                 lam = path[part]
                 cells.append(f"{squared[inside].mean():.3f}  {lam.mean():.3f} "
                              f"({lam.min():.3f}-{lam.max():.3f})")
-            print(f"  {label[key]:<8} " + "   ".join(f"{c:>30}" for c in cells))
+            print(f"  {name:<8} " + "   ".join(f"{c:>30}" for c in cells))
+        if "blocks" in keys:
+            print("  lambda_C's path (midoffice19): as of each calendar quarter's last forecast "
+                  "date, beside lambda_R, the country setting's lambda_F and the model's")
+            names = ["blocks C", "blocks R", label["country"], label[None]]
+            print(f"  {'':<17}" + "".join(f" {name:>8}" for name in names))
+            last_of: dict[str, int] = {}
+            for i, d in enumerate(run.dates):
+                last_of[f"{d.year} Q{(d.month - 1) // 3 + 1}"] = i
+            for i in last_of.values():
+                print(f"  {str(run.dates[i]):<17}"
+                      + "".join(f" {paths[name][i]:>8.3f}" for name in names))
+            for word, pick in (("min", np.argmin), ("max", np.argmax)):
+                where = [int(pick(paths[name])) for name in names]
+                print(f"  {word:<17}" + "".join(f" {paths[name][i]:>8.3f}"
+                                                for name, i in zip(names, where))
+                      + "   on " + ", ".join(str(run.dates[i]) for i in where))
+            for plabel, part in halves.items():
+                name = "mean, " + plabel.split(" (")[0].removeprefix("the ")
+                print(f"  {name:<17}" + "".join(f" {paths[n2][part].mean():>8.3f}"
+                                                for n2 in names))
     if model_history is not None and own_regime[0] is not None and kind == "correlation":
         print(f"  The factor volatilities do not depend on the correlations, so each setting's "
               f"regime multiplier should be the model's: each setting's own against the model's "
@@ -2015,6 +2134,15 @@ def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime
           f"({first[chosen][criterion]:.3f}; the model's {first[None][criterion]:.3f}); on the "
           f"second half it reads {second[chosen][criterion]:.3f} against the model's "
           f"{second[None][criterion]:.3f}, the best there {label[best]}")
+    if "blocks" in keys:
+        beats = [part["blocks"][criterion] < part[None][criterion] for part in (first, second)]
+        passed = not out["blocks"] and all(beats)
+        print(f"  the blocks by ruling 2 of midoffice19's brief, {BLOCKS_BAR}: the optimiser's "
+              f"test {'out' if out['blocks'] else 'in'}; the criterion "
+              f"{first['blocks'][criterion]:.3f} "
+              f"against {first[None][criterion]:.3f} on the first half, "
+              f"{second['blocks'][criterion]:.3f} against {second[None][criterion]:.3f} on the "
+              f"second -- {'in' if passed else 'out'}")
 
     k = run.eigen_forecast.shape[0]
     print("\n  The shape: each setting's own eigenportfolios -- the eigenvectors of its covariance "
@@ -2055,6 +2183,24 @@ def _report_settings(run, setting_runs, kind, own_setting, histories, own_regime
                 f"{v:.3f}" for v in _member_quintiles(tests[key], member_stats, securities, caps,
                                                        part)))
 
+    if country_factor is not None:
+        # The country factor itself (midoffice19): the industries' factor returns weighted by the
+        # outcome period's capitalisation shares, forecast by each setting's covariance as it
+        # forecasts any portfolio of the model's factors.
+        print("\n  The country factor -- the industries' factor returns weighted by the outcome "
+              "period's capitalisation shares, each setting's forecast of it from its covariance "
+              "mapped back -- by part: its forecast volatility % a year at the median, and its "
+              "statistic")
+        realised = country_factor["realised"]
+        for plabel, part in parts.items():
+            cells = []
+            for key in order:
+                forecast = country_factor[key][part]
+                stats = bias_statistics(forecast, realised[part])
+                cells.append(f"{label[key]} {100 * np.sqrt(BIAS_YEAR) * np.nanmedian(forecast):.2f}"
+                             f" {stats.statistic:.3f}")
+            print(f"  {plabel.split(' (')[0]:<18} " + "   ".join(cells))
+
     index_row = run.names.index("the index, cap-weighted")
     print("\n  Day to day: the median absolute change in log forecast volatility from one forecast "
           "date to the next (its 95th percentile), the cap-weighted index's and every member's "
@@ -2089,9 +2235,12 @@ def _bias_arrays(run, suffix: str = "", members: bool = True) -> dict[str, np.nd
         f"held_long_only{suffix}": run.min_variance_held["long-only"],
         f"held_unconstrained{suffix}": run.min_variance_held["unconstrained"],
     }
-    # Where the optimiser puts its factor risk (midoffice16), dates by factors.
+    # Where the optimiser puts its factor risk (midoffice16), dates by factors; and what it held
+    # (midoffice19), dates by securities.
     for label, exposure in run.min_variance_exposure.items():
         out[f"exposure_{label.replace('-', '_')}{suffix}"] = exposure
+    for label, holdings in run.min_variance_weights.items():
+        out[f"min_variance_weights_{label.replace('-', '_')}{suffix}"] = holdings
     if members:
         out[f"member_realised{suffix}"] = run.member_realised
     for h in run.horizons:
@@ -2254,6 +2403,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="fold industry A into industry B once the scheme is built, its "
                              "members labelled B; repeatable, and a chain resolves to its end "
                              "(with --industries)")
+    parser.add_argument("--industry-overrides", default=INDUSTRY_OVERRIDES, metavar="PATH",
+                        help="the industries' rulings (midoffice19), so no member goes without "
+                             "the market: a SIC code, with its evidence, for each security whose "
+                             "records carry none, and for each group below the scheme's hard "
+                             "floor the industry it joins, its nearest; a group below the floor "
+                             f"with no entry stops the run (default {INDUSTRY_OVERRIDES}); none "
+                             "is midoffice18's scheme, the records' codes alone and a group below "
+                             "the floor pooled into Other Industries (with --industries)")
     parser.add_argument("--specific-history", choices=("covered", "regression"),
                         default="covered",
                         help="whose residuals each security's own specific-risk history is "
@@ -2360,9 +2517,12 @@ def main(argv: list[str] | None = None) -> int:
                              "basis tested beside the model (midoffice18; USE4): each refit's "
                              "factor returns taken to the country basis -- the country the "
                              "cap-weighted mean of the industries' returns, each industry less "
-                             "it -- the covariance estimated there and mapped back, on the regime "
-                             "adjustment of its own forecasts; chosen by COVARIANCE_RULE, and kept "
-                             "in --bias-out")
+                             "it -- the covariance estimated there and mapped back, on two "
+                             "regime multipliers read from its own forecasts as two settings: one "
+                             "over the basis's factors (midoffice18) and two blocks, the "
+                             "country's own and the other factors' (midoffice19); chosen by "
+                             "COVARIANCE_RULE, the blocks held to BLOCKS_BAR, and kept in "
+                             "--bias-out")
     parser.add_argument("--bias-horizons", type=horizon_list, default=(), metavar="H,H",
                         help="with --bias, more horizons in trading days to evaluate every "
                              "forecast at, beside one day and the model's own, comma-separated; "
@@ -2545,9 +2705,28 @@ def main(argv: list[str] | None = None) -> int:
     merges = parse_merges(args.merge_industry)
     codes: dict[str, str | None] | None = None
     carried: list[str] = []
+    # The industries' rulings (midoffice19): codes where the records carry none, and the industry
+    # each group below the hard floor joins -- or none, midoffice18's scheme.
+    overrides = None
+    if args.industries and args.industry_overrides.strip().lower() != "none":
+        try:
+            overrides = read_industry_overrides(args.industry_overrides)
+        except (OSError, ValueError) as error:
+            raise SystemExit(f"  --industry-overrides: {error}") from None
+    overridden: list[str] = []
+    override_notes: list[str] = []
+    joins: dict[str, str] | None = None
     if args.industries:
         codes, carried = industry_codes(panel, extras, args)
-    inputs = model_inputs(panel, market, membership, args, codes=codes, merges=merges)
+        if overrides is not None:
+            keys = dict(zip(panel.securities, extras["keys"])) if on_securities else None
+            try:
+                codes, overridden, override_notes = apply_code_overrides(codes, overrides, keys)
+            except ValueError as error:
+                raise SystemExit(f"  the run stops: --industry-overrides: {error}") from None
+            joins = overrides.join_map
+    inputs = model_inputs(panel, market, membership, args, codes=codes, merges=merges,
+                          joins=joins)
     descriptors, standardised, caps = inputs.descriptors, inputs.standardised, inputs.caps
     weights, return_panel = inputs.weights, inputs.return_panel
     blendable, unblended = inputs.blendable, inputs.unblended
@@ -2651,9 +2830,27 @@ def main(argv: list[str] | None = None) -> int:
         if on_securities:
             missing = sorted(code for code, sic in codes.items() if not sic)
             print(f"  each security's SIC code from its own latest record with one: "
-                  f"{len(codes) - len(missing)} of {len(codes)}"
+                  f"{len(codes) - len(missing) - len(overridden)} of {len(codes)}"
+                  + ("; by override, with its evidence: "
+                     + ", ".join(f"{label} {codes[label]}" for label in overridden)
+                     if overridden else "")
                   + (f"; none for {', '.join(missing)}" if missing else ""))
-        elif carried:
+        elif overridden:
+            print("  by override, with its evidence: "
+                  + ", ".join(f"{label} {codes[label]}" for label in overridden))
+        if overrides is not None:
+            unused = sorted(set(overrides.joins) - set(scheme.joined))
+            print(f"  the industries' rulings (--industry-overrides {overrides.path}): no member "
+                  f"goes without the market (ruling 3 of midoffice19's brief) -- "
+                  f"{len(overrides.codes)} code(s), {len(overrides.joins)} join(s)"
+                  + (f"; joins not needed, the group at or above the floor: {', '.join(unused)}"
+                     if unused else ""))
+            for note in override_notes:
+                print(f"  - {note}")
+        else:
+            print("  --industry-overrides none: the records' codes alone, and a group below the "
+                  "hard floor pooled into Other Industries (midoffice18's scheme)")
+        if not on_securities and carried:
             # A company acquired mid-window has no record at the end of it, but its industry
             # while it traded is exactly what the regression needs.
             print(f"  {len(carried)} classification(s) carried from an earlier date "
@@ -2671,6 +2868,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {name:<24} {count:>4}")
         for note in scheme.qualifications():
             print(f"  - {note}")
+        # The market for every member (ruling 3 of midoffice19's brief), standing: a member-day
+        # with every style exposure and no industry factor is one the model would forecast with
+        # no market exposure. Under the rulings there must be none.
+        first_row = (int(np.flatnonzero(inputs.periods)[0]) if inputs.periods is not None
+                     else 1)
+        total, by_security = members_without_industry(
+            indices, len(scheme.industries), membership, first_row)
+        print(f"  members without the market -- member-days from the first estimated period "
+              f"({panel.dates[first_row]}) with every style exposure and no industry factor: "
+              + ("none" if not total else f"{total:,}, " + ", ".join(
+                  f"{code} {n:,}" for code, n in sorted(by_security.items(),
+                                                        key=lambda kv: -kv[1]))))
+        if total and overrides is not None:
+            raise SystemExit("  the run stops: a member goes without the market under the "
+                             "industries' rulings -- give it a code or its group a join, with "
+                             "the evidence")
 
     print("\nModel")
     print(f"  regression weights: "

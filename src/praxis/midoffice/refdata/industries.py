@@ -40,8 +40,10 @@ change.
 
 from __future__ import annotations
 
+import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 import numpy as np
@@ -95,6 +97,16 @@ A later run showed why both halves are needed. Agriculture was the only industry
 floor, so pooling renamed it rather than merging it -- Other Industries, one member, the same
 107 percent -- and Unclassified, which the pass skipped, kept four members of whom only one was
 in most periods' regression: Signature Bank's post-failure OTC series, at 159 percent.
+
+**No member goes without the market** (ruling 3 of midoffice19's brief). In a model with no
+market factor a member with no industry factor has no market exposure at all, and a
+minimum-variance optimiser treats it as a diversifier: in the S&P 500 run's bias test both
+optimiser portfolios held CTVA, alone in Agriculture below the floor, at about a tenth of the
+portfolio. So with `joins` a group still below the floor after its division merge joins the
+industry factor the mapping names -- its nearest, by the evidence recorded with the mapping --
+instead of being pooled into OTHER, and a group below the floor with no entry stops the build.
+Unclassified has no nearest industry: a member with no SIC code needs one, by an override with
+its evidence. Without `joins`, the pooling above, as it was.
 """
 
 
@@ -146,6 +158,10 @@ class IndustryScheme:
     # industry and the industry its members went to. Apart from `merged`, which is the
     # grouping's own record of major groups into divisions and thin ones into OTHER.
     folded: Mapping[str, str] = field(default_factory=dict)
+    # Groups below the hard floor that joined their nearest industry (`build_scheme`'s `joins`,
+    # midoffice19), each with the industry it joined, and its members in the universe.
+    joined: Mapping[str, str] = field(default_factory=dict)
+    joined_members: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def industries(self) -> tuple[str, ...]:
@@ -192,6 +208,11 @@ class IndustryScheme:
             f"largest {biggest} with {counts[biggest]} "
             f"({counts[biggest] / total:.0%}), "
             f"{len(self.merged)} thin group(s) merged into their division"
+            + (f", {len(self.joined)} group(s) below the hard floor of {self.hard_floor} joined "
+               f"their nearest industry: "
+               + ", ".join(f"{a} ({len(self.joined_members.get(a, ()))}) into {b}"
+                           for a, b in sorted(self.joined.items()))
+               if self.joined else "")
             + (f", {len(self.folded)} industry/industries folded into another: "
                + ", ".join(f"{a} into {b}" for a, b in sorted(self.folded.items()))
                if self.folded else "")
@@ -226,6 +247,14 @@ class IndustryScheme:
                 f"{self.hard_floor} members even after merging into their division and "
                 f"were pooled into {OTHER}, which is heterogeneous by construction: "
                 + ", ".join(sorted(self.pooled)[:5])
+            )
+        if self.joined:
+            out.append(
+                f"{len(self.joined)} group(s) had fewer than {self.hard_floor} members even "
+                f"after merging into their division and joined their nearest industry instead "
+                f"of going without one, their industry effect the nearest industry's: "
+                + "; ".join(f"{a} into {b} ({', '.join(self.joined_members.get(a, ()))})"
+                            for a, b in sorted(self.joined.items()))
             )
         factorless = self.factorless
         if factorless:
@@ -278,14 +307,23 @@ def build_scheme(
     hard_floor: int = HARD_FLOOR,
     descriptions: Mapping[str, str] | None = None,
     universe: Iterable[str] | None = None,
+    joins: Mapping[str, str] | None = None,
 ) -> IndustryScheme:
-    """Group securities into industries: major group, then division, then a pooled remainder.
+    """Group securities into industries: major group, then division, then a pooled remainder --
+    or, with `joins`, the industry each group below the floor joins.
 
     `min_members` is advisory -- below it a major group merges into its division, which is
     coarser but better populated. `hard_floor` is not advisory: anything still below it is
     pooled into OTHER, Unclassified included, because a factor with one or two members is
     those members and the noise-share diagnostic reads it as well estimated. OTHER is held to
     the floor as well, and a pool that falls short is not a factor at all.
+
+    `joins` (midoffice19) maps a group to the industry it joins when it is below the floor after
+    its division merge: its nearest, by the evidence that goes with the mapping. Given, nothing
+    is pooled and no member in the universe goes without an industry factor: a group below the
+    floor joins its entry's industry, which must itself be a factor at or above the floor, and
+    one with no entry is refused, as is Unclassified below the floor -- a member with no SIC code
+    needs a code, not a neighbour. Entries for groups at or above the floor are not used.
 
     `universe` is what the counts are taken over: for a model, the securities in at least one
     estimated period's regression (`crosssectional.regression_universe`). An industry with no
@@ -343,9 +381,45 @@ def build_scheme(
     # An empty group's label can still be a merge target -- Unclassified is both -- so only
     # the ones that no merge put a member into are dropped.
     dropped = tuple(sorted(group for group in empty if sizes[group] == 0))
-    pooled = {
+    below = {
         name: size for name, size in sizes.items() if name != OTHER and size < hard_floor
     }
+    joined: dict[str, str] = {}
+    joined_members: dict[str, tuple[str, ...]] = {}
+    if joins is None:
+        pooled = below
+    else:
+        # Each group below the floor joins its nearest industry (midoffice19), so no member in
+        # the universe is left with no industry factor -- and no market.
+        pooled = {}
+        for name, size in sorted(below.items()):
+            members = ", ".join(sorted(t for t, label in assignment.items()
+                                       if label == name and counted(t)))
+            if name == UNCLASSIFIED:
+                raise ValueError(
+                    f"{size} member(s) in the universe have no usable SIC code ({members}): "
+                    f"give each its code by an override with its evidence -- {UNCLASSIFIED} "
+                    f"has no nearest industry to join"
+                )
+            target = joins.get(name)
+            if target is None:
+                raise ValueError(
+                    f"{name} has {size} member(s) in the universe ({members}), below the hard "
+                    f"floor of {hard_floor}, and no industry to join: name its nearest, with "
+                    f"the evidence"
+                )
+            if (target in (name, OTHER, UNCLASSIFIED) or target in below
+                    or sizes.get(target, 0) < hard_floor):
+                raise ValueError(
+                    f"{name} cannot join {target!r}: not an industry factor at or above the "
+                    f"hard floor of {hard_floor}"
+                )
+            joined[name] = target
+            joined_members[name] = tuple(sorted(t for t, label in assignment.items()
+                                                if label == name and counted(t)))
+        for ticker, name in list(assignment.items()):
+            if name in joined:
+                assignment[ticker] = joined[name]
     if pooled:
         for ticker, name in list(assignment.items()):
             if name in pooled:
@@ -373,6 +447,8 @@ def build_scheme(
         universe=inside,
         dropped=dropped,
         excluded=excluded,
+        joined=joined,
+        joined_members=joined_members,
     )
 
 
@@ -409,6 +485,100 @@ def merge_industries(scheme: IndustryScheme, merges: Mapping[str, str]) -> Indus
     folded = {source: resolved.get(target, target) for source, target in scheme.folded.items()}
     folded.update(resolved)
     return replace(scheme, assignment=assignment, folded=folded)
+
+
+@dataclass(frozen=True)
+class IndustryOverrides:
+    """An industries' rulings file, read (midoffice19): a SIC code by label for each security whose
+    records carry none, each entry with the security's key and the evidence; and by group, the
+    industry a group below the hard floor joins, each with the evidence."""
+
+    path: str
+    codes: Mapping[str, Mapping[str, str]]
+    joins: Mapping[str, Mapping[str, str]]
+
+    @property
+    def join_map(self) -> dict[str, str]:
+        """Each group and the industry it joins, as `build_scheme` takes them."""
+        return {group: str(entry["industry"]) for group, entry in self.joins.items()}
+
+
+def read_industry_overrides(path: str | Path) -> IndustryOverrides:
+    """The rulings file: `codes` entries, each a `key`, `label`, `sic` (four digits) and
+    `evidence`; `joins` entries, each a `group`, the `industry` it joins and `evidence`. An entry
+    lacking one, a label or group given twice, or a code not four digits is refused."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    codes: dict[str, dict] = {}
+    for entry in data.get("codes", []):
+        missing = [k for k in ("key", "label", "sic", "evidence") if not entry.get(k)]
+        if missing:
+            raise ValueError(f"a code entry lacks {', '.join(missing)}: {entry}")
+        label, sic = str(entry["label"]), str(entry["sic"])
+        if label in codes:
+            raise ValueError(f"two code entries for {label}")
+        if len(sic) != 4 or not sic.isdigit():
+            raise ValueError(f"{label}'s SIC code is four digits, not {sic!r}")
+        codes[label] = dict(entry)
+    joins: dict[str, dict] = {}
+    for entry in data.get("joins", []):
+        missing = [k for k in ("group", "industry", "evidence") if not entry.get(k)]
+        if missing:
+            raise ValueError(f"a join entry lacks {', '.join(missing)}: {entry}")
+        if entry["group"] in joins:
+            raise ValueError(f"two join entries for {entry['group']}")
+        joins[str(entry["group"])] = dict(entry)
+    return IndustryOverrides(path=str(path), codes=codes, joins=joins)
+
+
+def apply_code_overrides(
+    codes: Mapping[str, str | None],
+    overrides: IndustryOverrides,
+    keys: Mapping[str, str] | None = None,
+) -> tuple[dict[str, str | None], list[str], list[str]]:
+    """The codes with each override applied where the records carry none (ruling 3 of
+    midoffice19's brief: by its SIC code where the data carry one, by an override with its
+    evidence where they do not). `keys`, a security's key by label, checks each entry's key: a
+    mismatch is refused, the entry naming another security. Returns the codes, the labels given a
+    code, and a note on each entry not applied -- its label not among the codes, or its records
+    carrying a code, which stands."""
+    out = dict(codes)
+    used: list[str] = []
+    notes: list[str] = []
+    for label, entry in sorted(overrides.codes.items()):
+        if label not in out:
+            notes.append(f"{label} is not in the panel")
+            continue
+        if keys is not None and keys.get(label) != entry["key"]:
+            raise ValueError(f"the override for {label} names {entry['key']}, and the panel's "
+                             f"{label} is {keys.get(label)}")
+        if out[label]:
+            notes.append(f"{label}'s records carry {out[label]}, which stands; its override "
+                         f"({entry['sic']}) is not applied")
+            continue
+        out[label] = str(entry["sic"])
+        used.append(label)
+    return out, used, notes
+
+
+def members_without_industry(
+    indices: CharacteristicPanel,
+    n_industries: int,
+    membership: np.ndarray | None = None,
+    first_row: int = 0,
+) -> tuple[int, dict[str, int]]:
+    """Member-days from `first_row` on with every style exposure and an industry row of zeros:
+    each a member a model with no market factor forecasts with no market exposure (midoffice19).
+    Their count, and by security. The industries are the panel's first `n_industries` factors,
+    as `combine` puts them; `membership` None counts every security."""
+    values = np.asarray(indices.values)[first_row:]
+    complete = np.isfinite(values[:, :, n_industries:]).all(axis=2)
+    none = np.nan_to_num(values[:, :, :n_industries], nan=0.0).sum(axis=2) == 0.0
+    held = (np.ones(complete.shape, dtype=bool) if membership is None
+            else np.asarray(membership, dtype=bool)[first_row:])
+    hits = held & complete & none
+    by_security = {indices.securities[j]: int(hits[:, j].sum())
+                   for j in np.flatnonzero(hits.any(axis=0))}
+    return int(hits.sum()), by_security
 
 
 def industry_exposures(

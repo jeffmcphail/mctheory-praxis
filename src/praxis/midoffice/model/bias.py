@@ -437,6 +437,9 @@ class BiasRun:
     # The minimum-variance portfolios' factor exposures, dates by factors (midoffice16): where
     # the optimiser puts its factor risk, to read by eigen-direction.
     min_variance_exposure: Mapping[str, np.ndarray] = field(default_factory=dict)
+    # Their holdings, dates by securities (midoffice19): what the optimiser held, to read a
+    # member's weight and its share of their realised variance.
+    min_variance_weights: Mapping[str, np.ndarray] = field(default_factory=dict)
 
     def _at(self, forecast, realised, by_horizon, horizon, overlapping, axis):
         if horizon == 1:
@@ -586,6 +589,7 @@ class BiasTest:
         self.held = {"long-only": [], "unconstrained": []}
         self.violation = {"long-only": [], "unconstrained": []}
         self.exposure = {"long-only": [], "unconstrained": []}
+        self.holdings = {"long-only": [], "unconstrained": []}
         self.dropped = 0
         self.first_row: int | None = None
         self.last_row = len(dates) - 1
@@ -621,6 +625,7 @@ class BiasTest:
             self.held[label].append(portfolio.held)
             self.violation[label].append(portfolio.violation)
             self.exposure[label].append(portfolio.weights[idx] @ forecast.exposures[idx])
+            self.holdings[label].append(portfolio.weights)
         start = base + 2
         weights[start : start + self.random_portfolios] = _random_weights(
             self.long_keys, self.long_sizes, idx, self.random_names, False
@@ -688,6 +693,8 @@ class BiasTest:
             random_seed=self.seed,
             min_variance_exposure={k: np.array(v).reshape(-1, n_factors)
                                    for k, v in self.exposure.items()},
+            min_variance_weights={k: np.array(v).reshape(-1, n_secs)
+                                  for k, v in self.holdings.items()},
         )
 
 

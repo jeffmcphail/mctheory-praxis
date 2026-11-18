@@ -474,3 +474,25 @@ def test_the_minimum_variance_portfolios_factor_exposures_are_kept():
             eligible = membership[t] & np.isfinite(returns[t + 1]) & (caps[t] > 0.0)
             w = minimum_variance(forecast, eligible, long_only=label == "long-only").weights
             assert np.allclose(x[i], w @ forecast.exposures, rtol=1e-12, atol=1e-15)
+
+
+def test_the_minimum_variance_portfolios_holdings_are_kept():
+    """midoffice19: each date's minimum-variance holdings, dates by securities -- what the
+    optimiser held, so a member's weight and its share of the portfolios' realised variance can
+    be read after the run. Fully invested; the source of the factor exposures kept beside them
+    and of the realised return; long-only, non-negative and held where positive."""
+    world = _known_world(n_dates=40)
+    forecast, dates, securities, returns, membership, caps, groups, f = world
+    run = _run(world, range(0, 30))
+    nxt = np.nan_to_num(returns[1:31], nan=0.0)
+    for label in ("long-only", "unconstrained"):
+        w = run.min_variance_weights[label]
+        assert w.shape == (30, len(securities))
+        assert np.allclose(w.sum(axis=1), 1.0, rtol=0.0, atol=1e-12)
+        assert np.allclose(w @ forecast.exposures, run.min_variance_exposure[label], rtol=1e-12,
+                           atol=1e-15)
+        row = run.names.index(f"minimum variance, {label}")
+        assert np.allclose((w * nxt).sum(axis=1), run.realised[row], rtol=1e-12, atol=1e-15)
+    held = run.min_variance_weights["long-only"]
+    assert (held >= 0.0).all()
+    assert np.array_equal((held > 0.0).sum(axis=1), run.min_variance_held["long-only"])

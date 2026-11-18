@@ -303,13 +303,14 @@ capitalisation-weighted sum is zero. On this model that is the same fit in anoth
   covariance S in the basis maps back as T S T'. Checked on the model's own regressions on nine
   dates: the constrained fit gives the transformed factor returns to 5.0e-14 of the largest and
   the same residuals to 1.8e-14 (the midoffice18 retro).
-- **Three members are in no industry factor:** CTVA, FRCB and SBNY, the S&P 500 scheme's "Other
-  Industries", a group of three below its floor of five, with no industry exposure (996 of
-  470,527 member-periods). Exposed to the country through the industries' sum, they get none, and
-  the fit is the model's. USE4's literal country -- every member exposed -- gives them one, a
-  slightly different fit wherever one of them is in the regression: on the nine dates up to
+- **Three members were in no industry factor** (to midoffice19): CTVA, FRCB and SBNY, the S&P 500
+  scheme's "Other Industries", a group of three below its floor of five, with no industry exposure
+  (996 of 470,527 member-periods). Exposed to the country through the industries' sum, they got
+  none, and the fit was the model's. USE4's literal country -- every member exposed -- gives them
+  one, a slightly different fit wherever one of them is in the regression: on the nine dates up to
   6.2e-3 of the largest factor return and 0.83 of the largest residual, and no difference on the
-  two dates without them. The country here is the industries' sum.
+  two dates without them. The country here is the industries' sum -- and since every member has an
+  industry factor (midoffice19, above), the sum is USE4's literal country: every member exposed.
 - **What the basis changes is the covariance, and only under an estimator that is not a quadratic
   form.**
   - **The quadratic forms are invariant.** A sample, exponential or Newey-West covariance,
@@ -327,10 +328,17 @@ capitalisation-weighted sum is zero. On this model that is the same fit in anoth
   market's industry mix.
 - **In the run it is a test, not the model.** `--bias-country`, with `--bias` and `--industries`:
   - each refit's covariance estimated in the country basis beside the model's, and mapped back;
-  - the regime adjustment read from its own forecasts, B_F over the basis's 26 factors;
-  - judged by `COVARIANCE_RULE`;
-  - `--bias-out` keeps its forecasts (`_country`), the basis's own covariance by date and each
-    period's industry weights.
+  - the regime adjustment read from its own forecasts, on two multipliers as two settings since
+    midoffice19: `country`, B_F over the basis's 26 factors (midoffice18's); and `blocks`, lambda_C
+    from the country's own squared statistic and lambda_R from the other 25 factors', each on the
+    regime adjustment's 21 days, the basis's covariance scaled as D S D, D = diag(lambda_C,
+    lambda_R, ..., lambda_R) -- the country's variance by lambda_C^2, the others' by lambda_R^2,
+    their cross terms by lambda_C lambda_R -- before it is mapped back (`country.block_scaled`);
+  - judged by `COVARIANCE_RULE`, the blocks held to a higher bar (`BLOCKS_BAR`, ruling 2 of
+    midoffice19's brief): after the optimiser's test, below the reference's criterion on both
+    halves, since their design was read from midoffice18's halves;
+  - `--bias-out` keeps its forecasts (`_country`, `_blocks`), the basis's own covariance by date
+    under each, the blocks' multipliers and histories, and each period's industry weights.
 
   The model's covariance is unchanged.
 
@@ -802,6 +810,38 @@ had 9, the most negative -0.0031. Floors of 20 and 25, applied the same way, fol
 that carry more -- SIC37 0.0053, SIC60 0.0063 -- and take mean R-squared to 0.2769 and 0.2628.
 Construction is two industries under one division: its homebuilders move with Retail, its
 contractors (EME, FIX, PWR) lately with SIC36.
+
+**Every member on the market** (ruling 3 of midoffice19's brief). The model has no market factor
+-- its industries span the market -- so a member in no industry factor has no market exposure at
+all, and a minimum-variance optimiser takes it for a diversifier. Until midoffice19 three members
+were in none: CTVA, alone in Agriculture below the hard floor of five, and FRCB and SBNY, the
+failed banks, whose records carry no SIC code -- pooled into Other Industries, three, below the
+floor itself, and left with no industry factor (996 member-periods). In the bias test before the
+fix (D16) both minimum-variance portfolios held CTVA at about a tenth on average -- the long-only
+10.9%, its largest holding on 520 of 686 dates, up to 32.8% on 2025-04-16 -- and it carried about
+a fifth of their realised variance (20.8% and 19.7%; the holdings rebuilt from D16's stored arrays,
+exactly, by the midoffice19 retro's `ctva_holdings.py`).
+- **Each security the industry its business makes it** (`config/sp500_industry_overrides.json`,
+  the run's `--industry-overrides`):
+  - its records' SIC code where they carry one;
+  - else a code by override, with its evidence -- FRCB and SBNY 6022, state commercial banks,
+    closed by their state regulators in 2023; VYLR 0100, Corteva's seeds, spun off on 2026-10-01
+    and in no regression yet;
+  - and a group still below the hard floor after its division merge joins its nearest industry,
+    named with the evidence, instead of going without one (`build_scheme(joins=)`): Agriculture
+    into SIC28. CTVA's business is seeds and crop protection chemicals; the chemicals are SIC
+    2879, in major group 28 with the panel's other agricultural-chemical makers (CF, MOS, FMC).
+    The model's returns are a check, not the rule: over the 252 estimated periods before the bias
+    test, CTVA's residual volatility is 28.2% a year in SIC28, second of the 20 industries to the
+    Manufacturing division's 27.9%, against 30.6% in none.
+- **What stops the build:** a group below the floor with no entry, a join to anything not a factor
+  at or above the floor, and Unclassified below it -- a member with no SIC code needs a code, not
+  a neighbour.
+- **The standing check:** the member-days from the first estimated period with every style exposure
+  and no industry factor -- 996 under the old scheme (CTVA 917, FRCB 57, SBNY 22), none under the
+  rulings, where the run stops on any.
+- **`--industry-overrides none`** is midoffice18's scheme: its model is M18's in every field, to
+  the bit.
 
 ### What it flags rather than fixes
 
@@ -1854,6 +1894,66 @@ the model, its model test the defaults' to the bit, judged by the rule against t
     1.033 and 0.988 and the shape 0.076 and 0.063: both fixed. That is a reading of the factor
     side alone; what the optimiser does under it needs a run.
 - **The noise:** the index's forecast moves 0.80% a day at the median, against 1.00%.
+
+**Every member on the market** (midoffice19, D19; the scheme above): the new defaults' bias run
+against D16, the guard on its five dates.
+- **CTVA leaves the optimiser.** Its weight in the long-only minimum-variance portfolio averaged
+  10.9% in D16, the largest holding on 520 of 686 dates, a fifth of the realised variance (20.8%);
+  in D19 0.00%, held on 38 dates, at most 0.29%, its share of the realised variance 0.02%. The
+  unconstrained: 10.7% and 19.7% to -0.02% and 0.07%.
+- **The optimiser realises less, and its forecast rises to meet it.**
+  - **Long-only:** 9.62% a year against 10.13%; by half 11.05% and 7.97%, against 11.88% and
+    8.02%. Its forecast 9.55% at the median, against 9.05%; 93 names held at the median, against
+    86.
+  - **Unconstrained:** 9.83% against 10.19%; by half 11.25% and 8.18%, against 11.95% and 8.08% --
+    a tenth of a point more in the calm half.
+  - **The statistics:** long-only 0.990 / 1.109 / 0.855 to 0.900 / 0.990 / 0.801 (whole / first /
+    second), unconstrained 1.033 / 1.163 / 0.886 to 0.951 / 1.047 / 0.846. The first half's
+    under-forecast was largely CTVA's: without it the optimiser is about right there, and
+    over-forecast in the calm half, as the index is.
+- **The regime criterion:** 0.091 / 0.068 / 0.138 against 0.105 / 0.098 / 0.123 -- the
+  optimiser's MRAD 0.062 against 0.150 in the first half and 0.169 against 0.125 in the calm.
+- **Little else moves.** The index 0.934 to 0.931; the eigenportfolios within 0.016 by rank and
+  half; the members' median unchanged, four members moving by 0.01 or more -- CTVA 0.867 to 0.879
+  (0.810 to 0.832 in the first half), and JPM, BAC and WFC down about 0.01, their factor now
+  carrying the two failed banks' 2023; SIC60's portfolio 0.971 to 0.964 (1.051 to 1.040 in the
+  first half); no factor volatility by 1% of itself;
+  lambda_F the same to the third decimal (1.121 and 0.956 by half). The model: mean R-squared
+  0.293825 to 0.294466, specific risk's p10 16.56% to 16.67%, SIC60's mean factor return 21.78% a
+  year to 20.45%.
+
+**The market's own multiplier** (midoffice19, C19): the country basis beside D19's model on two
+multipliers as two settings -- `country`, one over the basis's 26 factors (C18's), and `blocks`,
+lambda_C from the country's own statistic and lambda_R from the other 25 factors' -- its model test
+D19's to the bit, judged by the rule against D19, the blocks held to ruling 2's bar. Whole / first /
+second:
+
+| | long-only % a year | unconstrained | criterion | index | rank 1 | mean abs(bias - 1) |
+|---|---|---|---|---|---|---|
+| D19 | 9.62 / 11.05 / 7.97 | 9.83 / 11.25 / 8.18 | 0.091 / 0.068 / 0.138 | 0.931 / 1.060 / 0.783 | 0.947 / 1.064 / 0.814 | 0.131 / 0.067 / 0.222 |
+| country | 9.47 / 10.95 / 7.72 | 9.62 / 11.13 / 7.84 | 0.113 / 0.078 / 0.200 | 0.926 / 1.097 / 0.716 | 0.937 / 1.095 / 0.747 | 0.065 / 0.076 / 0.075 |
+| blocks | 9.17 / 10.59 / 7.50 | 9.88 / 11.74 / 7.59 | 0.069 / 0.059 / 0.067 | 0.987 / 1.036 / 0.938 | 1.010 / 1.032 / 0.988 | 0.063 / 0.079 / 0.064 |
+
+- **The blocks: out, on the optimiser's test.** The unconstrained portfolio realises 9.88% a year
+  against 9.83% over the whole test -- 11.74% against 11.25% in the first half, 7.59% against
+  8.18% in the calm half -- though the long-only realises less in both halves. Its criterion would
+  have met ruling 2's bar, below D19's on both halves (0.059 against 0.068, 0.067 against 0.138),
+  but the optimiser's test comes first.
+- **What the blocks do fix:** the market direction's level in both halves -- rank 1 1.032 and
+  0.988, the index 1.036 and 0.938, the country factor 1.046 and 0.964 (D19 1.067 and 0.795) --
+  and the shape, as C18 did. lambda_C runs 1.164 and 0.835 by half (0.545 on 2025-10-09 to 2.349
+  on 2025-04-10), lambda_R 1.057 and 1.075: the multipliers midoffice18 read from C18's stored
+  arrays, rank 1 as it predicted (1.033 and 0.988).
+- **What they cost:** the index's forecast moves 1.62% a day at the median (5.20% at the 95th
+  percentile), against 1.00% (3.60%); and the unconstrained portfolio's first half. Over the test
+  it puts 27.6% of its forecast variance in its covariance's smallest ten eigen-directions,
+  against 26.3%, and in the first half those directions read 1.20 against 1.14 -- the kind of
+  cost C16's 63-day correlations charged the optimiser in the small directions. That the market's
+  21-day multiplier, at up to 2.35, drives it there is a reading, not a test.
+- **The country setting** (C18's multiplier) is in on the optimiser's realised volatility and out
+  on the first half's criterion, 0.078 against 0.068, as against D16.
+- **So D19 stays,** and by ruling 3 of midoffice17's brief the factor side is settled: the
+  largest members' specific risk is next.
 
 ## Status
 

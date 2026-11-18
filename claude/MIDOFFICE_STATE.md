@@ -1,8 +1,8 @@
 # Mid-office state
 
-**Updated:** 2026-11-13, at the end of midoffice18 (midoffice17's rulings: the factor covariance as
-it stands, the eigenvalue adjustment closed; the country factor as a covariance basis, measured --
-out by the rule, its failure the regime multiplier's).
+**Updated:** 2026-11-13, at the end of midoffice19 (midoffice18's rulings; every member on the
+market, the default; the market's own multiplier measured -- out by the rule on the optimiser's
+test, so the factor side is settled; the intermittent test's missing seed found and fixed).
 Brought up to date at the end of every piece, in the same commit as its retro (Rule 43). Not a
 history: the state a new session needs to carry on. The detail is in the retros named below.
 
@@ -11,7 +11,7 @@ history: the state a new session needs to carry on. The detail is in the retros 
 ## Start here
 
 1. Read `claude/CLAUDE_CODE_RULES.md` (Rule 43 above all), then this file, then the latest retro:
-   `claude/retros/RETRO_midoffice18_country_factor.md`.
+   `claude/retros/RETRO_midoffice19_every_member_on_the_market.md`.
 2. **How the work runs.**
    - **The brief.** Each piece, `midofficeNN`, is a brief written in Chat and pasted into the Code
      session. Code transcribes it verbatim to `claude/handoffs/BRIEF_midofficeNN_<slug>.md`; its
@@ -31,13 +31,18 @@ history: the state a new session needs to carry on. The detail is in the retros 
    - Scratch goes to `claude/scratch/midofficeNN/` (gitignored), its outputs copied into the retro.
    - Python is ASCII and keeps the file's line endings (most `.py` here are CRLF in the working
      copy; the `claude/` briefs and retros LF).
-   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q`: 2,377 passed
-     and 1 skipped at midoffice18. That file looks for `../core_repo/src`, which isn't on this
-     machine.
+   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q -rf`: 2,384
+     passed and 1 skipped at midoffice19. That file looks for `../core_repo/src`, which isn't on
+     this machine.
 4. **Working notes, from the pieces so far.**
-   - A bash heredoc has failed in this harness on some apostrophes (06, 07, 08), though not
+   - A bash heredoc has failed in this harness on some apostrophes (06, 07, 08, 19), though not
      always (09), and on backslash escapes inside a patch (10): a patch script written to a file,
-     or the Edit tool, is the safe way.
+     or the Edit tool, is the safe way. A patch that writes a docstring's closing quotes inside
+     its own triple-quoted string ends that string there instead (19, `country.py`'s module
+     docstring): parse every patched file before going on.
+   - **A `git stash` round trip rewrites the working copies** through `core.autocrlf` (19):
+     `bias.py` and `country.py`, LF in the working copy, came back CRLF. The index is LF either
+     way, so the diff does not change; compare against HEAD another way (`git show HEAD:path`).
    - The harness's shell can drift into another directory between calls (10): cd to the repo by
      its absolute path.
    - An `.npz` member is decompressed afresh on every access: read each array once into a dict.
@@ -94,10 +99,13 @@ history: the state a new session needs to carry on. The detail is in the retros 
      its statistic under another multiplier is exact from the stored arrays, without a run
      (`claude/scratch/midoffice18/multiplier_split.py`); a portfolio with specific risk, the
      optimiser's above all, needs the run.
-   - **Name a failure in the final checks (18).** The checks' suite line keeps only pytest's last
-     two lines, and `-p no:cacheprovider` keeps no record: midoffice18's run had one failure,
-     never named, and its rerun passed. Run the suite there with `-rf`, so a failure prints its
-     name.
+   - **Read the final checks' suite lines (18, corrected in 19).** pytest's short summary names a
+     failure by default (its `-r` is `fE`): midoffice18's `final_checks.txt` did name it, in the
+     last two lines it kept -- `tests/test_battle_round3.py::TestSurfaceIntegration::
+     test_surface_interpolated_query` -- and the retro and this file said it was not named, which
+     was wrong (18 ruling 4). The checks now run the suite with `-rf` and keep its last four
+     lines. The assertion's text is cut where the test's id fills the line (80 columns in a
+     subprocess): read it in-process, as midoffice19's `flaky_probe.py` does.
 
 ---
 
@@ -160,48 +168,61 @@ layer (c92d343 to e859b4e, 2026-11-01).
   half-lives measured.
 - c80a112 (11-13): **midoffice17** -- the plain run's regime history from the full fit; the calm
   half's two levers measured.
-- Next: **midoffice18**. Jeff commits it after c80a112 (`git log --oneline -3`).
+- caca97e (11-13): **midoffice18** -- the country factor as a covariance basis, measured.
+- Next: **midoffice19**. Jeff commits it after caca97e (`git log --oneline -3`).
 
-**The current piece: midoffice18, COMPLETE (2026-11-13).**
+**The current piece: midoffice19, COMPLETE (2026-11-13).**
 
-- **midoffice17's rulings:** the factor covariance as it stands (ruling 1), the eigenvalue
-  adjustment closed; the calm half's market direction neither left nor given a multiplier of its
-  own, USE4's country factor tested first (ruling 2); next the country factor, then the largest
-  members' specific risk, the factor side settled if the country factor fails the rule (ruling 3).
-  Nothing to build for them.
-- **Item 1, the country factor as a covariance basis** (`model/country.py`): USE4's country factor
-  and constraint are the same fit in another basis -- the country the capitalisation-weighted mean
-  of the industries' returns, each industry less it, the styles unchanged.
-  - **Checked** on the model's own regressions on nine dates before the pass: the transformed
-    factor returns to 5.0e-14, the same residuals to 1.8e-14.
-  - **Three members in no industry factor** (CTVA, FRCB, SBNY, "Other Industries"; 996 of 470,527
-    member-periods) take the country through the industries' sum, so the fit is the model's.
-    USE4's literal country, every member exposed, differs where they are in the regression.
-  - **What changes is the covariance:** a quadratic-form estimator is basis-invariant (checked to
-    1.3e-15 on a smoke run); the two-half-life one is not -- the market's variance moves from the
-    504-day correlations to the country's 90-day volatility.
-- **Item 2, one pass beside the model (C18, `--bias-country`):** 8.6 minutes, its model test D16's
-  to the bit.
-  - **The optimiser's test: in,** the first candidate under which it realises less in both halves:
-    long-only 9.98% a year against 10.13%, unconstrained 9.97% against 10.19%.
-  - **The shape, fixed:** the eigenportfolios' mean abs(bias - 1) 0.064 against 0.131, and 0.075
-    against 0.222 in the calm half.
-  - **The criterion: out on the first half,** 0.103 against 0.098 (the calm half 0.176 against
-    0.123). D16 stays.
-- **Item 3, the expectation:** the index's forecast is nearly the country's own (1.03 times it),
-  but its statistic went the wrong way in both halves: 1.063 to 1.100, 0.785 to 0.718.
-  - **Why, from the stored arrays:** the regime multiplier, read over the basis's 26 factors,
-    stops following the market. The other 25 read 1.13 and 1.18 squared by half, the country
-    1.50 and 0.65, so lambda_F sits near 1.065 in both halves where the model's is 1.121 and
-    0.956.
-  - **The basis alone,** the multiplier divided out, moves rank 1 a little toward one: 1.226 and
-    0.780 to 1.207 and 0.811.
-  - **On two multipliers,** the country's own and the rest's, rank 1 reads 1.033 and 0.988 and
-    the shape 0.076 and 0.063 -- a factor-side reading; the optimiser needs a run.
-- **Item 4:** it did not pass, so nothing is built; the retro notes what building it would take.
-- **What I would choose:** D16 by the rule; before the factor side is settled by ruling 3, one more
-  pass -- the country basis on the two-block multiplier, judged by the same rule. If it fails,
-  the factor side is settled and specific risk is next.
+- **midoffice18's rulings:** the factor covariance D16's for now (ruling 1); the two-block pass
+  after ruling 3's fix, with a higher bar -- below the reference's criterion on both halves, after
+  the optimiser's test, its half-life 21 untuned (ruling 2); no member without the market (ruling
+  3, built first); the intermittent failure named in midoffice18's `final_checks.txt`, which the
+  retro and this file had said was not (ruling 4, recorded); next the largest members' specific
+  risk, or the two-block build first if it passes (ruling 5).
+- **Ruling 3, every member on the market** (`refdata/industries.py`'s `build_scheme(joins=)`,
+  `config/sp500_industry_overrides.json`, the run's `--industry-overrides`):
+  - **Codes by override,** each with its evidence, where the records carry none: FRCB and SBNY
+    6022 (state commercial banks, closed by their state regulators in 2023, into SIC60); VYLR 0100
+    (Corteva's seeds, in no regression yet, so no number moves).
+  - **A group below the floor joins its nearest industry:** Agriculture (CTVA) into SIC28, by its
+    business -- crop protection chemicals, SIC 2879, with CF, MOS and FMC -- the model's returns a
+    check (28.2% residual volatility a year in SIC28 before the test, second of 20 to the
+    Manufacturing division's 27.9%, 30.6% in none). Unentered groups, and Unclassified below the
+    floor, stop the run.
+  - **The standing check:** member-days without the market, none under the rulings (996 under
+    `none`, the old scheme, whose model is M18's in every field to the bit).
+- **Item 1, before the fix** (D16's holdings rebuilt from its stored arrays, exactly --
+  exposures to 9.8e-13, every held count): CTVA averaged 10.9% of the long-only minimum-variance
+  portfolio (11.2% and 10.6% by half), its largest holding on 520 of 686 dates, up to 32.8%, and
+  carried 20.8% of its realised variance (21.0% and 20.2%); the unconstrained 10.7% and 19.7%.
+- **Item 1, after it (D19, the new defaults' bias run, 11.7 minutes, the guard on five dates):**
+  - **CTVA leaves the optimiser:** long-only 0.00% on average, held on 38 dates, at most 0.29%,
+    0.02% of the realised variance.
+  - **The optimiser realises less:** long-only 9.62% a year against 10.13% (11.05% and 7.97% by
+    half, against 11.88% and 8.02%); unconstrained 9.83% against 10.19% (11.25% and 8.18%, against
+    11.95% and 8.08%). Its statistics fall below one: long-only 0.990 / 1.109 / 0.855 to 0.900 /
+    0.990 / 0.801, unconstrained 1.033 / 1.163 / 0.886 to 0.951 / 1.047 / 0.846.
+  - **The criterion:** 0.091 / 0.068 / 0.138 against 0.105 / 0.098 / 0.123.
+  - **Little else moves:** the index 0.934 to 0.931, the eigenportfolios within 0.016, four
+    members by 0.01 or more (CTVA; JPM, BAC, WFC), no factor volatility by 1%, lambda_F the same.
+- **Item 2, the market's own multiplier (C19, 9.7 minutes, its model test D19's to the bit):**
+  - **The blocks: out on the optimiser's test** -- the unconstrained portfolio realises 9.88% a
+    year against 9.83% (11.74% against 11.25% in the first half), though the long-only realises
+    less in both halves (9.17%). Their criterion met ruling 2's bar, 0.059 and 0.067 against 0.068
+    and 0.138, but the optimiser's test comes first.
+  - **They fix the level:** rank 1 1.032 and 0.988, the index 1.036 and 0.938, the country factor
+    1.046 and 0.964, the shape 0.079 and 0.064; lambda_C 1.164 and 0.835 by half (0.545 to
+    2.349), lambda_R 1.057 and 1.075, as midoffice18's stored-array reading predicted.
+  - **Their price:** the index's forecast moves 1.62% a day at the median, against 1.00%.
+  - **The country setting** (C18's multiplier): in on the optimiser, out on the first half's
+    criterion (0.078 against 0.068).
+  - **D19 stays:** by 17 ruling 3 and 18 ruling 5 the factor side is settled.
+- **Item 3, the intermittent test:** alone fifty times, 2 failed. An unseeded draw: the surface's
+  `_compute_single_point` seeded only its first batch of random walks; twenty repetitions on seed
+  42 gave twenty sets of values. Fixed, the brief allowing it for a missing seed: every batch
+  seeded from the requirement's seed. After: one set of values, fifty runs alone all passed.
+- **What I would choose:** D19, by the rule; the factor side settled; the largest members'
+  specific risk next.
 - **Waiting on Jeff:** the decisions in the retro.
 
 ---
@@ -261,6 +282,16 @@ in `docs/FACTOR_MODEL.md`.
   is cap-weighted. Industries come from SIC, groups under 15 merged into their division, with no
   market factor beside them. (666599b; docs) On the panel on securities, each security's SIC
   code is its own latest record's. (08)
+- **No member goes without the market** (18 ruling 3, built in 19). With no market factor, a
+  member in no industry factor has no market exposure, and the optimiser used it (CTVA at 10.9%
+  of the long-only minimum-variance portfolio on average in D16). Each security gets the industry
+  its business makes it: its records' SIC code where they carry one, else a code by override with
+  its evidence -- FRCB and SBNY 6022, the failed state banks; VYLR 0100, Corteva's seeds -- and a
+  group still below the hard floor of five after its division merge joins its nearest industry,
+  named with the evidence, instead of going without one: Agriculture (CTVA) into SIC28. A group
+  below the floor with no entry stops the run, and Unclassified has no nearest industry.
+  `config/sp500_industry_overrides.json`, read by the run (`--industry-overrides`; `none` is
+  midoffice18's scheme, its model M18's to the bit). The default since 19.
 - **The factor covariance** is the two-half-life estimator: volatilities on a half-life of 90,
   correlations on 504, both Newey-West at the horizon's lags -- none at the one-day default (11
   ruling 2; the run's `--correlation-half-life`, `none` for one half-life).
@@ -317,6 +348,14 @@ in `docs/FACTOR_MODEL.md`.
   adjustment read from its own forecasts, B_F over the basis's 26 factors -- **is out by the
   rule** (18): in on the optimiser's realised volatility, out on the first half's criterion
   (0.103 against 0.098). It stays a test option (`--bias-country`); the model is unchanged.
+- **The market's own multiplier, the two blocks, is out by the rule** (19, against D19, held to
+  18 ruling 2's higher bar): the unconstrained minimum-variance portfolio realises 9.88% a year
+  against 9.83% over the whole test, though the blocks fix the level in both halves (criterion
+  0.059 and 0.067 against 0.068 and 0.138). C18's single multiplier, again: in on the optimiser,
+  out on the first half (0.078 against 0.068). Both stay test settings of `--bias-country`.
+- **The factor side is settled** (17 ruling 3, 18 ruling 5; 19): the two-half-life covariance,
+  correlations 504 and volatilities 90, the regime adjustment's factor side on 21, no eigenvalue
+  adjustment, the industry basis -- D19's.
 - **A plain run reads the regime adjustment's factor side from the full fit** (16 ruling 4, built
   in 17): `regime.factor_history`, the model's estimator on the full fit's factor returns through
   each day before, behind a guard of five refits spread over the history
@@ -578,6 +617,13 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
   `claude/scratch/midoffice14/make_spin_offs.py` from the public record and the data, amended by
   `claude/scratch/midoffice15/amend_rulings.py` and `claude/scratch/midoffice16/release_spgi.py`;
   read by the build (`--spin-offs`, `none` for none).
+- **The industries' rulings file**, in the repo: `config/sp500_industry_overrides.json`
+  (midoffice19) -- read by the run, not the build, so no panel changes. Codes: FRCB and SBNY 6022
+  (state commercial banks: Polygon's records carry none; closed by the California DFPI and New
+  York's DFS in 2023, the FDIC's press releases cited), VYLR 0100 (Corteva's seeds, in no
+  regression yet). Joins: Agriculture into SIC28 (CTVA's crop protection chemicals, SIC 2879,
+  with CF, MOS and FMC; the model's returns a check). Each entry with its evidence; the run lists
+  every one it uses.
 - **The cache gained** (midoffice14) the raw bars over the window of ten children that never
   joined the index -- ZIMV, EMBC, FTRE, PHIN, KLG, RAL, MRP, VSNT, VGNT, MBGL -- and nine
   reference records on their ex-dates (ZIMV's of 03-01 and 03-02, EMBC's, PHIN's, KLG's, MRP's
@@ -618,6 +664,11 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   covariance is, and repaired; its table and the repair are reported. Off by default.
 - `--merge-industry A=B`, repeatable: fold industry A into B once the scheme is built. None by
   default.
+- `--industry-overrides PATH` (19): the industries' rulings, so no member goes without the market
+  -- a SIC code with its evidence for each security whose records carry none, and the industry
+  each group below the hard floor joins; `config/sp500_industry_overrides.json` by default,
+  `none` for midoffice18's scheme (the records' codes alone, a group below the floor pooled into
+  Other Industries, which falls short of the floor itself).
 - `--leverage-correction`: the correction's specific side. Off by default.
 - `--specific-half-life H`: each specific-risk history weighted by a half-life of H trading days,
   the blend told its effective number of observations; 63 by default (11 ruling 1), `none` for
@@ -670,12 +721,20 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
   (`country.country_covariance`), the covariance estimated there and mapped back, the regime
   adjustment read from its own forecasts over the basis's 26 factors, one pass (0.63 s a refit
   with two tests), judged by `COVARIANCE_RULE` -- a pass of its own, not with the other passes,
-  the sampling correction or the eigen adjustment;
+  the sampling correction or the eigen adjustment; since 19 on two multipliers as two settings,
+  `country` (one over the basis's 26 factors, 18's) and `blocks` (lambda_C from the country's own
+  squared statistic, lambda_R from the other 25 factors', the basis's covariance scaled by blocks
+  before it is mapped back, `country.block_scaled`), the blocks held to `BLOCKS_BAR` (19 ruling 2:
+  below the reference's criterion on both halves, after the optimiser's test);
   `--bias-out PATH` keeps every forecast and outcome in an `.npz`, each regime setting's keyed
   `_rF<h>S<h>`, each correlation setting's `_c<h>`, each volatility setting's `_v<h>`, the country
   basis's `_country` (with the basis's own covariance by date and each period's industry weights,
-  18), the daily statistics' history, every test's factor covariance by date (the eigen scales'
-  too, since 17) and the optimiser's factor exposures;
+  18) and `_blocks` (its scaled basis covariance, `blocks_multipliers` by date and the two
+  histories `_blocks_c` and `_blocks_r`, 19), the daily statistics' history, every test's factor
+  covariance by date (the eigen scales' too, since 17), the optimiser's factor exposures and,
+  since 19, its holdings (`min_variance_weights_long_only`, `..._unconstrained`, dates by
+  securities; before 19 they are rebuilt from the stored arrays by
+  `claude/scratch/midoffice19/ctva_holdings.py`, exactly);
   `--bias-guard N` (default 5, 0 skips) is the guard's date count, two to four minutes at five.
 - On the panel on securities, `--membership` is its own, checked against the newest snapshot's
   hash, and `--industries` reads its own SIC codes and needs no key.
@@ -687,14 +746,15 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
 - **Time:** about 0.9 minutes, the regime adjustment's factor side read from the full fit behind
   its guard (the five refits 3.2 s, the history 0.2 s); 0.8 minutes with
   `--regime-factor-half-life none` (17; 7.5 minutes by the refits, 16).
-- **Mean R-squared:** 0.293825 over 938 periods from 2023-02-08 (0.293821 on `_revised`, 0.293826
-  on `_spinoffs`, 0.293203 on `_listed`).
+- **Mean R-squared:** 0.294466 over 938 periods from 2023-02-08, every member on the market (19);
+  0.293825 under `--industry-overrides none`, midoffice18's scheme (0.293821 on `_revised`,
+  0.293826 on `_spinoffs`, 0.293203 on `_listed`).
 - **Members in the regression a period:** median 502, range 499 to 503.
-- **Specific risk:** p10 16.56%, median 28.99%, p90 48.89%, 550 forecasts (on `_revised` 16.56 /
-  28.98 / 48.89%, on `_listed` 16.58 / 28.98 / 48.98%; equal-weighted histories, midoffice11's
-  defaults: 15.58 / 24.76 / 40.49%).
-- **The regime adjustment's factor side** as of 2026-11-03: lambda_F 0.9640, the factor
-  volatilities' median 16.26% to 15.67%.
+- **Specific risk:** p10 16.67%, median 28.97%, p90 48.88%, 550 forecasts (midoffice18's scheme
+  16.56 / 28.99 / 48.89%; on `_revised` 16.56 / 28.98 / 48.89%, on `_listed` 16.58 / 28.98 /
+  48.98%; equal-weighted histories, midoffice11's defaults: 15.58 / 24.76 / 40.49%).
+- **The regime adjustment's factor side** as of 2026-11-03: lambda_F 0.9629, the factor
+  volatilities' median 16.29% to 15.68% (midoffice18's scheme 0.9640, 16.26% to 15.67%).
 - **The size pair:** 11.05% for the smallest 85, 0.60% for the largest 50, 0.01% for the index
   (on `_listed` 10.99 / 0.57 / 0.01%).
 - **The covariance:** the one-day covariance, 826.4 effective observations of 938, the
@@ -732,6 +792,11 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 - **Same-day membership:** the security-periods that move against it. The lag in effect.
 - **The industry universe against the regression's:** counts taken over the wrong set; `!` if
   they differ.
+- **The industries' rulings and members without the market** (19): each code by override and each
+  join used, any entry not applied and why; then the member-days from the first estimated period
+  with every style exposure and no industry factor -- each one a member forecast with no market
+  exposure. Under the rulings it must read "none" (the run stops otherwise); under
+  `--industry-overrides none` it reads 996, CTVA 917, FRCB 57, SBNY 22.
 - **Securities per estimated period** -- members, in the panel, in the regression -- **and the
   members kept out, by why:**
   - not in the panel;
@@ -816,30 +881,29 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 
 ## What is next
 
-1. **Jeff's rulings on midoffice18** (its retro, "Decisions left for Jeff"):
-   - **The factor covariance:** D16 as it stands, by the rule -- the country basis as tested is
-     out on the first half's criterion.
-   - **Before the factor side is settled (17 ruling 3):** one more pass (my choice) -- the
-     country basis on a two-block regime multiplier, the country's variance by its own lambda and
-     the other 25 basis factors' by theirs, judged by the same rule against D16. The stored
-     arrays say it fixes the market direction in both halves (rank 1 1.033 and 0.988) and keeps
-     the shape (0.076 and 0.063); the optimiser, the test, needs the run. It is the market
-     direction's own multiplier that 17 ruling 2 put after the country factor. Or settle the
-     factor side now, as ruling 3 has it.
-   - **The next piece after that:** the largest members' specific risk (ruling 3's order).
-2. **Next, as I would order it:** the two-block pass (one run, its option a few lines in the
-   country path); then the largest members' specific risk, forecast too low at every setting (the
-   top quintile 1.028 under the defaults), in the specific risk model, by size -- and at the other
-   end the optimiser's specific part, over-forecast (0.87 to 0.91 by eigen-split), which may be the
-   same shrinkage seen from the low-risk names.
+1. **Jeff's rulings on midoffice19** (its retro, "Decisions left for Jeff"):
+   - **The factor covariance:** D19's, by the rule -- the two blocks out on the optimiser's test
+     (the unconstrained portfolio 9.88% a year against 9.83%), C18's multiplier out on the first
+     half's criterion; so the factor side is settled (17 ruling 3, 18 ruling 5).
+   - **The scheme, ruling 3 as built:** Agriculture into SIC28 by CTVA's business, or into the
+     Manufacturing division, which the model's returns put nearest on midoffice18's fit (27.9% against
+     28.2% before the test, 24.4% against 26.9% in it); VYLR's code, beyond the three the ruling named; the two
+     other copies of the unseeded batch (item 3).
+   - **The next piece:** the largest members' specific risk (18 ruling 5).
+2. **Next, as I would order it:** the largest members' specific risk, forecast too low at every
+   setting (the top quintile 1.028 under the defaults, D19 too), in the specific risk model, by
+   size -- and at the other end the optimiser's specific part, over-forecast (0.83 to 0.89 by
+   eigen-split in C19's judge), which may be the same shrinkage seen from the low-risk names. The
+   optimiser's statistics now read over-forecast in the calm half (0.801 and 0.846) with the
+   index's (0.783): the calm half's level, which the two blocks fixed and the rule did not take.
 3. **The bias statistics are standing,** at one day and the model's horizon, the optimiser's
-   realised volatility beside its statistic: every later candidate is one `--bias --bias-horizons
-   ...` run against D16 (`--bias-eigen-scales` for a covariance-side scale,
-   `--bias-regime-half-lives` for the regime adjustment's, `--bias-correlation-half-lives`,
+   realised volatility beside its statistic and, since 19, its holdings: every later candidate is
+   one `--bias --bias-horizons ...` run against D19 (`--bias-eigen-scales` for a covariance-side
+   scale, `--bias-regime-half-lives` for the regime adjustment's, `--bias-correlation-half-lives`,
    `--bias-volatility-half-lives` and `--bias-country` for the covariance's), one at a time
-   through a runner like midoffice18's (`claude/scratch/midoffice18/runner.py`, which runs plain
-   runs too), and judged against D16 by a script written before the run
-   (`claude/scratch/midoffice17/judge.py`).
+   through a runner like midoffice19's (`claude/scratch/midoffice19/runner.py`), and judged
+   against D19 by a script written before the run (`claude/scratch/midoffice19/judge.py`,
+   midoffice17's with ruling 2's bar).
 
 **Open, not queued:**
 
@@ -847,8 +911,14 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 - VLVR runs the market model a second time;
 - the span-plus-look-back cut;
 - `tests/test_market_data.py`'s missing `../core_repo/src`;
-- an intermittent failure in the suite: once in two runs at midoffice18's final checks, not named
-  (the checks kept only pytest's last two lines); the rerun passed 2,377 (18);
+- the unseeded batches in two more places, the pattern item 3 of 19 fixed in
+  `surface._compute_single_point`: `surface._compute_multi_point` and
+  `monte_carlo.generate_adf_critical_values` seed only their first batch, so a seeded call draws
+  the rest from the operating system's entropy; not on a failing test's path, so left (19);
+- `src/praxis/stats/surface.py`'s five ruff findings at HEAD (two F821 `CriticalValues`, an F841,
+  two more), none in the lines 19 changed (19);
+- DISCA and DISCK have no SIC code: index members only before the first estimated period, in no
+  regression and with no forecast, so left without one (19);
 - six ruff findings at HEAD in files no mid-office piece has touched since --
   `characteristics.py` (an E501, an unused `Sequence`), `exposure_basis.py` (an unused
   `Mapping`, two N806 `T`), `timeseries.py` (an unused `Sequence`); checked in 11
@@ -878,10 +948,9 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 - the two-half-life recombination forecasts the country constraint's direction, sum_i c_i f_i',
   nil in every period, a volatility of 0.64% a year at the median, carried by every portfolio near
   the market's industry mix: small and spurious (18);
-- CTVA, FRCB and SBNY ("Other Industries", below the floor of five) have no industry exposure, so
-  no exposure to the country as the industries' sum; USE4's literal country, every member
-  exposed, would be a slightly different fit where they are in the regression (996 member-periods)
-  (18);
+- the calm half's level: with every member on the market the optimiser reads over-forecast there
+  with the index (0.801, 0.846 and 0.783 under D19); the two blocks fixed it (0.896, 0.919 and
+  0.938) and failed the optimiser's test on the unconstrained portfolio's first half (19);
 - the index's whole-test statistic under the factor side, 0.934, below its band: the calm half's
   shape, not a cost of the adjustment (15 ruling 1); its forecast moves four times as much from
   day to day as the unadjusted model's (15);
