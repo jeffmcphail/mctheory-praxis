@@ -1,8 +1,8 @@
 # Mid-office state
 
-**Updated:** 2026-11-13, at the end of midoffice19 (midoffice18's rulings; every member on the
-market, the default; the market's own multiplier measured -- out by the rule on the optimiser's
-test, so the factor side is settled; the intermittent test's missing seed found and fixed).
+**Updated:** 2026-11-18, at the end of midoffice20 (midoffice19's rulings; v1 frozen and written
+up; the model store built and checked, v1 and v1-blocks; three sample books and the first risk
+report; the other two unseeded batches seeded; Jeff's mid-piece rulings on its four decisions).
 Brought up to date at the end of every piece, in the same commit as its retro (Rule 43). Not a
 history: the state a new session needs to carry on. The detail is in the retros named below.
 
@@ -11,7 +11,7 @@ history: the state a new session needs to carry on. The detail is in the retros 
 ## Start here
 
 1. Read `claude/CLAUDE_CODE_RULES.md` (Rule 43 above all), then this file, then the latest retro:
-   `claude/retros/RETRO_midoffice19_every_member_on_the_market.md`.
+   `claude/retros/RETRO_midoffice20_v1_model_store_risk_report.md`.
 2. **How the work runs.**
    - **The brief.** Each piece, `midofficeNN`, is a brief written in Chat and pasted into the Code
      session. Code transcribes it verbatim to `claude/handoffs/BRIEF_midofficeNN_<slug>.md`; its
@@ -31,8 +31,8 @@ history: the state a new session needs to carry on. The detail is in the retros 
    - Scratch goes to `claude/scratch/midofficeNN/` (gitignored), its outputs copied into the retro.
    - Python is ASCII and keeps the file's line endings (most `.py` here are CRLF in the working
      copy; the `claude/` briefs and retros LF).
-   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q -rf`: 2,384
-     passed and 1 skipped at midoffice19. That file looks for `../core_repo/src`, which isn't on
+   - The suite runs as `python -m pytest tests --ignore=tests/test_market_data.py -q -rf`: @@SUITE@@
+     passed and 1 skipped at midoffice20. That file looks for `../core_repo/src`, which isn't on
      this machine.
 4. **Working notes, from the pieces so far.**
    - A bash heredoc has failed in this harness on some apostrophes (06, 07, 08, 19), though not
@@ -106,6 +106,13 @@ history: the state a new session needs to carry on. The detail is in the retros 
      was wrong (18 ruling 4). The checks now run the suite with `-rf` and keep its last four
      lines. The assertion's text is cut where the test's id fills the line (80 columns in a
      subprocess): read it in-process, as midoffice19's `flaky_probe.py` does.
+   - **Windows will not move a directory while its files are open (20).** The store's build
+     reads its own finished Parquet files for its checks, and the rename into place failed
+     (`PermissionError`, WinError 5) until every reader was closed (`StoredModel.close`). Close
+     a `pyarrow.parquet.ParquetFile` before moving or deleting what it reads.
+   - **A script is tested by loading it by path (20):** `importlib.util.spec_from_file_location`
+     on `scripts/<name>.py`, as `tests/midoffice/test_risk_report.py` does; `scripts/` is not a
+     package.
 
 ---
 
@@ -169,69 +176,44 @@ layer (c92d343 to e859b4e, 2026-11-01).
 - c80a112 (11-13): **midoffice17** -- the plain run's regime history from the full fit; the calm
   half's two levers measured.
 - caca97e (11-13): **midoffice18** -- the country factor as a covariance basis, measured.
-- Next: **midoffice19**. Jeff commits it after caca97e (`git log --oneline -3`).
+- aacd3b2 (11-17): **midoffice19** -- every member on the market; two blocks rejected; surface
+  seed fix.
+- Next: **midoffice20**. Jeff commits it after aacd3b2 (`git log --oneline -3`).
 
-**The current piece: midoffice19, COMPLETE (2026-11-13).**
+**The current piece: midoffice20, COMPLETE (2026-11-17).**
 
-- **midoffice18's rulings:** the factor covariance D16's for now (ruling 1); the two-block pass
-  after ruling 3's fix, with a higher bar -- below the reference's criterion on both halves, after
-  the optimiser's test, its half-life 21 untuned (ruling 2); no member without the market (ruling
-  3, built first); the intermittent failure named in midoffice18's `final_checks.txt`, which the
-  retro and this file had said was not (ruling 4, recorded); next the largest members' specific
-  risk, or the two-block build first if it passes (ruling 5).
-- **Ruling 3, every member on the market** (`refdata/industries.py`'s `build_scheme(joins=)`,
-  `config/sp500_industry_overrides.json`, the run's `--industry-overrides`):
-  - **Codes by override,** each with its evidence, where the records carry none: FRCB and SBNY
-    6022 (state commercial banks, closed by their state regulators in 2023, into SIC60); VYLR 0100
-    (Corteva's seeds, in no regression yet, so no number moves).
-  - **A group below the floor joins its nearest industry:** Agriculture (CTVA) into SIC28, by its
-    business -- crop protection chemicals, SIC 2879, with CF, MOS and FMC -- the model's returns a
-    check (28.2% residual volatility a year in SIC28 before the test, second of 20 to the
-    Manufacturing division's 27.9%, 30.6% in none). Unentered groups, and Unclassified below the
-    floor, stop the run.
-  - **The standing check:** member-days without the market, none under the rulings (996 under
-    `none`, the old scheme, whose model is M18's in every field to the bit).
-- **Item 1, before the fix** (D16's holdings rebuilt from its stored arrays, exactly --
-  exposures to 9.8e-13, every held count): CTVA averaged 10.9% of the long-only minimum-variance
-  portfolio (11.2% and 10.6% by half), its largest holding on 520 of 686 dates, up to 32.8%, and
-  carried 20.8% of its realised variance (21.0% and 20.2%); the unconstrained 10.7% and 19.7%.
-- **Item 1, after it (D19, the new defaults' bias run, 11.7 minutes, the guard on five dates):**
-  - **CTVA leaves the optimiser:** long-only 0.00% on average, held on 38 dates, at most 0.29%,
-    0.02% of the realised variance.
-  - **The optimiser realises less:** long-only 9.62% a year against 10.13% (11.05% and 7.97% by
-    half, against 11.88% and 8.02%); unconstrained 9.83% against 10.19% (11.25% and 8.18%, against
-    11.95% and 8.08%). Its statistics fall below one: long-only 0.990 / 1.109 / 0.855 to 0.900 /
-    0.990 / 0.801, unconstrained 1.033 / 1.163 / 0.886 to 0.951 / 1.047 / 0.846.
-  - **The criterion:** 0.091 / 0.068 / 0.138 against 0.105 / 0.098 / 0.123.
-  - **Little else moves:** the index 0.934 to 0.931, the eigenportfolios within 0.016, four
-    members by 0.01 or more (CTVA; JPM, BAC, WFC), no factor volatility by 1%, lambda_F the same.
-- **Item 2, the market's own multiplier (C19, 9.7 minutes, its model test D19's to the bit):**
-  - **The blocks: out on the optimiser's test** -- the unconstrained portfolio realises 9.88% a
-    year against 9.83% (11.74% against 11.25% in the first half), though the long-only realises
-    less in both halves (9.17%). Their criterion met ruling 2's bar, 0.059 and 0.067 against 0.068
-    and 0.138, but the optimiser's test comes first.
-  - **They fix the level:** rank 1 1.032 and 0.988, the index 1.036 and 0.938, the country factor
-    1.046 and 0.964, the shape 0.079 and 0.064; lambda_C 1.164 and 0.835 by half (0.545 to
-    2.349), lambda_R 1.057 and 1.075, as midoffice18's stored-array reading predicted.
-  - **Their price:** the index's forecast moves 1.62% a day at the median, against 1.00%.
-  - **The country setting** (C18's multiplier): in on the optimiser, out on the first half's
-    criterion (0.078 against 0.068).
-  - **D19 stays:** by 17 ruling 3 and 18 ruling 5 the factor side is settled.
-- **Item 3, the intermittent test:** alone fifty times, 2 failed. An unseeded draw: the surface's
-  `_compute_single_point` seeded only its first batch of random walks; twenty repetitions on seed
-  42 gave twenty sets of values. Fixed, the brief allowing it for a missing seed: every batch
-  seeded from the requirement's seed. After: one set of values, fifty runs alone all passed.
-- **What I would choose:** D19, by the rule; the factor side settled; the largest members'
-  specific risk next.
-- **Waiting on Jeff:** the decisions in the retro.
+- **midoffice19's rulings:** D19 is the model, v1, and the rule stands on the blocks (ruling 1);
+  Agriculture stays in SIC28 (ruling 2); VYLR keeps its code (ruling 3); the two other unseeded
+  batches seeded (ruling 4, built); the model freezes, the largest members' specific risk a known
+  limitation, and "What is next" the risk GUI on Core (ruling 5).
+- **The write-up:** `docs/FACTOR_MODEL_V1.md`, two pages -- what v1 is, how it was validated, the
+  ten things tried and rejected with the number that decided each, seven known limitations --
+  every number cited to its section of the record.
+- **The model store** (`praxis.midoffice.store`, `scripts/build_model_store.py`): v1 and
+  `v1-blocks`, @@DATES@@ dates each (2024-02-08 to 2026-11-03), the model refitted as of each date
+  -- the full fit forecasts specific risk only as of its last -- with the regime multipliers and
+  the factor returns from the full fit. Checks: the last date's refit is the full fit; the guard on
+  its five dates, to the bit; every covariance against D19's and C19's, @@COVEQ@@, to the bit; a
+  date's lookup @@LOOKUP@@ ms.
+- **The books** (`scripts/build_sample_portfolios.py`): INDEX, LOWVOL, MOM40, EQ50, $100m each on
+  every date; LOWVOL equals D19's stored holdings to the bit on @@LOWEQ@@ dates, every one whose
+  universe is the bias test's.
+- **The report** (`scripts/risk_report.py`): through `engine.compute_risk`, about @@SECONDS@@ s,
+  its three checks passing for every book, model and date tried. It prints the index's coverage,
+  and its historical VaR is the factor part's, on the last 252 days.
+- **Jeff's rulings on its four decisions**, given mid-piece (2026-11-18, the brief's "Amended
+  mid-piece"): all four as built, and two additions to the report, the coverage line and the
+  fixed window (settled, below).
+- **Waiting on Jeff:** the commit. No decision is left open.
 
 ---
 
 ## What is settled -- do not reopen
 
 **The retros.** "NN" is `claude/retros/RETRO_midofficeNN_*.md`; "NN ruling k" is Jeff's ruling k
-at the top of the brief for the piece after NN. Pre-series commits have no retro; their detail is
-in `docs/FACTOR_MODEL.md`.
+at the top of the brief for the piece after NN; 20's came mid-piece, and its brief carries them
+("Amended mid-piece"). Pre-series commits have no retro; their detail is in
+`docs/FACTOR_MODEL.md`.
 
 **Membership and the estimation universe**
 
@@ -356,6 +338,27 @@ in `docs/FACTOR_MODEL.md`.
 - **The factor side is settled** (17 ruling 3, 18 ruling 5; 19): the two-half-life covariance,
   correlations 504 and volatilities 90, the regime adjustment's factor side on 21, no eigenvalue
   adjustment, the industry basis -- D19's.
+- **v1 is frozen: D19's model, the run's defaults** (19 ruling 1, built in 20). The rule stands on
+  the two blocks: they fixed the calm half's level and failed the optimiser's test, and the rule
+  was fixed before the run, so a narrow miss is not argued in afterwards. They are the leading
+  candidate for a v2, with their price (`docs/FACTOR_MODEL_V1.md`), and are stored beside v1 as
+  `v1-blocks`. Agriculture stays in SIC28 -- industry by business, as Barra assigns, known at the
+  time; the returns check stays in the record (19 ruling 2). VYLR keeps its code (19 ruling 3).
+  The largest members' specific risk is a known limitation of v1, not the next piece (19 ruling
+  5). `docs/FACTOR_MODEL_V1.md` is v1's two-page write-up; `docs/FACTOR_MODEL.md` stays the full
+  record.
+- **Every seeded batch is seeded** (19 ruling 4, built in 20): `surface._compute_multi_point` and
+  `monte_carlo.generate_adf_critical_values` as midoffice19 fixed `_compute_single_point` -- the
+  first batch by the seed itself, its draws unchanged, each later batch by
+  `SeedSequence([seed, batch])`; `tests/test_seeded_batches.py` shows each repeating on its seed
+  (HEAD's code differs on every one of 50 t-values, `seed_tests_on_head.txt`).
+- **The books and the report** (20 rulings 1-4, mid-piece). The index leaves out its members
+  without a forecast, as the bias test does, and the report prints their share of the members'
+  capitalisation on its date (ruling 1). Historical VaR takes a fixed window, 252 days by
+  default: a year, the Basel minimum, and every forecast date has at least that many behind it,
+  so every date's rests on the same length of history; `--var-days` sets another, the specific
+  part stays out, and the figures are labelled the factor part's (ruling 2). Fractional shares
+  (ruling 3). The store starts at the first forecast date (ruling 4).
 - **A plain run reads the regime adjustment's factor side from the full fit** (16 ruling 4, built
   in 17): `regime.factor_history`, the model's estimator on the full fit's factor returns through
   each day before, behind a guard of five refits spread over the history
@@ -624,6 +627,20 @@ All under `data/`, which is gitignored. Nothing there is overwritten or deleted 
   regression yet). Joins: Agriculture into SIC28 (CTVA's crop protection chemicals, SIC 2879,
   with CF, MOS and FMC; the model's returns a check). Each entry with its evidence; the run lists
   every one it uses.
+- **The model store** (midoffice20): `data/model_store/` -- `v1/` and `v1-blocks/`, @@SIZE@@ MB
+  each, and `portfolios/`. Each model is its manifest (what it is, how and from what it was built
+  -- the git head, the panel's sha256 -- and its checks) and six Parquet tables, one row group a
+  date: `factor_covariance` (model_id, covariance_date), `exposures` (model_id, exposure_date),
+  `specific_risk` (model_id, covariance_date), `factor_returns` (model_id), `multipliers`, and for
+  v1 `bias_reference` (D19's forecasts of the long-only minimum-variance portfolio and the index,
+  the file's sha256 in the manifest). `portfolios/` is `holdings.parquet` (portfolio,
+  holdings_date: INDEX, LOWVOL, MOM40, EQ50) and `dates.parquet` (each date's universe, the
+  members left out and their share of the capitalisation, and `next_day_complete`). Regenerate, about @@MINUTES@@ minutes through a runner:
+  `python scripts/build_model_store.py --model v1 --model v1-blocks --bias-run
+  claude/scratch/midoffice19/bias/D19.npz --blocks-run claude/scratch/midoffice19/bias/C19.npz`,
+  then `python scripts/build_sample_portfolios.py --bias-run claude/scratch/midoffice19/bias/D19.npz`;
+  each refuses to replace what is there without `--overwrite`. Without `--bias-run` v1 keeps no
+  reference and the report's check 3 is not made.
 - **The cache gained** (midoffice14) the raw bars over the window of ten children that never
   joined the index -- ZIMV, EMBC, FTRE, PHIN, KLG, RAL, MRP, VSNT, VGNT, MBGL -- and nine
   reference records on their ex-dates (ZIMV's of 03-01 and 03-02, EMBC's, PHIN's, KLG's, MRP's
@@ -760,11 +777,39 @@ python scripts/run_sp500_model.py data/external/polygon/sp500_daily_2022-01-03_2
 - **The covariance:** the one-day covariance, 826.4 effective observations of 938, the
   correlation window's.
 - **Kept out of the regressions,** member-periods: no weight 93 (224 on `_listed`, before FDXF's
-  and VYLR's counts); an exposure missing 1,182, all Momentum (1,051) -- FDXF and VYLR now have
-  weights and lack a momentum history.
+  and VYLR's counts); an exposure missing 1,182, Momentum the first missing in every one (v1's
+  report, 20) -- FDXF and VYLR now have weights and lack a momentum history.
+- **The noise shares, weighted** (v1's factor table, 20): Wholesale 60.0%, Size Nonlinearity
+  45.6%, SIC20 45.0%, Construction 37.7%, Finance & Real Estate 36.9%, Services 33.4%; equal-
+  weighted 39.2%, 30.8%, 26.5%, 28.8%, 23.9%, 21.4%.
 
 The old panel, `--returns price --specific-history regression`, at midoffice11's defaults:
 0.298076, 451 (422-476), 11.94 / 0.38 / 0.01%.
+
+**The store, the books and the report** (midoffice20; the data above):
+
+```
+python scripts/build_model_store.py --model v1 --model v1-blocks --bias-run ... --blocks-run ...
+python scripts/build_sample_portfolios.py --bias-run claude/scratch/midoffice19/bias/D19.npz
+python scripts/risk_report.py --portfolio LOWVOL --date 2025-06-30 --model v1
+```
+
+- The store's build runs v1's full fit by the run's own code (`run_sp500_model.main`'s
+  `after_fit` hook, which changes nothing else; its report printed first), then refits as of each
+  forecast date; `--first N` is a smoke of the first N dates, into a store of its own (`--out`).
+  It moves a model into place only if its checks pass: the last date's refit is the full fit; the
+  guard on its five dates (the store read back against the model rebuilt from the panel cut at
+  the date); every covariance against the stored bias runs'; a lookup timed.
+- The books: each date's members with a v1 forecast and a positive capitalisation; INDEX
+  cap-weighted, LOWVOL `bias.minimum_variance` on the store's forecast, MOM40 the 40 highest
+  Momentum exposures cap-weighted, EQ50 the 50 largest equally weighted; $100m each in
+  fractional shares at the raw close. Check: LOWVOL against D19's stored holdings, to the bit,
+  on every date whose universe is the bias test's.
+- The report: `--portfolio` LOWVOL, MOM40 or EQ50 against INDEX; `--date` any date (the latest
+  the store holds on or before it, said so) or `latest`; `--model` any model in the store;
+  `--var-days N`, the historical VaR's window, 252 by default (a date with fewer days behind it
+  is refused, exit 2). Its three checks print with it, and it exits 1 if one fails; check 3
+  reads v1's store whatever `--model` is.
 
 **Its standing lines, and what each is there to catch:**
 
@@ -881,29 +926,17 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 
 ## What is next
 
-1. **Jeff's rulings on midoffice19** (its retro, "Decisions left for Jeff"):
-   - **The factor covariance:** D19's, by the rule -- the two blocks out on the optimiser's test
-     (the unconstrained portfolio 9.88% a year against 9.83%), C18's multiplier out on the first
-     half's criterion; so the factor side is settled (17 ruling 3, 18 ruling 5).
-   - **The scheme, ruling 3 as built:** Agriculture into SIC28 by CTVA's business, or into the
-     Manufacturing division, which the model's returns put nearest on midoffice18's fit (27.9% against
-     28.2% before the test, 24.4% against 26.9% in it); VYLR's code, beyond the three the ruling named; the two
-     other copies of the unseeded batch (item 3).
-   - **The next piece:** the largest members' specific risk (18 ruling 5).
-2. **Next, as I would order it:** the largest members' specific risk, forecast too low at every
-   setting (the top quintile 1.028 under the defaults, D19 too), in the specific risk model, by
-   size -- and at the other end the optimiser's specific part, over-forecast (0.83 to 0.89 by
-   eigen-split in C19's judge), which may be the same shrinkage seen from the low-risk names. The
-   optimiser's statistics now read over-forecast in the calm half (0.801 and 0.846) with the
-   index's (0.783): the calm half's level, which the two blocks fixed and the rule did not take.
-3. **The bias statistics are standing,** at one day and the model's horizon, the optimiser's
-   realised volatility beside its statistic and, since 19, its holdings: every later candidate is
-   one `--bias --bias-horizons ...` run against D19 (`--bias-eigen-scales` for a covariance-side
-   scale, `--bias-regime-half-lives` for the regime adjustment's, `--bias-correlation-half-lives`,
-   `--bias-volatility-half-lives` and `--bias-country` for the covariance's), one at a time
-   through a runner like midoffice19's (`claude/scratch/midoffice19/runner.py`), and judged
-   against D19 by a script written before the run (`claude/scratch/midoffice19/judge.py`,
-   midoffice17's with ruling 2's bar).
+1. **The risk GUI on Core, once Core's rework lands** (19 ruling 5): it reads the model store
+   (`data/model_store`, `praxis.midoffice.store`) by the lookup columns Core's DataTables will
+   use -- (model_id, covariance_date), (model_id, exposure_date), model_id -- and measures books
+   through the engine as `scripts/risk_report.py` does. Nothing in the store uses Core yet.
+2. **v1 is frozen.** A model change is a v2: one more build of the store under its own model_id
+   (`scripts/build_model_store.py --model ...`), judged first by the standing bias statistics --
+   one `--bias --bias-horizons ...` run against D19 through a runner like midoffice19's
+   (`claude/scratch/midoffice19/runner.py`), by a script written before the run
+   (`claude/scratch/midoffice19/judge.py`). The two blocks lead (`v1-blocks`); the largest
+   members' specific risk, under-forecast at every setting (the top quintile 1.028), is v1's first
+   known limitation (`docs/FACTOR_MODEL_V1.md`).
 
 **Open, not queued:**
 
@@ -911,12 +944,9 @@ The old panel, `--returns price --specific-history regression`, at midoffice11's
 - VLVR runs the market model a second time;
 - the span-plus-look-back cut;
 - `tests/test_market_data.py`'s missing `../core_repo/src`;
-- the unseeded batches in two more places, the pattern item 3 of 19 fixed in
-  `surface._compute_single_point`: `surface._compute_multi_point` and
-  `monte_carlo.generate_adf_critical_values` seed only their first batch, so a seeded call draws
-  the rest from the operating system's entropy; not on a failing test's path, so left (19);
-- `src/praxis/stats/surface.py`'s five ruff findings at HEAD (two F821 `CriticalValues`, an F841,
-  two more), none in the lines 19 changed (19);
+- ruff findings at HEAD in the two seeded files, none in the lines 19 and 20 changed:
+  `src/praxis/stats/surface.py`'s three (two F821 `CriticalValues`, an F841; 19 counted five) and
+  `src/praxis/stats/monte_carlo.py`'s four (an I001, two F401, an N812) (20);
 - DISCA and DISCK have no SIC code: index members only before the first estimated period, in no
   regression and with no forecast, so left without one (19);
 - six ruff findings at HEAD in files no mid-office piece has touched since --

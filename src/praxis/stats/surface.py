@@ -1675,12 +1675,21 @@ def _compute_multi_point(
         name: [] for name in profile_collector_names
     }
 
-    current_seed = seed
     j = 0
+    batch = 0
 
     while j < n_samples:
-        universe = factory.create(n_obs, n_assets, seed=current_seed)
-        current_seed = None
+        # Every batch seeded from the requirement's seed, as `_compute_single_point` seeds its
+        # own (ruling 4 of midoffice20's brief): the first by the seed itself, so its draws are
+        # unchanged, each later one by a seed derived from it. Only the first was seeded, so a
+        # seeded call drew its later batches from the operating system's entropy and differed
+        # from run to run. An unseeded requirement (None) stays unseeded throughout.
+        if seed is None or batch == 0:
+            batch_seed = seed
+        else:
+            batch_seed = int(np.random.SeedSequence([seed, batch]).generate_state(1)[0])
+        universe = factory.create(n_obs, n_assets, seed=batch_seed)
+        batch += 1
 
         for i in range(universe.shape[1]):
             if j >= n_samples:

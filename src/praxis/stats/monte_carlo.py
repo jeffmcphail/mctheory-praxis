@@ -159,16 +159,25 @@ def generate_adf_critical_values(
 
     t0 = time.monotonic()
     adf_t_values = np.zeros(n_samples)
-    current_seed = seed
     j = 0
+    batch = 0
 
     while j < n_samples:
+        # Every batch seeded from the seed (ruling 4 of midoffice20's brief), as the surface's
+        # `_compute_single_point` seeds its own: the first by the seed itself, so its draws are
+        # unchanged, each later one by a seed derived from it. Only the first was seeded, so a
+        # seeded call drew its later batches from the operating system's entropy and differed
+        # from run to run. An unseeded call (None) stays unseeded throughout.
+        if seed is None or batch == 0:
+            batch_seed = seed
+        else:
+            batch_seed = int(np.random.SeedSequence([seed, batch]).generate_state(1)[0])
         paths = generate_random_walk_universe(
             n_steps=n_obs,
             n_paths=n_assets,
-            seed=current_seed,
+            seed=batch_seed,
         )
-        current_seed = None  # Only seed the first batch
+        batch += 1
 
         for i in range(paths.shape[1]):
             if j >= n_samples:

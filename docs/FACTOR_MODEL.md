@@ -1955,6 +1955,80 @@ second:
 - **So D19 stays,** and by ruling 3 of midoffice17's brief the factor side is settled: the
   largest members' specific risk is next.
 
+## v1, the model store and the risk report
+
+**v1 is frozen** (midoffice20, ruling 1 of its brief): D19's model, the run's defaults. Its
+two-page write-up is `docs/FACTOR_MODEL_V1.md`; this file stays the full record. The largest
+members' specific risk is v1's first known limitation, not the next piece (ruling 5).
+
+**The model store** (`praxis.midoffice.store`, built by `scripts/build_model_store.py`) holds a
+model's forecast as of every date it forecasts. That is the bias test's 686 dates, 2024-02-08 to
+2026-11-02, and the run's own last, 2026-11-03. It is Parquet, under `data/model_store/<model_id>/`,
+one row group a date, keyed by the lookup columns Core's DataTables will read:
+
+- the factor covariance as the engine uses it, (model_id, covariance_date): `RiskForecast`'s
+  through `nearest_psd`, times lambda_F^2 as of the date;
+- the exposures, (model_id, exposure_date), of every security with a forecast (@@ a date);
+- the specific risk, (model_id, covariance_date), annualised;
+- the factor returns, by model_id: the full fit's, daily, for historical VaR;
+- each date's regime multipliers, and, beside v1, D19's own forecasts of the long-only
+  minimum-variance portfolio and the index, for the report's check.
+
+A date's forecast is read in @@ ms at the median.
+
+- **Why the refits.** The full fit forecasts specific risk only as of its last date: its specific
+  risk model is fitted once, on every residual through 2026-11-03. So each date's forecast is the
+  model refitted as of that date (`cross_sectional_models_as_of`, the bias test's refits, 0.4 s
+  each). The regime multipliers come from the full fit's history, as a plain run reads them.
+- **Its checks** (`build_model_store.py`'s; the store moves into place only if they pass):
+  - the last date's refit is the full fit, to the bit;
+  - the guard: on its five dates (2024-02-08, 2024-10-14, 2025-06-23, 2026-02-27, 2026-11-02),
+    the stored covariance, specific risk and exposures equal the model refitted from the panel
+    cut at the date, the scheme held, to the bit;
+  - every date's covariance equals D19's (@@ of 686), and `v1-blocks`' covariance and its two
+    multipliers equal C19's blocks setting's, to the bit.
+- **`v1-blocks`**, the leading candidate for a v2, comes from the same pass: v1's exposures and
+  specific risk, with the blocks' covariance as C19's bias test forms it.
+
+**The sample books** (`scripts/build_sample_portfolios.py`, `data/model_store/portfolios/`). Each
+date's universe is its members with a v1 forecast and a positive capitalisation. From it, four
+$100m books in fractional shares at the raw close:
+
+- INDEX, the universe cap-weighted;
+- LOWVOL, the long-only minimum-variance portfolio from v1's forecast (`bias.minimum_variance`);
+- MOM40, the 40 highest Momentum exposures, cap-weighted;
+- EQ50, the 50 largest, equally weighted.
+
+The bias test leaves out a member with no return the next day, which a book formed at the close
+cannot know. Where no member drops (@@ of 686 dates), the universe is the test's own, and LOWVOL
+equals D19's stored holdings to the bit on every one of those dates.
+
+**The risk report** (`scripts/risk_report.py --portfolio LOWVOL --date 2025-06-30 --model v1`)
+measures a book against the index through the engine's own `compute_risk`, about @@ s a report.
+`AsOf` resolves the four dates against the store's calendars, and a date the store lacks answers
+with the latest before it. Industries and Styles form a `FactorTree`. It prints:
+
+- the index's coverage: its members without a forecast, left out as the bias test leaves them
+  (Jeff's ruling on 20's first decision), and their share of the members' capitalisation on the
+  date, at most @@ and @@ at the median. A member with no capitalisation that day counts at none;
+- total risk, split into factor and specific, and tracking error;
+- the decomposition by factor group, with the largest factors in each;
+- the ten largest position contributions to total risk and to tracking error;
+- one-day VaR and ES at 95% and 99%. The parametric figures are normal, from the covariance. The
+  historical figures apply the book's exposures to the last 252 days' factor returns through the
+  date, so they are the factor part's, printed beside the parametric factor part. The window is
+  fixed (Jeff's ruling on 20's second decision): a year, the Basel minimum, and every forecast
+  date has at least that many behind it, the first exactly 252, so every date's rests on the same
+  length of history. `--var-days` sets another, and a date with fewer days behind it is refused.
+
+It prints its checks too:
+
+1. factor plus specific variance equals w'(X F X' + D)w, from the store's arrays;
+2. the position contributions, and the groups', sum to total risk and to tracking error;
+3. LOWVOL's forecast under v1 equals D19's stored forecast, on the report's date or the nearest
+   test date before it whose universe is the test's. This holds to rounding, not to the bit: the
+   engine sums positions one by one, the bias test by matrix product.
+
 ## Status
 
 Built, 29 tests in `tests/midoffice/test_model.py` and 28 in `test_covariance.py`:

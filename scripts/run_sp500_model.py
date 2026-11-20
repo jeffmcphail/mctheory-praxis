@@ -645,6 +645,25 @@ class ModelInputs:
     indices: CharacteristicPanel
 
 
+@dataclasses.dataclass(frozen=True)
+class FittedRun:
+    """What a run fitted and what it fitted it from, handed to `main`'s `after_fit` hook once the
+    report is printed (midoffice20): the model store's build reads v1 from the run itself, so it
+    cannot drift from what the run fits. The bias test's guard rebuilds the inputs from `panel`,
+    `market` and `membership` cut at a date with `codes`, `merges` and the scheme held."""
+
+    args: argparse.Namespace
+    panel: SecurityPanel
+    market: np.ndarray
+    membership: np.ndarray | None
+    extras: dict
+    codes: dict | None
+    merges: dict
+    inputs: ModelInputs
+    model: object
+    options: dict
+
+
 def parse_merges(specs: list[str]) -> dict[str, str]:
     """--merge-industry's A=B pairs."""
     merges: dict[str, str] = {}
@@ -2319,7 +2338,9 @@ def _save_bias(path, run, caps, horizon, eigen_runs=None, simulated=None, regime
     print(f"  every forecast and outcome written to {path}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, after_fit=None) -> int:
+    """The run. `after_fit`, given, is called with the `FittedRun` once the report is printed
+    (midoffice20): how another script reads the model a run fits; the run itself is unchanged."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("panel", nargs="?", default=DEFAULT_PANEL,
                         help="the .npz written by build_sp500_securities.py, on securities (by "
@@ -3358,6 +3379,10 @@ def main(argv: list[str] | None = None) -> int:
                      horizon)
     elif args.regime_factor_half_life is not None or args.regime_specific_half_life is not None:
         regime_section(args, panel, membership, inputs, model, options)
+    if after_fit is not None:
+        after_fit(FittedRun(args=args, panel=panel, market=market, membership=membership,
+                            extras=extras, codes=codes, merges=merges, inputs=inputs, model=model,
+                            options=options))
     return 0
 
 
