@@ -19,9 +19,10 @@ history: the state a new session needs to carry on. The detail is in the retros 
    - **The retro.** The piece ends with a full retro, `claude/retros/RETRO_midofficeNN_<slug>.md`,
      whose last item is the exact `git add`. The terminal gets a short summary and the retro's
      path, then Code stops.
-   - **The commit.** Jeff commits with Chat's message; Code never commits or pushes. The next
-     brief opens with "committed" (check it in `git log`) and Jeff's rulings on the decisions the
-     last retro left. This file travels in the retro's own commit (08 ruling 4).
+   - **The commit.** Jeff commits with Chat's message; Code never commits. Pushing: `CLAUDE.md`,
+     "Pushing to GitHub". The next brief opens with "committed" (check it in `git log`) and
+     Jeff's rulings on the decisions the last retro left. This file travels in the retro's own
+     commit (08 ruling 4).
 3. **The discipline every brief restates.**
    - Changes go in the order given, each measured against the one before.
    - A gate means stop and report before building anything.
